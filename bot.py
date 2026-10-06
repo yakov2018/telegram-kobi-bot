@@ -146,13 +146,11 @@ def parse_order_text(text: str):
     found_cities = []
     price = None
 
-    # זיהוי ערים בשתי השורות הראשונות
     for line in lines[:2]:
         for alias, full_name in CITY_ALIASES.items():
             if alias in line and full_name not in found_cities:
                 found_cities.append(full_name)
 
-    # זיהוי מחיר (מספרים עגולים מ-30 ומעלה)
     for line in lines[:3]:
         import re
         numbers = re.findall(r'\b\d+\b', line)
@@ -304,11 +302,10 @@ async def handle_all_messages(message: Message, state: FSMContext):
 
     current_state = await state.get_state()
 
-    # מצבי רישום
     if current_state == RegistrationStates.waiting_name.state:
         await state.update_data(name=text)
         await state.set_state(RegistrationStates.waiting_phone)
-        phone_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📱 שיתוף מספר טלפון", request_contact=True), KeyboardButton(text="⬅️️ חזרה לתפריט הראשי")]], resize_keyboard=True)
+        phone_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📱 שיתוף מספר טלפון", request_contact=True), KeyboardButton(text="⬅ חזרה לתפריט הראשי")]], resize_keyboard=True)
         await message.answer("תודה! כעת לחץ על הכפתור למטה כדי לשתף את מספר הטלפון שלך:", reply_markup=phone_kb)
         return
 
@@ -350,7 +347,6 @@ async def handle_all_messages(message: Message, state: FSMContext):
                             await process_lead_request_safe(message, user_id, pending_lead, "לא צוין זמן")
         return
 
-    # מענה לזמן הגעה מקריאה
     if current_state == BotStates.waiting_driver_time.state:
         data = await state.get_data()
         lead_id = data.get('active_lead_id')
@@ -361,7 +357,6 @@ async def handle_all_messages(message: Message, state: FSMContext):
             await process_lead_request_safe(message, user_id, lead_id, driver_time)
         return
 
-    # קליטת מחיר ידני אם לא זוהה אוטומטית
     if current_state == BotStates.waiting_manual_price.state:
         data = await state.get_data()
         lead_id = data.get('lead_id')
@@ -377,7 +372,6 @@ async def handle_all_messages(message: Message, state: FSMContext):
             await message.answer("⚠️ נא להזין סכום מספרי תקין (או לחץ ביטול):")
         return
 
-    # סטטוס פנוי / תפוס עם איפוס מלא
     if text == "🟢 פנוי לקריאות":
         await state.set_state(BotStates.waiting_add_city)
         kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ חזרה לתפריט הראשי")]], resize_keyboard=True)
@@ -430,11 +424,10 @@ async def handle_all_messages(message: Message, state: FSMContext):
         await message.answer(f"✅ סטטוס שונה ל**פנוי**!\n📍 אזור: {city_name} | 📏 רדיוס: {radius_val} ק\"מ", reply_markup=get_main_keyboard(user_id, role_val, 'free'))
         return
 
-    # אזורים ורדיוס
     if text == "⚙️ הגדרת אזורים ורדיוס":
         kb = ReplyKeyboardMarkup(keyboard=[
             [KeyboardButton(text="➕ הוסף עיר נוספת"), KeyboardButton(text="🗑️ מחק את כל הערים (איפס הכל)")],
-            [KeyboardButton(text="⬅️️ חזרה לתפריט הראשי")]
+            [KeyboardButton(text="⬅️ חזרה לתפריט הראשי")]
         ], resize_keyboard=True)
         await message.answer("⚙️ ניהול אזורים וערים:\nבחר את הפעולה הרצויה:", reply_markup=kb)
         return
@@ -451,7 +444,6 @@ async def handle_all_messages(message: Message, state: FSMContext):
         await message.answer("🗑️ כל אזורי הפעילות שלך נמחקו והסטטוס שלך אופס לתפוס מלא.", reply_markup=get_main_keyboard(user_id, role_val, 'busy'))
         return
 
-    # כפתור חיובים לשליחים
     if text == "💳 חיובים":
         async with aiosqlite.connect(DB_FILE) as db:
             async with db.execute("SELECT d.amount, d.order_text, d.publisher_name, d.publisher_username, d.date, s.station_name FROM driver_debts d LEFT JOIN stations s ON d.station_id = s.station_id WHERE d.user_id = ?", (user_id,)) as cur:
@@ -477,7 +469,6 @@ async def handle_all_messages(message: Message, state: FSMContext):
         await message.answer(text_rep, reply_markup=get_main_keyboard(user_id, role_val, current_status))
         return
 
-    # פרופיל ומנוי
     if text == "💎 מצב מנוי ופרופיל":
         u_data = await get_user(user_id)
         u_name = u_data[0] if u_data else "לא ידוע"
@@ -507,7 +498,6 @@ async def handle_all_messages(message: Message, state: FSMContext):
         )
         return
 
-    # אודות ויצירת קשר
     if text == "ℹ️ אודות ויצירת קשר":
         kb = ReplyKeyboardMarkup(keyboard=[
             [KeyboardButton(text="ℹ️ אודות המערכת"), KeyboardButton(text="📞 יצירת קשר")],
@@ -524,14 +514,12 @@ async def handle_all_messages(message: Message, state: FSMContext):
         await message.answer("📞 **יצירת קשר עם ההנהלה:**\nלפניות ותמיכה פנה למנהל המערכת.", reply_markup=get_main_keyboard(user_id, role_val, current_status))
         return
 
-    # פאנל מנהל
     if text in ["🛠️ פאנל מנהל", "פאנל מנהל"] and is_admin:
         await message.answer("🛠️ פאנל ניהול ראשי:", reply_markup=get_admin_keyboard())
         return
 
     if text == "👥 ניהול משתמשים" and is_admin:
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔍 חפש/נהל משתמש לפי ID", callback_data="admin_search_user")],
             [InlineKeyboardButton(text="📋 רשימת כל המשתמשים", callback_data="admin_list_users")],
             [InlineKeyboardButton(text="⬅️ חזרה לפאנל מנהל", callback_data="admin_back_main")]
         ])
@@ -551,7 +539,7 @@ async def handle_all_messages(message: Message, state: FSMContext):
 
     if text == "📢 שידור הודעה לכולם" and is_admin:
         await state.set_state(BotStates.waiting_broadcast_all)
-        await message.answer("📢 **שידור הודעה לכל משתמשים במערכת:**\nשלח כעת את טקסט ההודעה שתרצה לשדר:", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️️ חזרה לתפריט הראשי")]], resize_keyboard=True))
+        await message.answer("📢 **שידור הודעה לכל משתמשים במערכת:**\nשלח כעת את טקסט ההודעה שתרצה לשדר:", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ חזרה לתפריט הראשי")]], resize_keyboard=True))
         return
 
     if current_state == BotStates.waiting_broadcast_all.state and is_admin:
@@ -569,7 +557,6 @@ async def handle_all_messages(message: Message, state: FSMContext):
         await message.answer(f"✅ השידור נשלח בהצלחה ל-{success_count} משתמשים!", reply_markup=get_admin_keyboard())
         return
 
-    # ניהול תחנות וקבוצות (מנהל מערכת)
     if text == "🏢 ניהול תחנות וקבוצות" and is_admin:
         async with aiosqlite.connect(DB_FILE) as db:
             async with db.execute("SELECT station_id, station_name, commission_percent FROM stations") as cur:
@@ -592,7 +579,6 @@ async def handle_all_messages(message: Message, state: FSMContext):
         await show_bot_groups_menu(message)
         return
 
-    # פרסום הודעה (סדרנים ומנהלים בלבד)
     if text == "📢 פרסום הודעה":
         is_advertiser = is_admin or (role_val in ['advertiser', 'station_manager', 'dispatcher'])
         if not is_advertiser:
@@ -673,7 +659,7 @@ async def cb_admin_list_users(callback: CallbackQuery):
     txt = "👥 **רשימת משתמשים אחרונים:**\n\n"
     buttons = []
     for uid, name, role, blocked in users:
-        b_icon = "❌ חסום" ? blocked else " פעיל"
+        b_icon = "❌ חסום" if blocked else "🟢 פעיל"
         txt += f"• {name} (`{uid}`) | {role} | {b_icon}\n"
         buttons.append([InlineKeyboardButton(text=f"⚙️ ניהול: {name[:10]} ({uid})", callback_data=f"manage_user_{uid}")])
     buttons.append([InlineKeyboardButton(text="⬅️ חזרה", callback_data="admin_back_main")])
@@ -691,7 +677,7 @@ async def cb_manage_user(callback: CallbackQuery):
     name, phone, _, _, _, role, st_id, radius, cities, trips, rating, count, blocked = u_data
     b_text = "🔓 בטל חסימה" if blocked else "❌ חסום משתמש"
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🛡️ שנה תפקיד/הבדר הרשאה", callback_data=f"setrole_{uid}")],
+        [InlineKeyboardButton(text="🛡️ שנה תפקיד/הרשאה", callback_data=f"setrole_{uid}")],
         [InlineKeyboardButton(text=b_text, callback_data=f"toggle_block_{uid}")],
         [InlineKeyboardButton(text="⬅️ חזרה", callback_data="admin_list_users")]
     ])
@@ -739,7 +725,6 @@ async def cb_changerole(callback: CallbackQuery):
     await callback.answer("ההרשאה עודכנה בהצלחה!")
     await cb_manage_user(callback)
 
-# ניהול תחנות
 @dp.callback_query(F.data == "add_new_station")
 async def cb_add_station(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
@@ -758,7 +743,7 @@ async def cb_add_station(callback: CallbackQuery):
     ]
     for s_id, s_name, s_comm in stations:
         st_text += f"• {s_name} | עמלה: {s_comm}%\n"
-        st_buttons.append([InlineKeyboardButton(text=f"⚙️️ ערוך תחנה: {s_name}", callback_data=f"edit_station_{s_id}")])
+        st_buttons.append([InlineKeyboardButton(text=f"⚙️ ערוך תחנה: {s_name}", callback_data=f"edit_station_{s_id}")])
     await callback.message.edit_text(st_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=st_buttons))
 
 @dp.callback_query(F.data.startswith("edit_station_"))
@@ -864,7 +849,6 @@ async def destination_chosen(callback: CallbackQuery, state: FSMContext):
 
     await state.clear()
 
-    # אם לא זוהה מחיר אוטומטית - שאל את הסדרן אם להקליד ידנית
     if not price:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✍️ כן, הקלד מחיר ידנית", callback_data=f"ask_price_{lead_id}")],
@@ -920,7 +904,6 @@ async def finish_publishing_lead(message_or_cb, lead_id: int, action="both"):
     sent_users = 0
     sent_groups = 0
 
-    # שליחה למשתמשים הפרטיים אך ורק אם הם פנויים באותה עיר מוצא ובטווח הרדיוס
     if action in ["users", "both"]:
         async with aiosqlite.connect(DB_FILE) as db:
             async with db.execute("SELECT user_id, cities, radius FROM users WHERE status = 'free'") as cursor:
@@ -943,7 +926,6 @@ async def finish_publishing_lead(message_or_cb, lead_id: int, action="both"):
                 except:
                     pass
 
-    # שליחה לקבוצות הפעילות שהבוט מחובר אליהן
     if action in ["groups", "both"]:
         async with aiosqlite.connect(DB_FILE) as db:
             async with db.execute("SELECT group_id FROM bot_groups WHERE is_active = 1") as cursor:
@@ -984,7 +966,7 @@ async def process_lead_request_safe(message_or_callback, requester_id: int, lead
         f"🔔 **התקבלה בקשה לקריאה #{lead_id}**\n\n"
         f"📍 מסלול: {route_cities if route_cities else 'לא זוהה'}\n"
         f"💰 מחיר: ₪{price if price > 0 else 'לא צוין'}\n"
-        f"⏱️️ זמן: {driver_time}\n"
+        f"⏱ זמן: {driver_time}\n"
         f"📝 **הודעה:** {message_text[:50]}...\n\n"
         f"👤 **פרטי המבקש ומוניטין:**\n"
         f"• שם: {req_name}\n"
@@ -1038,7 +1020,6 @@ async def cb_edit_lead(callback: CallbackQuery, state: FSMContext):
     await state.update_data(editing_lead_id=lead_id)
     await callback.message.answer("✏️ שלח את הנוסח המעודכן לקריאה:")
 
-# סגירת קריאה, חיוב עמלה אוטומטי, ודירוג כוכבים
 @dp.callback_query(F.data.startswith("app_close_"))
 async def app_close_callback(callback: CallbackQuery):
     parts = callback.data.split("_")
