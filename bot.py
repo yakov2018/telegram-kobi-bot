@@ -133,7 +133,7 @@ init_db()
 
 # שני הלקוחות נשמרים במלואם כפי שהיו:
 client = TelegramClient(StringSession(string_session), api_id, api_hash)
-bot_client = TelegramClient('bot_session', api_id, api_hash)
+bot_client = TelegramClient(None, api_id, api_hash)
 
 def parse_order_text(text: str):
     lines = text.strip().split('\n')
