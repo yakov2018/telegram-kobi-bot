@@ -199,7 +199,7 @@ def get_main_keyboard(user_id, role='user', current_status='busy'):
     else:
         kb.append([KeyboardButton(text="💎 מצב מנוי ופרופיל")])
 
-    kb.append([KeyboardButton(text="ℹ️️ אודות ויצירת קשר")])
+    kb.append([KeyboardButton(text="ℹ אודות ויצירת קשר")])
     
     if is_admin:
         kb.append([KeyboardButton(text="🛠️ פאנל מנהל")])
@@ -229,9 +229,8 @@ async def bot_chat_member_handler(event: ChatMemberUpdated):
 async def cmd_start(message: Message, state: FSMContext):
     user_id = message.from_user.id
     
-    # בדיקת חובה לשם משתמש (Username) בטלגרם
     if not message.from_user.username:
-        await message.answer("⚠️ **שגיאה: אין לך שם משתמש (Username) בטלגרם!**\nחובה להגדיר שם משתמש בהגדרות הפרופיל שלך בטלגרם, ולאחר מכן לחץ שוב על /start.")
+        await message.answer("⚠️️ **שגיאה: אין לך שם משתמש (Username) בטלגרם!**\nחובה להגדיר שם משתמש בהגדרות הפרופיל שלך בטלגרם, ולאחר מכן לחץ שוב על /start.")
         return
 
     user = await get_user(user_id)
@@ -244,7 +243,6 @@ async def cmd_start(message: Message, state: FSMContext):
         await message.answer("❌ חשבונך חסום במערכת.")
         return
 
-    # יצירת מנהל מערכת אוטומטית לשנינו
     if is_admin and not user:
         async with aiosqlite.connect(DB_FILE) as db:
             expiry = (datetime.now() + timedelta(days=365)).strftime('%Y-%m-%d %H:%M:%S')
@@ -284,7 +282,6 @@ async def cmd_start(message: Message, state: FSMContext):
                             await process_lead_request_safe(message, user_id, lead_id, "לא צוין זמן")
         return
 
-    # אם המשתמש לא רשום - מתחילים רישום 4 שלבים
     if not user:
         await state.set_state(RegistrationStates.waiting_fullname)
         await message.answer("👋 שלום וברוכים הבאים לבוט השילוח והניהול! 🚀\n\nכדי להתחיל להשתמש במערכת, עליך לעבור רישום קצר.\nשלב 1 מתוך 4: אנא שלח את **השם המלא** שלך (פרטי ומשפחה):")
@@ -314,7 +311,6 @@ async def handle_all_messages(message: Message, state: FSMContext):
 
     current_state = await state.get_state()
 
-    # --- תהליך רישום 4 שלבים ---
     if current_state == RegistrationStates.waiting_fullname.state:
         await state.update_data(reg_fullname=text)
         await state.set_state(RegistrationStates.waiting_phone)
@@ -333,7 +329,6 @@ async def handle_all_messages(message: Message, state: FSMContext):
         await state.update_data(reg_birthyear=text)
         await state.set_state(RegistrationStates.waiting_car_make)
         
-        # יצירת מקלדת יצרני רכב
         car_buttons = [[KeyboardButton(text=make)] for make in CAR_MAKES]
         car_buttons.append([KeyboardButton(text="⬅️ חזרה לתפריט הראשי")])
         car_kb = ReplyKeyboardMarkup(keyboard=car_buttons, resize_keyboard=True)
@@ -404,7 +399,6 @@ async def handle_all_messages(message: Message, state: FSMContext):
                             await process_lead_request_safe(message, user_id, pending_lead, "לא צוין זמן")
         return
 
-    # --- פקודות טקסט חופשיות לסטטוס "פנוי" (למשל: "פנוי ירושלים", "פ ירושלים", "פ א ירושלים") ---
     if text.startswith("פנוי ") or text.startswith("פ ") or text.startswith("פא ") or text.startswith("פ א "):
         city_input = text.replace("פנוי", "").replace("פ א", "").replace("פא", "").replace("פ", "").strip()
         if city_input:
@@ -414,7 +408,6 @@ async def handle_all_messages(message: Message, state: FSMContext):
             await message.answer(f"🟢 סטטוס שונה ל**פנוי**!\n📍 אזור פעילות: {city_input}", reply_markup=get_main_keyboard(user_id, role_val, 'free'))
             return
 
-    # מענה לזמן הגעה מקריאה
     if current_state == BotStates.waiting_driver_time.state:
         data = await state.get_data()
         lead_id = data.get('active_lead_id')
@@ -494,7 +487,7 @@ async def handle_all_messages(message: Message, state: FSMContext):
 
     if text == "⚙️ הגדרת אזורים ורדיוס":
         kb = ReplyKeyboardMarkup(keyboard=[
-            [KeyboardButton(text="➕ הוסף עיר נוספת"), KeyboardButton(text="🗑️️ מחק את כל הערים (איפס הכל)")],
+            [KeyboardButton(text="➕ הוסף עיר נוספת"), KeyboardButton(text="🗑 מחק את כל הערים (איפס הכל)")],
             [KeyboardButton(text="⬅️ חזרה לתפריט הראשי")]
         ], resize_keyboard=True)
         await message.answer("⚙️ ניהול אזורים וערים:\nבחר את הפעולה הרצויה:", reply_markup=kb)
@@ -512,7 +505,6 @@ async def handle_all_messages(message: Message, state: FSMContext):
         await message.answer("🗑️ כל אזורי הפעילות שלך נמחקו והסטטוס שלך אופס לתפוס מלא.", reply_markup=get_main_keyboard(user_id, role_val, 'busy'))
         return
 
-    # --- מצב קריאות (כולל הצגת סטטוס, סדרן, וכפתורי שליטה מלאים) ---
     if text == "📋 מצב קריאות":
         is_advertiser = is_admin or (role_val in ['advertiser', 'station_manager', 'dispatcher'])
         if not is_advertiser:
@@ -574,7 +566,6 @@ async def handle_all_messages(message: Message, state: FSMContext):
         await message.answer(text_rep, reply_markup=get_main_keyboard(user_id, role_val, current_status))
         return
 
-    # --- מצב מנוי ופרופיל (עם הצגה מדויקת של שם העיר) ---
     if text == "💎 מצב מנוי ופרופיל":
         u_data = await get_user(user_id)
         u_name = u_data[0] if u_data else "לא ידוע"
@@ -611,12 +602,12 @@ async def handle_all_messages(message: Message, state: FSMContext):
         )
         return
 
-    if text == "ℹ️ אודות ויצירת קשר":
+    if text == "ℹ️️ אודות ויצירת קשר":
         kb = ReplyKeyboardMarkup(keyboard=[
             [KeyboardButton(text="ℹ️ אודות המערכת"), KeyboardButton(text="📞 יצירת קשר")],
             [KeyboardButton(text="⬅️ חזרה לתפריט הראשי")]
         ], resize_keyboard=True)
-        await message.answer("ℹ️️ **אודות ויצירת קשר:**\nבחר את האפשרות הרצויה:", reply_markup=kb)
+        await message.answer("ℹ **אודות ויצירת קשר:**\nבחר את האפשרות הרצויה:", reply_markup=kb)
         return
 
     if text == "ℹ️ אודות המערכת":
@@ -652,7 +643,7 @@ async def handle_all_messages(message: Message, state: FSMContext):
 
     if text == "📢 שידור הודעה לכולם" and is_admin:
         await state.set_state(BotStates.waiting_broadcast_all)
-        await message.answer("📢 **שידור הודעה לכל משתמשים במערכת:**\nשלח כעת את טקסט ההודעה שתרצה לשדר:", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️️ חזרה לתפריט הראשי")]], resize_keyboard=True))
+        await message.answer("📢 **שידור הודעה לכל משתמשים במערכת:**\nשלח כעת את טקסט ההודעה שתרצה לשדר:", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅ חזרה לתפריט הראשי")]], resize_keyboard=True))
         return
 
     if current_state == BotStates.waiting_broadcast_all.state and is_admin:
@@ -723,10 +714,9 @@ async def handle_all_messages(message: Message, state: FSMContext):
         text_content = data.get('lead_text')
         cities, price, has_time = parse_order_text(text_content)
 
-        # בדיקת חובה לזיהוי עיר מוצא
         if not cities:
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✍️ תקן את הודעת הקריאה", callback_data="retry_edit_lead")],
+                [InlineKeyboardButton(text="✍️️ תקן את הודעת הקריאה", callback_data="retry_edit_lead")],
                 [InlineKeyboardButton(text="🚀 המשך בכל זאת ללא מוצא", callback_data="force_publish_lead")],
                 [InlineKeyboardButton(text="❌ ביטול", callback_data="dest_cancel")]
             ])
@@ -855,7 +845,7 @@ async def cb_setrole(callback: CallbackQuery):
         [InlineKeyboardButton(text="📢 סדרן", callback_data=f"changerole_{uid}_dispatcher")],
         [InlineKeyboardButton(text="🏢 מנהל תחנה", callback_data=f"changerole_{uid}_station_manager")],
         [InlineKeyboardButton(text="🛠️ מנהל מערכת", callback_data=f"changerole_{uid}_admin")],
-        [InlineKeyboardButton(text="⬅️ חזרה", callback_data=f"manage_user_{uid}")]
+        [InlineKeyboardButton(text="⬅️️ חזרה", callback_data=f"manage_user_{uid}")]
     ])
     await callback.message.edit_text("🛡️ בחר הרשאה חדשה למשתמש:", reply_markup=kb)
 
@@ -895,7 +885,7 @@ async def cb_edit_station(callback: CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💰 עמלה 10%", callback_data=f"setcomm_{st_id}_10"), InlineKeyboardButton(text="💰 עמלה 15%", callback_data=f"setcomm_{st_id}_15"), InlineKeyboardButton(text="💰 עמלה 20%", callback_data=f"setcomm_{st_id}_20")],
         [InlineKeyboardButton(text="🗑️ מחק תחנה", callback_data=f"del_station_{st_id}")],
-        [InlineKeyboardButton(text="⬅️️ חזרה", callback_data="back_to_stations")]
+        [InlineKeyboardButton(text="⬅ חזרה", callback_data="back_to_stations")]
     ])
     await callback.message.edit_text(f"⚙️ **הגדרות תחנה: {st_name}**\nעמלה נוכחית: {st_comm}%\n\nבחר עמלה:", reply_markup=kb)
 
@@ -953,7 +943,6 @@ async def toggle_group_cb(callback: CallbackQuery):
             await callback.answer("סטטוס קבוצה עודכן בהצלחה!")
             await show_bot_groups_menu(callback)
 
-# --- שליטה על קריאות ממצב קריאות (סגירה, פתיחה, מחיקה) ---
 @dp.callback_query(F.data.startswith("lead_action_"))
 async def cb_lead_action(callback: CallbackQuery):
     parts = callback.data.split("_")
@@ -1030,7 +1019,6 @@ async def cb_pub_noprice(callback: CallbackQuery):
     await callback.message.edit_text(f"✅ קריאה #{lead_id} מפורסמת ללא מחיר.")
     await finish_publishing_lead(callback.message, lead_id, "both")
 
-# --- פרסום קריאה עם מד התקדמות (Progress Bar) דינמי ---
 async def finish_publishing_lead(message_or_cb, lead_id: int, action="both"):
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute('SELECT publisher_id, message_text, phone_number, price, route_cities, station_id FROM leads WHERE lead_id = ?', (lead_id,)) as cur:
@@ -1059,7 +1047,6 @@ async def finish_publishing_lead(message_or_cb, lead_id: int, action="both"):
         f"🏢 תחנה: {station_name} | סדרן: {pub_fullname}"
     )
 
-    # הודעת מד התקדמות ראשונית
     progress_msg = await bot.send_message(publisher_id, "⏳ **מפרסם קריאה לקבוצות ולשליחים...**\n[░░░░░░░░░░] 0%")
 
     sent_users = 0
@@ -1095,8 +1082,6 @@ async def finish_publishing_lead(message_or_cb, lead_id: int, action="both"):
     total_targets = len(target_users) + len(target_groups)
     current_sent = 0
 
-
-
     await progress_msg.edit_text("⏳ **מעדכן קבוצות ושליחים...**\n[████░░░░░░] 40%")
 
     for f_uid in target_users:
@@ -1117,7 +1102,6 @@ async def finish_publishing_lead(message_or_cb, lead_id: int, action="both"):
         except:
             pass
 
-    # סיום מד התקדמות 100%
     await progress_msg.edit_text("✅ **הפרסום הושלם בהצלחה!**\n[██████████] 100%")
 
     pub_user_full = await get_user(publisher_id)
@@ -1285,6 +1269,8 @@ async def rate_driver_callback(callback: CallbackQuery):
 async def main():
     await init_db()
     await start_web_server()
+    # מחיקה וניקוי מוחלט של ה-Webhook החיצוני התקוע משרתי טלגרם
+    await bot.delete_webhook(drop_pending_updates=True)
     print("✨ בוט השילוח והניהול פועל בהצלחה עם שרת Web פנימי!")
     await dp.start_polling(bot)
 
