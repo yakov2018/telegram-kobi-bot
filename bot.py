@@ -9,9 +9,6 @@ from telethon.tl.custom import Button
 api_id = int(os.environ.get("API_ID", "36364878"))
 api_hash = os.environ.get("API_HASH", "c9d51bb77653adefd4e5092581145cb3")
 bot_token = os.environ.get("BOT_TOKEN", "8954258047:AAGTBHGEPOe9MTfQkvB4_gVGlY6nA1v9KPo")
-from telethon.sessions import StringSession
-string_session = os.environ.get("STRING_SESSION")
-client = TelegramClient(StringSession(string_session), api_id, api_hash)
 
 ADMIN_IDS = [8644923212, 552821474]
 DB_FILE = 'bot_database_v2.db'
@@ -131,8 +128,7 @@ def init_db():
 
 init_db()
 
-# שני הלקוחות נשמרים במלואם כפי שהיו:
-client = TelegramClient(StringSession(string_session), api_id, api_hash)
+# הבוט מוגדר בצורה נקייה בעזרת הטוקן שלו בלבד
 bot_client = TelegramClient('bot_session', api_id, api_hash)
 
 def parse_order_text(text: str):
@@ -354,7 +350,7 @@ def get_main_keyboard(is_admin=False, is_advertiser=False, current_status='busy'
         
     kb.append([Button.text(status_btn_text, resize=True), Button.text("⚙️ הגדרת אזורים ורדיוס", resize=True)])
     kb.append([Button.text("🔍 ניטור קבוצות ומילים", resize=True), Button.text("💎 מצב מנוי ופרופיל", resize=True)])
-    kb.append([Button.text("ℹ️ אודות ויצירת קשר", resize=True)])
+    kb.append([Button.text("ℹ️️ אודות ויצירת קשר", resize=True)])
     
     if is_admin:
         kb.append([Button.text("🛠️ פאנל מנהל", resize=True)])
@@ -502,7 +498,7 @@ async def bot_listener(event):
             conn.close()
             await event.respond(f"✅ אחוז העמלה לתחנה עודכן בהצלחה ל-**{new_comm}%**!", buttons=get_admin_keyboard())
         except:
-            await event.respond("⚠️ נא להזין מספר אחוזי עמלה תקין (למשל: 10):", buttons=get_admin_keyboard())
+            await event.respond("⚠️️ נא להזין מספר אחוזי עמלה תקין (למשל: 10):", buttons=get_admin_keyboard())
         return
 
     if is_admin and current_state == 'waiting_broadcast_message_all':
@@ -557,7 +553,7 @@ async def bot_listener(event):
             await event.respond(f"✅ המשתמש הוגדר בהצלחה כמנהל תחנה!", buttons=get_admin_keyboard())
         else:
             conn.close()
-            await event.respond("⚠️️ לא נמצא משתמש רשום במערכת עם הנתון הזה.", buttons=get_admin_keyboard())
+            await event.respond("⚠ לא נמצא משתמש רשום במערכת עם הנתון הזה.", buttons=get_admin_keyboard())
         return
 
     if current_state and current_state.startswith('waiting_driver_time_'):
@@ -661,7 +657,7 @@ async def bot_listener(event):
 
         buttons = [
             [Button.inline("✅ אישור ופרסם", confirm_cb), Button.inline("✏️ ערוך מחיר", edit_price_cb)],
-            [Button.inline("✏️️ ערוך טקסט", edit_text_cb), Button.inline("✏️ ערוך טלפון", edit_phone_cb)],
+            [Button.inline("✏ ערוך טקסט", edit_text_cb), Button.inline("✏️ ערוך טלפון", edit_phone_cb)],
             [Button.inline("❌ ביטול", b"cancel_bot_flow")]
         ]
         await event.respond(preview_text, buttons=buttons)
@@ -928,7 +924,6 @@ async def bot_listener(event):
     if text == "📢 פרסום הודעה" and is_advertiser:
         buttons = [
             [Button.inline("🤖 פרסום פנימי בבוט", b"pub_mode_bot")],
-            [Button.inline("🌐 פרסום בקבוצות", b"pub_mode_groups")],
             [Button.inline("❌ ביטול וחזרה", b"cancel_bot_flow")]
         ]
         await event.respond("📢 בחר היכן תרצה לפרסם את הקריאה:", buttons=buttons)
@@ -992,22 +987,11 @@ async def bot_listener(event):
         cursor = conn.cursor()
         cursor.execute("SELECT station_id, station_name, commission_percent FROM stations")
         stations = cursor.fetchall()
-        
-        cursor.execute("SELECT group_id, group_identifier FROM allowed_groups")
-        groups = cursor.fetchall()
         conn.close()
         
         st_text = "🏢 **ניהול תחנות וקבוצות פרסום מורשות:**\n\n"
-        st_text += "📍 **קבוצות פרסום מוגדרות:**\n"
-        if not groups:
-            st_text += "• אין קבוצות מוגדרות עדיין.\n"
-        else:
-            for g_id, g_name in groups:
-                st_text += f"• `{g_name}` (מזהה: {g_id})\n"
-                
         st_text += "\n🏢 **תחנות שילוח:**\n"
         st_buttons = [
-            [Button.inline("➕ הוסף קבוצת פרסום", b"add_allowed_group"), Button.inline("🗑️ הסר קבוצה", b"remove_allowed_group")],
             [Button.inline("➕ הוסף תחנה חדשה", b"add_new_station")],
             [Button.inline("🏢 הוסף מנהל לתחנה", b"add_station_manager")],
             [Button.inline("📊 סטטיסטיקות תחנות", b"station_stats")]
@@ -1203,16 +1187,10 @@ async def callback_handler(event):
         cursor = conn.cursor()
         cursor.execute("SELECT station_id, station_name, commission_percent FROM stations")
         stations = cursor.fetchall()
-        cursor.execute("SELECT group_id, group_identifier FROM allowed_groups")
-        groups = cursor.fetchall()
         conn.close()
         
-        st_text = "🏢 **ניהול תחנות וקבוצות פרסום מורשות:**\n\n"
-        for g_id, g_name in groups:
-            st_text += f"• קבוצה: `{g_name}`\n"
-            
+        st_text = "🏢 **ניהול תחנות שילוח:**\n\n"
         st_buttons = [
-            [Button.inline("➕ הוסף קבוצת פרסום", b"add_allowed_group"), Button.inline("🗑️ הסר קבוצה", b"remove_allowed_group")],
             [Button.inline("➕ הוסף תחנה חדשה", b"add_new_station")],
             [Button.inline("🏢 הוסף מנהל לתחנה", b"add_station_manager")],
             [Button.inline("📊 סטטיסטיקות תחנות", b"station_stats")]
@@ -1222,38 +1200,6 @@ async def callback_handler(event):
             
         st_buttons.append([Button.inline("↩️ חזרה לפאנל מנהל", b"back_to_admin_cb")])
         await event.edit(st_text, buttons=st_buttons)
-        return
-
-    elif data == "add_allowed_group":
-        user_states[user_id] = {'state': 'waiting_new_allowed_group'}
-        cancel_btn = [[Button.inline("❌ ביטול וחזרה", b"cancel_bot_flow")]]
-        await event.edit("➕ **הוספת קבוצת פרסום מורשית:**\nשלח כעת את מזהה הקבוצה, ה-Username (למשל `@group_name`) או הקישור שלה:", buttons=cancel_btn)
-        return
-
-    elif data == "remove_allowed_group":
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT group_id, group_identifier FROM allowed_groups")
-        groups = cursor.fetchall()
-        conn.close()
-        
-        if not groups:
-            await event.edit("⚠️ אין קבוצות מוגדרות להסרה.")
-            return
-            
-        g_buttons = [[Button.inline(f"🗑️ הסר את {g_ident}", f"del_group_{g_id}".encode('utf-8'))] for g_id, g_ident in groups]
-        g_buttons.append([Button.inline("↩️ ביטול", b"cancel_bot_flow")])
-        await event.edit("🗑️ **בחר את הקבוצה שתרצה להסיר מרשימת הפרסום:**", buttons=g_buttons)
-        return
-
-    elif data.startswith("del_group_"):
-        g_id = int(data.replace("del_group_", ""))
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM allowed_groups WHERE group_id = ?", (g_id,))
-        conn.commit()
-        conn.close()
-        await event.edit("✅ הקבוצה הוסרה בהצלחה מרשימת הפרסום!")
         return
 
     elif data == "add_new_station":
@@ -1284,7 +1230,7 @@ async def callback_handler(event):
         t_data = get_user(target_uid)
         if t_data:
             card_text = (
-                f"⚙️️ **כרטיסיית ניהול משתמש:**\n\n"
+                f"⚙ **כרטיסיית ניהול משתמש:**\n\n"
                 f"👤 שם: {t_data[0]}\n"
                 f"📱 טלפון: {t_data[1]}\n"
                 f"🛡️ תפקיד נוכחי: `{t_data[5]}`\n"
@@ -1343,88 +1289,10 @@ async def callback_handler(event):
         await event.edit("📞 שלח כעת את **מספר הטלפון החדש של הלקוח**:", buttons=cancel_btn)
         return
 
-    elif data == "edit_group_price":
-        user_states[user_id] = {'state': 'editing_group_lead_price'}
-        cancel_btn = [[Button.inline("❌ ביטול", b"cancel_bot_flow")]]
-        await event.edit("💰 שלח כעת את **המחיר החדש** (מספר בלבד):", buttons=cancel_btn)
-        return
-
-    elif data == "edit_group_text":
-        user_states[user_id] = {'state': 'editing_group_lead_text'}
-        cancel_btn = [[Button.inline("❌ ביטול", b"cancel_bot_flow")]]
-        await event.edit("✏️ שלח כעת את **הטקסט החדש** לקבוצות:", buttons=cancel_btn)
-        return
-
-    elif data == "edit_group_phone":
-        user_states[user_id] = {'state': 'editing_group_lead_phone'}
-        cancel_btn = [[Button.inline("❌ ביטול", b"cancel_bot_flow")]]
-        await event.edit("📞 שלח כעת את **מספר הטלפון החדש של הלקוח** לקבוצות:", buttons=cancel_btn)
-        return
-
     if data == "pub_mode_bot":
         user_states[user_id] = {'pub_mode': 'bot', 'state': 'waiting_bot_lead_text'}
         cancel_btn = [[Button.inline("❌ ביטול וחזרה", b"cancel_bot_flow")]]
         await event.edit("🤖 פרסום פנימי בבוט:\nשלח כעת את טקסט הקריאה (מסלול ומחיר):", buttons=cancel_btn)
-        return
-
-    elif data == "pub_mode_groups":
-        user_states[user_id] = {'pub_mode': 'groups', 'state': 'waiting_group_lead_text'}
-        cancel_btn = [[Button.inline("❌ ביטול וחזרה", b"cancel_bot_flow")]]
-        await event.edit("🌐 פרסום בקבוצות המורשות:\nשלח כעת את תוכן ההודעה לפרסום:", buttons=cancel_btn)
-        return
-
-    elif data == "confirm_group_lead":
-        msg_data = group_broadcast_data.get(user_id, {})
-        text_content = msg_data.get('text', '')
-        phone_content = msg_data.get('phone', '')
-        
-        pub_user_data = get_user(user_id)
-        st_id = pub_user_data[6] if pub_user_data and len(pub_user_data) > 6 else None
-        
-        lead_id, lead_cities, lead_price, has_time = save_lead(user_id, text_content, phone_content, station_id=st_id)
-        user_states.pop(user_id, None)
-        
-        me = await bot_client.get_me()
-        bot_username = me.username
-        lead_link = f"https://t.me/{bot_username}?start=lead_{lead_id}"
-        
-        pub_fullname = pub_user_data[0] if pub_user_data and pub_user_data[0] else "סדרן"
-        
-        station_name = "כללי"
-        if st_id:
-            conn = sqlite3.connect(DB_FILE)
-            cursor = conn.cursor()
-            cursor.execute("SELECT station_name FROM stations WHERE station_id = ?", (st_id,))
-            st_row = cursor.fetchone()
-            if st_row:
-                station_name = st_row[0]
-            conn.close()
-
-        group_post_text = (
-            f"🚀 **קריאת שילוח חדשה! (#{lead_id})**\n\n"
-            f"{text_content}\n\n"
-            f"🏢 תחנה: {station_name} | סדרן: {pub_fullname}\n\n"
-            f"👉 [👉 בקש את הקריאה לחץ כאן 👈]({lead_link})"
-        )
-        
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("SELECT group_identifier FROM allowed_groups")
-        allowed_groups = cursor.fetchall()
-        conn.close()
-
-        published_count = 0
-        for (g_ident,) in allowed_groups:
-            try:
-                await client.send_message(g_ident, group_post_text, parse_mode='markdown')
-                published_count += 1
-            except Exception as e:
-                print(f"Error sending to group {g_ident}: {e}")
-
-        await event.edit(
-            f"✅ **קריאה #{lead_id} נוצרה והופצה אוטומטית ל-{published_count} קבוצות מורשות עם קישור מוטמע ישירות בהודעה!**\n\n"
-            f"🔗 קישור ישיר לבוט: `{lead_link}`"
-        )
         return
 
     elif data == "confirm_bot_lead":
@@ -1635,7 +1503,7 @@ async def callback_handler(event):
                 buttons=follow_up_buttons
             )
         except Exception as e:
-            await event.edit(f"⚠️️ שגיאה: {e}")
+            await event.edit(f"⚠ שגיאה: {e}")
         return
 
     elif data.startswith("reject_lead_"):
@@ -1672,8 +1540,6 @@ async def process_lead_request_final(event, requester_id, lead_id, driver_time):
     
     req_radius = requester_user[7] if requester_user else 5
     req_cities = requester_user[8] if requester_user else ""
-    req_silver = requester_user[9] if requester_user and len(requester_user) > 9 else 0
-    req_gold = requester_user[10] if requester_user and len(requester_user) > 10 else 0
     req_rating = requester_user[10] if requester_user and len(requester_user) > 10 else 0.0
 
     alert_to_publisher = (
@@ -1710,19 +1576,13 @@ async def process_lead_request_final(event, requester_id, lead_id, driver_time):
         else:
             await event.edit("⚠️ שגיאה בשליחת הבקשה למפרסם.")
 
-# החלק הסופי המתוקן שמאפשר לשניהם לרוץ ביחד בלי קריסות של חלון קלט בענן:
+# הרצת הבוט לבדו בצורה נקייה ויציבה בענן
 async def main():
     print("✨ בוט השילוח והניהול פועל בהצלחה!")
-    # מפעילים את שתי הלקוחות יחד (הלקוח האישי לסריקה והבוט לניהול)
-    await client.start()
     await bot_client.start(bot_token=bot_token)
-    print("🤖 שני הלקוחות מחוברים ופעילים בענן!")
+    print("🤖 הבוט מחובר ופועל בענן!")
     
-    # ממתינים ששניהם ירוצו יחד ברקע
-    await asyncio.gather(
-        client.run_until_disconnected(),
-        bot_client.run_until_disconnected()
-    )
+    await bot_client.run_until_disconnected()
 
 if __name__ == '__main__':
     asyncio.run(main())
