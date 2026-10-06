@@ -130,7 +130,7 @@ def init_db():
 init_db()
 
 # יצירת הלקוח של הבוט בצורה נקייה וישירה (ללא צורך בפרטי API אישיים)
-bot_client = TelegramClient('bot_session', api_id=None, api_hash=None)
+bot_client = TelegramClient('bot_session', api_id, api_hash)
 
 def parse_order_text(text: str):
     lines = text.strip().split('\n')
