@@ -7,7 +7,7 @@ from telethon import TelegramClient, events
 from telethon.tl.custom import Button
 
 # מגדירים אך ורק את טוקן הבוט שהתקבל מ-BotFather
-api_id = 123456
+api_id = 2040
 api_hash = "123456789abcdef123456789abcdef"
 bot_token = os.environ.get("BOT_TOKEN", "8954258047:AAGTBHGEPOe9MTfQkvB4_gVGlY6nA1v9KPo")
 
