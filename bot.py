@@ -1093,7 +1093,8 @@ async def finish_publishing_lead(message_or_cb, lead_id: int, action="both"):
             target_groups.append(g_id)
 
     total_targets = len(target_users) + len(target_groups)
-    current_sent = 
+    current_sent = 0
+
 
 
     await progress_msg.edit_text("⏳ **מעדכן קבוצות ושליחים...**\n[████░░░░░░] 40%")
