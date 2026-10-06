@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timedelta
 import aiosqlite
 
-from aiogram import Bot, Dispatcher, F, Router
+from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, ChatMemberUpdated
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -12,10 +12,8 @@ from aiogram.filters import Command
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
-# הפעלת לוגים בסיסית
 logging.basicConfig(level=logging.INFO)
 
-# הגדרת טוקן הבוט בלבד - ללא שום תלות בחשבון אישי או מזהي API
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8954258047:AAGTBHGEPOe9MTfQkvB4_gVGlY6nA1v9KPo")
 ADMIN_IDS = [8644923212, 552821474]
 DB_FILE = 'bot_database_v3.db'
@@ -23,7 +21,6 @@ DB_FILE = 'bot_database_v3.db'
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
 dp = Dispatcher()
 
-# מצבי מכונת מצבים (FSM) לניהול רישום ותהליכים
 class RegistrationStates(StatesGroup):
     waiting_name = State()
     waiting_phone = State()
@@ -32,7 +29,7 @@ class RegistrationStates(StatesGroup):
 class BotStates(StatesGroup):
     waiting_add_city = State()
     waiting_new_radius = State()
-    waiting_broadcast = State()
+    waiting_broadcast_all = State()
     waiting_station_name = State()
     waiting_station_commission = State()
     waiting_station_manager = State()
@@ -46,6 +43,8 @@ class BotStates(StatesGroup):
     waiting_driver_time = State()
     editing_station_name = State()
     editing_station_comm = State()
+    selecting_role = State()
+    selecting_expiry = State()
 
 CITY_ALIASES = {
     "ים": "ירושלים",
@@ -240,7 +239,7 @@ async def cmd_start(message: Message, state: FSMContext):
                     if lead and lead[0] == 'active':
                         await state.update_data(active_lead_id=lead_id)
                         await state.set_state(BotStates.waiting_driver_time)
-                        await message.answer("⏱️️ **קריאה זו נקלטה!**\nאנא שלח כעת את **הזמן** שלך בכתובת (למשל: 15 דקות):")
+                        await message.answer("⏱️ **קריאה זו נקלטה!**\nאנא שלח כעת את **הזמן** שלך בכתובת (למשל: 15 דקות):")
         return
 
     if not user:
@@ -251,73 +250,294 @@ async def cmd_start(message: Message, state: FSMContext):
         await message.answer("👋 שלום וברוכים הבאים לבוט הניהול והשילוח המתקדם! 🚀\n\nכדי להתחיל, אנא שלח את **השם המלא** שלך:")
         return
 
+    if message.text in ["/start", "תפריט", "⬅️ חזרה לתפריט הראשי", "⬅ חזרה לתפריט הראשי"]:
+        await state.clear()
+        await message.answer("🎛️ **תפריט ראשי:** בחר אפשרות מהמקלדת למטה:", reply_markup=get_main_keyboard(is_admin, is_advertiser, current_status))
+        return
+
     await message.answer("🎛️ **תפריט ראשי:** בחר אפשרות מהמקלדת למטה:", reply_markup=get_main_keyboard(is_admin, is_advertiser, current_status))
 
-@dp.message(RegistrationStates.waiting_name)
-async def reg_name(message: Message, state: FSMContext):
-    await state.update_data(name=message.text)
-    await state.set_state(RegistrationStates.waiting_phone)
-    phone_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📱 שיתוף מספר טלפון", request_contact=True)]], resize_keyboard=True)
-    await message.answer("תודה! כעת לחץ על הכפתור למטה כדי לשתף את מספר הטלפון שלך:", reply_markup=phone_kb)
-
-@dp.message(RegistrationStates.waiting_phone)
-async def reg_phone(message: Message, state: FSMContext):
-    phone = message.contact.phone_number if message.contact else message.text
-    await state.update_data(phone=phone)
-    await state.set_state(RegistrationStates.waiting_birth)
-    await message.answer("מעולה! דבר אחרון: מהו **תאריך הלידה** שלך? (למשל: 15/05/1995):", reply_markup=None)
-
-@dp.message(RegistrationStates.waiting_birth)
-async def reg_birth(message: Message, state: FSMContext):
-    data = await state.get_data()
+# ניהול הודעות טקסט רגילות ומקלדות
+@dp.message()
+async def handle_all_messages(message: Message, state: FSMContext):
     user_id = message.from_user.id
+    text = message.text.strip() if message.text else ""
+    user = await get_user(user_id)
     is_admin = (user_id in ADMIN_IDS)
-    role = 'admin' if is_admin else 'user'
-    expiry = (datetime.now() + timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
+    role_val = user[5] if user else 'user'
+    is_advertiser = is_admin or (role_val in ['admin', 'advertiser', 'station_manager', 'dispatcher'])
+    current_status = user[3] if user else 'busy'
+    current_state = await state.get_state()
 
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute('''
-            INSERT OR REPLACE INTO users (user_id, full_name, phone, birth_date, status, expiry_date, role, radius, cities, total_trips, rating, rating_count)
-            VALUES (?, ?, ?, ?, 'busy', ?, ?, 5, '', 0, 0.0, 0)
-        ''', (user_id, data['name'], data['phone'], message.text, expiry, role))
-        await db.commit()
+    if text in ["/start", "תפריט", "⬅️ חזרה לתפריט הראשי", "⬅ חזרה לתפריט הראשי"]:
+        await state.clear()
+        await message.answer("🎛️ **תפריט ראשי:**", reply_markup=get_main_keyboard(is_admin, is_advertiser, current_status))
+        return
 
-    pending_lead = data.get('pending_lead')
-    await state.clear()
+    # מצבי רישום
+    if current_state == RegistrationStates.waiting_name.state:
+        await state.update_data(name=text)
+        await state.set_state(RegistrationStates.waiting_phone)
+        phone_kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📱 שיתוף מספר טלפון", request_contact=True)]], resize_keyboard=True)
+        await message.answer("תודה! כעת לחץ על הכפתור למטה כדי לשתף את מספר הטלפון שלך:", reply_markup=phone_kb)
+        return
 
-    await message.answer("✅ **הרישום הושלם בהצלחה!**", reply_markup=get_main_keyboard(is_admin, is_admin or role == 'advertiser', 'busy'))
+    if current_state == RegistrationStates.waiting_phone.state:
+        phone = message.contact.phone_number if message.contact else text
+        await state.update_data(phone=phone)
+        await state.set_state(RegistrationStates.waiting_birth)
+        await message.answer("מעולה! דבר אחרון: מהו **תאריך הלידה** שלך? (למשל: 15/05/1995):", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ חזרה לתפריט הראשי")]], resize_keyboard=True))
+        return
 
-    if pending_lead:
+    if current_state == RegistrationStates.waiting_birth.state:
+        data = await state.get_data()
+        role = 'admin' if is_admin else 'user'
+        expiry = (datetime.now() + timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
+
         async with aiosqlite.connect(DB_FILE) as db:
-            async with db.execute('SELECT status FROM leads WHERE lead_id = ?', (pending_lead,)) as cursor:
-                lead = await cursor.fetchone()
-                if lead and lead[0] == 'active':
-                    await state.update_data(active_lead_id=pending_lead)
-                    await state.set_state(BotStates.waiting_driver_time)
-                    await message.answer("⏱️ **קריאה זו נקלטה!**\nאנא שלח כעת את **הזמן** שלך בכתובת:")
+            await db.execute('''
+                INSERT OR REPLACE INTO users (user_id, full_name, phone, birth_date, status, expiry_date, role, radius, cities, total_trips, rating, rating_count)
+                VALUES (?, ?, ?, ?, 'busy', ?, ?, 5, '', 0, 0.0, 0)
+            ''', (user_id, data['name'], data['phone'], text, expiry, role))
+            await db.commit()
 
-@dp.message(F.text == "⚙️ ניהול קבוצות הבוט")
-async def manage_bot_groups(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
+        pending_lead = data.get('pending_lead')
+        await state.clear()
+        await message.answer("✅ **הרישום הושלם בהצלחה!**", reply_markup=get_main_keyboard(is_admin, is_admin or role == 'advertiser', 'busy'))
+        if pending_lead:
+            async with aiosqlite.connect(DB_FILE) as db:
+                async with db.execute('SELECT status FROM leads WHERE lead_id = ?', (pending_lead,)) as cursor:
+                    lead = await cursor.fetchone()
+                    if lead and lead[0] == 'active':
+                        await state.update_data(active_lead_id=pending_lead)
+                        await state.set_state(BotStates.waiting_driver_time)
+                        await message.answer("⏱️ **קריאה זו נקלטה!**\nאנא שלח כעת את **הזמן** שלך בכתובת:")
         return
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute('SELECT group_id, group_title, is_active FROM bot_groups') as cursor:
-            groups = await cursor.fetchall()
 
-    if not groups:
-        await message.answer("⚠️ הבוט עדיין אינו מחובר לאף קבוצה. הוסף את הבוט לקבוצות טלגרם והפוך אותו למנהל.")
+    # סטטוס פנוי / תפוס
+    if text == "🟢 פנוי לקריאות":
+        await state.set_state(BotStates.waiting_add_city)
+        await message.answer(
+            "🟢 מעבר למצב פנוי לקריאות:\n"
+            "שלח כעת את שם העיר שבה אתה פנוי (למשל: ירושלים, או השתמש בקיצור 'פ א ירושלים').\n"
+            "ניתן להוסיף עד 6 ערים במקביל ע\"י הוספה חוזרת.",
+            reply_markup=get_main_keyboard(is_admin, is_advertiser, current_status)
+        )
         return
 
-    text = "🏢 **ניהול קבוצות מחוברות לבוט:**\nלחץ על קבוצה להפעלה/השבתה:\n\n"
-    buttons = []
-    for g_id, g_title, is_active in groups:
-        status_icon = "🟢 פעילה" if is_active else "🔴 מושבתת"
-        text += f"• {g_title} | {status_icon}\n"
-        btn_text = f"🔴 השבת: {g_title[:15]}" if is_active else f"🟢 הפעל: {g_title[:15]}"
-        buttons.append([InlineKeyboardButton(text=btn_text, callback_data=f"toggle_group_{g_id}")])
+    if text == "🔴 תפוס":
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute('UPDATE users SET status = "busy", cities = "" WHERE user_id = ?', (user_id,))
+            await db.commit()
+        await message.answer("🔴 הסטטוס שלך עודכן לתפוס וכל אזורי הפעילות שלך אופסו במערכת.", reply_markup=get_main_keyboard(is_admin, is_advertiser, 'busy'))
+        return
 
-    await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    if current_state == BotStates.waiting_add_city.state or text.startswith("פ א ") or text.startswith("פא "):
+        city_name = text.replace("פ א ", "").replace("פא ", "").strip() if (text.startswith("פ א ") or text.startswith("פא ")) else text
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute('SELECT cities FROM users WHERE user_id = ?', (user_id,)) as cursor:
+                row = await cursor.fetchone()
+            current_cities_str = row[0] if row and row[0] else ""
+            cities_list = [c.strip() for c in current_cities_str.split(',') if c.strip()]
+            if city_name not in cities_list:
+                cities_list.append(city_name)
+            updated_str = ", ".join(cities_list)
+            await db.execute('UPDATE users SET cities = ?, status = "free" WHERE user_id = ?', (updated_str, user_id))
+            await db.commit()
+        await state.clear()
+        await message.answer(f"✅ זוהה אזור פעילות!\n📍 הערים שלך כעת: {updated_str}", reply_markup=get_main_keyboard(is_admin, is_advertiser, 'free'))
+        return
 
+    # אזורים ורדיוס
+    if text == "⚙️ הגדרת אזורים ורדיוס":
+        kb = ReplyKeyboardMarkup(keyboard=[
+            [KeyboardButton(text="➕ הוסף עיר נוספת"), KeyboardButton(text="🗑️ מחק עיר ספציפית")],
+            [KeyboardButton(text="🗑️ מחק את כל הערים (איפס הכל)"), KeyboardButton(text="📏 שנה רדיוס קילומטרים")],
+            [KeyboardButton(text="⬅️ חזרה לתפריט הראשי")]
+        ], resize_keyboard=True)
+        await message.answer("⚙️ ניהול אזורים וערים:\nבחר את הפעולה הרצויה:", reply_markup=kb)
+        return
+
+    if text == "➕ הוסף עיר נוספת":
+        await state.set_state(BotStates.waiting_add_city)
+        await message.answer("✍️ שלח כעת את שם העיר הנוספת שתרצה להוסיף לרשימת הפעילות שלך:")
+        return
+
+    if text == "🗑️ מחק את כל הערים (איפס הכל)":
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute('UPDATE users SET status = "busy", cities = "" WHERE user_id = ?', (user_id,))
+            await db.commit()
+        await message.answer("🗑️ כל אזורי הפעילות שלך נמחקו והסטטוס שלך אופס לתפוס מלא.", reply_markup=get_main_keyboard(is_admin, is_advertiser, 'busy'))
+        return
+
+    if text == "📏 שנה רדיוס קילומטרים":
+        await state.set_state(BotStates.waiting_new_radius)
+        await message.answer("📏 שלח כעת את מספר הקילומטרים הרצוי לרדיוס הנסיעה (למשל: 10):")
+        return
+
+    if current_state == BotStates.waiting_new_radius.state:
+        try:
+            new_rad = int(text)
+            async with aiosqlite.connect(DB_FILE) as db:
+                await db.execute('UPDATE users SET radius = ? WHERE user_id = ?', (new_rad, user_id))
+                await db.commit()
+            await state.clear()
+            await message.answer(f"✅ רדיוס הנסיעה שלך עודכן וסונכרן ל-{new_rad} ק\"מ.", reply_markup=get_main_keyboard(is_admin, is_advertiser, current_status))
+        except:
+            await message.answer("⚠️ נא להזין מספר שלם תקין:")
+        return
+
+    # פרופיל ומנוי
+    if text == "💎 מצב מנוי ופרופיל":
+        u_data = await get_user(user_id)
+        u_name = u_data[0] if u_data else "לא ידוע"
+        u_role = u_data[5] if u_data else "user"
+        radius_val = u_data[7] if u_data else 5
+        cities_val = u_data[8] if u_data else ""
+        total_trips = u_data[9] if u_data and len(u_data) > 9 else 0
+        u_rating = u_data[10] if u_data and len(u_data) > 10 else 0.0
+
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute("SELECT amount, is_paid FROM driver_debts WHERE user_id = ?", (user_id,)) as cursor:
+                debts = await cursor.fetchall()
+        total_debt = sum([d[0] for d in debts if not d[1]])
+
+        await message.answer(
+            f"💎 **האזור האישי והפרופיל שלך:**\n\n"
+            f"👤 שם מלא: {u_name}\n"
+            f"🛡️ תפקיד במערכת: **{u_role}**\n"
+            f"📦 סך נסיעות/משלוחים שבוצעו: {total_trips}\n"
+            f"⭐ דירוג ממוצע: {u_rating:.1f} כוכבים\n"
+            f"💳 סך חובות פתוחים לתחנות: ₪{total_debt:.2f}\n\n"
+            f"📍 ערים פעילות: {cities_val if cities_val else 'לא הוגדר'}\n"
+            f"📏 רדיוס: {radius_val} ק\"מ\n"
+            f"🟢 סטטוס: {'פנוי' if current_status == 'free' else 'תפוס'}",
+            reply_markup=get_main_keyboard(is_admin, is_advertiser, current_status)
+        )
+        return
+
+    # אודות ויצירת קשר
+    if text == "ℹ️ אודות ויצירת קשר":
+        kb = ReplyKeyboardMarkup(keyboard=[
+            [KeyboardButton(text="ℹ️ אודות המערכת"), KeyboardButton(text="📞 יצירת קשר")],
+            [KeyboardButton(text="⬅️ חזרה לתפריט הראשי")]
+        ], resize_keyboard=True)
+        await message.answer("ℹ️ **אודות ויצירת קשר:**\nבחר את האפשרות הרצויה:", reply_markup=kb)
+        return
+
+    if text == "ℹ️ אודות המערכת":
+        await message.answer("ℹ️ מערכת שילוח וניהול חכמה בטלגרם לניהול תחנות, סדרנים ושליחים.", reply_markup=get_main_keyboard(is_admin, is_advertiser, current_status))
+        return
+
+    if text == "📞 יצירת קשר":
+        await message.answer("📞 **יצירת קשר עם ההנהלה:**\nלפניות ותמיכה פנה למנהל המערכת.", reply_markup=get_main_keyboard(is_admin, is_advertiser, current_status))
+        return
+
+    # פאנל מנהל וקריאות
+    if text in ["🛠️ פאנל מנהל", "פאנל מנהל"] and is_admin:
+        await message.answer("🛠️ פאנל ניהול ראשי:", reply_markup=get_admin_keyboard())
+        return
+
+    if text == "📊 סטטיסטיקות מערכת" and is_admin:
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute('SELECT COUNT(*) FROM users') as cur:
+                t_users = (await cur.fetchone())[0]
+            async with db.execute('SELECT COUNT(*) FROM leads') as cur:
+                t_leads = (await cur.fetchone())[0]
+            async with db.execute("SELECT COUNT(*) FROM leads WHERE status='closed'") as cur:
+                c_leads = (await cur.fetchone())[0]
+        await message.answer(f"📊 סטטיסטיקות מערכת:\n• סך משתמשים: {t_users}\n• סך קריאות: {t_leads}\n• קריאות סגורות: {c_leads}", reply_markup=get_admin_keyboard())
+        return
+
+    if text == "📢 שידור הודעה לכולם" and is_admin:
+        await state.set_state(BotStates.waiting_broadcast_all)
+        await message.answer("📢 **שידור הודעה לכל משתמשים במערכת:**\nשלח כעת את טקסט ההודעה שתרצה לשדר:", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ חזרה לפאנל מנהל")]], resize_keyboard=True))
+        return
+
+    if current_state == BotStates.waiting_broadcast_all.state and is_admin:
+        await state.clear()
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute("SELECT user_id FROM users") as cur:
+                all_u = await cur.fetchall()
+        success_count = 0
+        for (u_id,) in all_u:
+            try:
+                await bot.send_message(u_id, f"📢 **הודעת מערכת / שידור הנהלה:**\n\n{text}")
+                success_count += 1
+            except:
+                pass
+        await message.answer(f"✅ השידור נשלח בהצלחה ל-{success_count} משתמשים!", reply_markup=get_admin_keyboard())
+        return
+
+    if text == "🏢 ניהול תחנות וקבוצות" and is_admin:
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute("SELECT station_id, station_name, commission_percent FROM stations") as cur:
+                stations = await cur.fetchall()
+        st_text = "🏢 **ניהול תחנות שילוח:**\n\n"
+        st_buttons = [
+            [InlineKeyboardButton(text="➕ הוסף תחנה חדשה", callback_data="add_new_station")],
+            [InlineKeyboardButton(text="📊 סטטיסטיקות תחנות", callback_data="station_stats")]
+        ]
+        if not stations:
+            st_text += "• אין תחנות רשומות."
+        else:
+            for s_id, s_name, s_comm in stations:
+                st_text += f"• {s_name} (עמלה: {s_comm}%)\n"
+                st_buttons.append([InlineKeyboardButton(text=f"⚙️ ע/מ תחנה: {s_name}", callback_data=f"manage_station_{s_id}")])
+        await message.answer(st_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=st_buttons))
+        return
+
+    # ניהול קבוצות הבוט
+    if text == "⚙️ ניהול קבוצות הבוט" and is_admin:
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute('SELECT group_id, group_title, is_active FROM bot_groups') as cursor:
+                groups = await cursor.fetchall()
+        if not groups:
+            await message.answer("⚠️ הבוט עדיין אינו מחובר לאף קבוצה. הוסף את הבוט לקבוצות טלגרם והפוך אותו למנהל.")
+            return
+        g_text = "🏢 **ניהול קבוצות מחוברות לבוט:**\n\n"
+        g_buttons = []
+        for g_id, g_title, is_active in groups:
+            status_icon = "🟢 פעילה" if is_active else "🔴 מושבתת"
+            g_text += f"• {g_title} | {status_icon}\n"
+            btn_txt = f"🔴 השבת: {g_title[:12]}" if is_active else f"🟢 הפעל: {g_title[:12]}"
+            g_buttons.append([InlineKeyboardButton(text=btn_txt, callback_data=f"toggle_group_{g_id}")])
+        await message.answer(g_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=g_buttons))
+        return
+
+    # פרסום הודעה (סדרנים ומנהלים)
+    if text == "📢 פרסום הודעה" and is_advertiser:
+        await state.set_state(BotStates.waiting_lead_text)
+        await message.answer("📢 פרסום קריאה חדשה:\nשלח כעת את **תוכן הקריאה** (מסלול ומחיר):", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ ביטול")]], resize_keyboard=True))
+        return
+
+    if current_state == BotStates.waiting_lead_text.state and is_advertiser:
+        if text == "❌ ביטול":
+            await state.clear()
+            await message.answer("❌ פעולת הפרסום בוטלה.", reply_markup=get_main_keyboard(is_admin, is_advertiser, current_status))
+            return
+        await state.update_data(lead_text=text)
+        await state.set_state(BotStates.waiting_lead_phone)
+        await message.answer("📞 אנא שלח את **מספר הטלפון של הלקוח** שיוצג בקריאה:")
+        return
+
+    if current_state == BotStates.waiting_lead_phone.state and is_advertiser:
+        if text == "❌ ביטול":
+            await state.clear()
+            await message.answer("❌ פעולת הפרסום בוטלה.", reply_markup=get_main_keyboard(is_admin, is_advertiser, current_status))
+            return
+        await state.update_data(lead_phone=text)
+        
+        dest_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👥 למשתמשי הבוט הפרטיים בלבד", callback_data="dest_users")],
+            [InlineKeyboardButton(text="🏢 לקבוצות הבוט בלבד", callback_data="dest_groups")],
+            [InlineKeyboardButton(text="🚀 גם למשתמשים וגם לקבוצות", callback_data="dest_both")],
+            [InlineKeyboardButton(text="❌ ביטול", callback_data="dest_cancel")]
+        ])
+        await message.answer("🎯 **בחר לאן לפרסם את הקריאה:**", reply_markup=dest_kb)
+        return
+
+# קולבק קבוצות בוט
 @dp.callback_query(F.data.startswith("toggle_group_"))
 async def toggle_group_cb(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
@@ -330,7 +550,7 @@ async def toggle_group_cb(callback: CallbackQuery):
             new_status = 0 if row[0] == 1 else 1
             await db.execute('UPDATE bot_groups SET is_active = ? WHERE group_id = ?', (new_status, g_id))
             await db.commit()
-            await callback.answer(f"סטטוס קבוצה עודכן בהצלחה!")
+            await callback.answer("סטטוס קבוצה עודכן בהצלחה!")
             async with db.execute('SELECT group_id, group_title, is_active FROM bot_groups') as cursor:
                 groups = await cursor.fetchall()
             text = "🏢 **ניהול קבוצות מחוברות לבוט:**\n\n"
@@ -338,47 +558,11 @@ async def toggle_group_cb(callback: CallbackQuery):
             for gid, gtitle, iactive in groups:
                 s_icon = "🟢 פעילה" if iactive else "🔴 מושבתת"
                 text += f"• {gtitle} | {s_icon}\n"
-                b_txt = f"🔴 השבת: {gtitle[:15]}" if iactive else f"🟢 הפעל: {gtitle[:15]}"
+                b_txt = f"🔴 השבת: {gtitle[:12]}" if iactive else f"🟢 הפעל: {gtitle[:12]}"
                 buttons.append([InlineKeyboardButton(text=b_txt, callback_data=f"toggle_group_{gid}")])
             await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
-@dp.message(F.text == "📢 פרסום הודעה")
-async def broadcast_prompt(message: Message, state: FSMContext):
-    user = await get_user(message.from_user.id)
-    if not user or user[5] not in ['admin', 'advertiser', 'station_manager', 'dispatcher']:
-        await message.answer("⚠️ אין לך הרשאה לפרסם קריאות.")
-        return
-    await state.set_state(BotStates.waiting_lead_text)
-    await message.answer("📢 פרסום קריאה חדשה:\nשלח כעת את **תוכן הקריאה** (מסלול ומחיר):", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ ביטול")]], resize_keyboard=True))
-
-@dp.message(BotStates.waiting_lead_text)
-async def receive_lead_text(message: Message, state: FSMContext):
-    if message.text == "❌ ביטול":
-        await state.clear()
-        user = await get_user(message.from_user.id)
-        await message.answer("❌ פעולת הפרסום בוטלה.", reply_markup=get_main_keyboard(message.from_user.id in ADMIN_IDS, True, user[3] if user else 'busy'))
-        return
-    await state.update_data(lead_text=message.text)
-    await state.set_state(BotStates.waiting_lead_phone)
-    await message.answer("📞 אנא שלח את **מספר הטלפון של הלקוח** שיוצג בקריאה:")
-
-@dp.message(BotStates.waiting_lead_phone)
-async def receive_lead_phone(message: Message, state: FSMContext):
-    if message.text == "❌ ביטול":
-        await state.clear()
-        user = await get_user(message.from_user.id)
-        await message.answer("❌ פעולת הפרסום בוטלה.", reply_markup=get_main_keyboard(message.from_user.id in ADMIN_IDS, True, user[3] if user else 'busy'))
-        return
-    await state.update_data(lead_phone=message.text)
-    
-    dest_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👥 למשתמשי הבוט הפרטיים בלבד", callback_data="dest_users")],
-        [InlineKeyboardButton(text="🏢 לקבוצות הבוט בלבד", callback_data="dest_groups")],
-        [InlineKeyboardButton(text="🚀 גם למשתמשים וגם לקבוצות", callback_data="dest_both")],
-        [InlineKeyboardButton(text="❌ ביטול", callback_data="dest_cancel")]
-    ])
-    await message.answer("🎯 **בחר לאן לפרסם את הקריאה:**", reply_markup=dest_kb)
-
+# קולבק בחירת יעדי פרסום
 @dp.callback_query(F.data.startswith("dest_"))
 async def destination_chosen(callback: CallbackQuery, state: FSMContext):
     action = callback.data.replace("dest_", "")
@@ -465,17 +649,17 @@ async def destination_chosen(callback: CallbackQuery, state: FSMContext):
 
     await bot.send_message(user_id, f"📢 הקריאה הופצה בהצלחה ל-{sent_users} שליחים פרטיים ו-{sent_groups} קבוצות ציבוריות!")
 
+# בקשת קריאה
 @dp.callback_query(F.data.startswith("req_lead_"))
 async def request_lead_callback(callback: CallbackQuery, state: FSMContext):
     lead_id = int(callback.data.replace("req_lead_", ""))
     user_id = callback.from_user.id
-    
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute('SELECT publisher_id, message_text, phone_number, status, price, route_cities FROM leads WHERE lead_id = ?', (lead_id,)) as cursor:
             lead = await cursor.fetchone()
 
     if not lead or lead[3] != 'active':
-        await callback.answer("⚠️️ קריאה זו אינה פעילה עוד או סגורה.", show_alert=True)
+        await callback.answer("⚠️ קריאה זו אינה פעילה עוד או סגורה.", show_alert=True)
         return
 
     _, _, _, _, _, has_time = parse_order_text(lead[1])
@@ -542,7 +726,7 @@ async def process_lead_request(message: Message, requester_id: int, lead_id: int
 
 async def main():
     await init_db()
-    print("✨ בוט השילוח והניהול (גרסת aiogram נקייה) פועל בהצלחה!")
+    print("✨ בוט השילוח והניהול (גרסת aiogram המלאה) פועל בהצלחה!")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
