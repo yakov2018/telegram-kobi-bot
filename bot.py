@@ -6,8 +6,7 @@ from datetime import datetime, timedelta
 from telethon import TelegramClient, events
 from telethon.tl.custom import Button
 
-api_id = int(os.environ.get("API_ID", "36364878"))
-api_hash = os.environ.get("API_HASH", "c9d51bb77653adefd4e5092581145cb3")
+# מגדירים אך ורק את טוקן הבוט שהתקבל מ-BotFather
 bot_token = os.environ.get("BOT_TOKEN", "8954258047:AAGTBHGEPOe9MTfQkvB4_gVGlY6nA1v9KPo")
 
 ADMIN_IDS = [8644923212, 552821474]
@@ -128,8 +127,8 @@ def init_db():
 
 init_db()
 
-# הבוט מוגדר בצורה נקייה בעזרת הטוקן שלו בלבד
-bot_client = TelegramClient('bot_session', api_id, api_hash)
+# יצירת הלקוח של הבוט בצורה נקייה וישירה (ללא צורך בפרטי API אישיים)
+bot_client = TelegramClient('bot_session', api_id=None, api_hash=None)
 
 def parse_order_text(text: str):
     lines = text.strip().split('\n')
@@ -350,7 +349,7 @@ def get_main_keyboard(is_admin=False, is_advertiser=False, current_status='busy'
         
     kb.append([Button.text(status_btn_text, resize=True), Button.text("⚙️ הגדרת אזורים ורדיוס", resize=True)])
     kb.append([Button.text("🔍 ניטור קבוצות ומילים", resize=True), Button.text("💎 מצב מנוי ופרופיל", resize=True)])
-    kb.append([Button.text("ℹ️️ אודות ויצירת קשר", resize=True)])
+    kb.append([Button.text("ℹ️ אודות ויצירת קשר", resize=True)])
     
     if is_admin:
         kb.append([Button.text("🛠️ פאנל מנהל", resize=True)])
@@ -498,7 +497,7 @@ async def bot_listener(event):
             conn.close()
             await event.respond(f"✅ אחוז העמלה לתחנה עודכן בהצלחה ל-**{new_comm}%**!", buttons=get_admin_keyboard())
         except:
-            await event.respond("⚠️️ נא להזין מספר אחוזי עמלה תקין (למשל: 10):", buttons=get_admin_keyboard())
+            await event.respond("⚠️ נא להזין מספר אחוזי עמלה תקין (למשל: 10):", buttons=get_admin_keyboard())
         return
 
     if is_admin and current_state == 'waiting_broadcast_message_all':
@@ -520,19 +519,6 @@ async def bot_listener(event):
                 pass
 
         await event.respond(f"✅ השידור נשלח בהצלחה ל-{success_count} משתמשים במערכת!", buttons=get_admin_keyboard())
-        return
-
-    if is_admin and current_state == 'waiting_new_allowed_group':
-        group_input = text.strip()
-        user_states.pop(user_id, None)
-        
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO allowed_groups (group_identifier, group_name) VALUES (?, ?)", (group_input, group_input))
-        conn.commit()
-        conn.close()
-        
-        await event.respond(f"✅ הקבוצה/ערוץ **{group_input}** נוספה בהצלחה לרשימת קבוצות הפרסום המורשות!", buttons=get_admin_keyboard())
         return
 
     if is_admin and current_state and current_state.startswith('waiting_station_manager_'):
@@ -589,13 +575,10 @@ async def bot_listener(event):
         await event.respond("🔍 **ניהול ניטור קבוצות ומילים:**\nבחר את הפעולה הרצויה:", buttons=monitor_buttons)
         return
 
-    if is_advertiser and current_state in ['editing_bot_lead_price', 'editing_group_lead_price']:
+    if is_advertiser and current_state == 'editing_bot_lead_price':
         try:
             new_price = float(text)
-            flow_key = 'group_broadcast_data' if current_state == 'editing_group_lead_price' else 'broadcast_data'
-            target_data = broadcast_data if flow_key == 'broadcast_data' else group_broadcast_data
-            
-            msg_data = target_data.get(user_id, {})
+            msg_data = broadcast_data.get(user_id, {})
             old_text = msg_data.get('text', '')
             
             _, old_price, _ = parse_order_text(old_text)
@@ -604,27 +587,21 @@ async def bot_listener(event):
             else:
                 updated_text = old_text + f"\nמחיר: ₪{int(new_price)}"
                 
-            target_data[user_id]['text'] = updated_text
-            next_state = 'group_lead_preview' if flow_key == 'group_broadcast_data' else 'bot_lead_preview'
-            user_states[user_id]['state'] = next_state
+            broadcast_data[user_id]['text'] = updated_text
+            user_states[user_id]['state'] = 'bot_lead_preview'
             
             cities, price, has_time = parse_order_text(updated_text)
             preview_text = (
-                f"📋 **סיכום קריאה לפרסום ({'קבוצות' if flow_key == 'group_broadcast_data' else 'בוט'} - עודכן):**\n\n"
+                f"📋 **סיכום קריאה לפרסום (בוט - עודכן):**\n\n"
                 f"📝 **תוכן:** {updated_text}\n"
                 f"📞 **טלפון הלקוח:** {msg_data.get('phone', '')}\n"
                 f"📍 **מסלול שזוהה:** {' ➔ '.join(cities) if cities else 'לא זוהה'}\n"
                 f"💰 **מחיר שזוהה:** ₪{price if price else 'לא זוהה'}\n\n"
                 f"האם לאשר ולפרסם כעת?"
             )
-            confirm_cb = b"confirm_group_lead" if flow_key == 'group_broadcast_data' else b"confirm_bot_lead"
-            edit_price_cb = b"edit_group_price" if flow_key == 'group_broadcast_data' else b"edit_bot_price"
-            edit_text_cb = b"edit_group_text" if flow_key == 'group_broadcast_data' else b"edit_bot_text"
-            edit_phone_cb = b"edit_group_phone" if flow_key == 'group_broadcast_data' else b"edit_bot_phone"
-
             buttons = [
-                [Button.inline("✅ אישור ופרסם", confirm_cb), Button.inline("✏️ ערוך מחיר", edit_price_cb)],
-                [Button.inline("✏️ ערוך טקסט", edit_text_cb), Button.inline("✏️ ערוך טלפון", edit_phone_cb)],
+                [Button.inline("✅ אישור ופרסם", b"confirm_bot_lead"), Button.inline("✏️️ ערוך מחיר", b"edit_bot_price")],
+                [Button.inline("✏️ ערוך טקסט", b"edit_bot_text"), Button.inline("✏️ ערוך טלפון", b"edit_bot_phone")],
                 [Button.inline("❌ ביטול", b"cancel_bot_flow")]
             ]
             await event.respond(preview_text, buttons=buttons)
@@ -632,92 +609,45 @@ async def bot_listener(event):
             await event.respond("⚠️ נא להזין מחיר מספרי תקין:")
         return
 
-    if is_advertiser and current_state in ['editing_bot_lead_text', 'editing_group_lead_text']:
-        flow_key = 'group_broadcast_data' if current_state == 'editing_group_lead_text' else 'broadcast_data'
-        target_data = broadcast_data if flow_key == 'broadcast_data' else group_broadcast_data
+    if is_advertiser and current_state == 'editing_bot_lead_text':
+        broadcast_data[user_id]['text'] = text
+        user_states[user_id]['state'] = 'bot_lead_preview'
         
-        target_data[user_id]['text'] = text
-        next_state = 'group_lead_preview' if flow_key == 'group_broadcast_data' else 'bot_lead_preview'
-        user_states[user_id]['state'] = next_state
-        
-        msg_data = target_data[user_id]
+        msg_data = broadcast_data[user_id]
         cities, price, has_time = parse_order_text(text)
         preview_text = (
-            f"📋 **סיכום קריאה לפרסום ({'קבוצות' if flow_key == 'group_broadcast_data' else 'בוט'} - עודכן):**\n\n"
+            f"📋 **סיכום קריאה לפרסום (בוט - עודכן):**\n\n"
             f"📝 **תוכן:** {text}\n"
             f"📞 **טלפון הלקוח:** {msg_data.get('phone', '')}\n"
             f"📍 **מסלול שזוהה:** {' ➔ '.join(cities) if cities else 'לא זוהה'}\n"
             f"💰 **מחיר שזוהה:** ₪{price if price else 'לא זוהה'}\n\n"
             f"האם לאשר ולפרסם כעת?"
         )
-        confirm_cb = b"confirm_group_lead" if flow_key == 'group_broadcast_data' else b"confirm_bot_lead"
-        edit_price_cb = b"edit_group_price" if flow_key == 'group_broadcast_data' else b"edit_bot_price"
-        edit_text_cb = b"edit_group_text" if flow_key == 'group_broadcast_data' else b"edit_bot_text"
-        edit_phone_cb = b"edit_group_phone" if flow_key == 'group_broadcast_data' else b"edit_bot_phone"
-
         buttons = [
-            [Button.inline("✅ אישור ופרסם", confirm_cb), Button.inline("✏️ ערוך מחיר", edit_price_cb)],
-            [Button.inline("✏ ערוך טקסט", edit_text_cb), Button.inline("✏️ ערוך טלפון", edit_phone_cb)],
+            [Button.inline("✅ אישור ופרסם", b"confirm_bot_lead"), Button.inline("✏️ ערוך מחיר", b"edit_bot_price")],
+            [Button.inline("✏️ ערוך טקסט", b"edit_bot_text"), Button.inline("✏️ ערוך טלפון", b"edit_bot_phone")],
             [Button.inline("❌ ביטול", b"cancel_bot_flow")]
         ]
         await event.respond(preview_text, buttons=buttons)
         return
 
-    if is_advertiser and current_state in ['editing_bot_lead_phone', 'editing_group_lead_phone']:
-        flow_key = 'group_broadcast_data' if current_state == 'editing_group_lead_phone' else 'broadcast_data'
-        target_data = broadcast_data if flow_key == 'broadcast_data' else group_broadcast_data
+    if is_advertiser and current_state == 'editing_bot_lead_phone':
+        broadcast_data[user_id]['phone'] = text
+        user_states[user_id]['state'] = 'bot_lead_preview'
         
-        target_data[user_id]['phone'] = text
-        next_state = 'group_lead_preview' if flow_key == 'group_broadcast_data' else 'bot_lead_preview'
-        user_states[user_id]['state'] = next_state
-        
-        msg_data = target_data[user_id]
+        msg_data = broadcast_data[user_id]
         cities, price, has_time = parse_order_text(msg_data['text'])
         preview_text = (
-            f"📋 **סיכום קריאה לפרסום ({'קבוצות' if flow_key == 'group_broadcast_data' else 'בוט'} - עודכן):**\n\n"
+            f"📋 **סיכום קריאה לפרסום (בוט - עודכן):**\n\n"
             f"📝 **תוכן:** {msg_data['text']}\n"
             f"📞 **טלפון הלקוח:** {text}\n"
             f"📍 **מסלול שזוהה:** {' ➔ '.join(cities) if cities else 'לא זוהה'}\n"
             f"💰 **מחיר שזוהה:** ₪{price if price else 'לא זוהה'}\n\n"
             f"האם לאשר ולפרסם כעת?"
         )
-        confirm_cb = b"confirm_group_lead" if flow_key == 'group_broadcast_data' else b"confirm_bot_lead"
-        edit_price_cb = b"edit_group_price" if flow_key == 'group_broadcast_data' else b"edit_bot_price"
-        edit_text_cb = b"edit_group_text" if flow_key == 'group_broadcast_data' else b"edit_bot_text"
-        edit_phone_cb = b"edit_group_phone" if flow_key == 'group_broadcast_data' else b"edit_bot_phone"
-
         buttons = [
-            [Button.inline("✅ אישור ופרסם", confirm_cb), Button.inline("✏️ ערוך מחיר", edit_price_cb)],
-            [Button.inline("✏️ ערוך טקסט", edit_text_cb), Button.inline("✏️ ערוך טלפון", edit_phone_cb)],
-            [Button.inline("❌ ביטול", b"cancel_bot_flow")]
-        ]
-        await event.respond(preview_text, buttons=buttons)
-        return
-
-    if is_advertiser and current_state == 'waiting_group_lead_text':
-        group_broadcast_data[user_id] = {'text': text}
-        user_states[user_id]['state'] = 'waiting_group_lead_phone'
-        cancel_btn = [[Button.inline("❌ ביטול וחזרה", b"cancel_bot_flow")]]
-        await event.respond("📞 אנא שלח כעת את **מספר הטלפון של הלקוח** שיוצג בקריאה לקבוצות (או לחץ ביטול):", buttons=cancel_btn)
-        return
-
-    if is_advertiser and current_state == 'waiting_group_lead_phone':
-        group_broadcast_data[user_id]['phone'] = text
-        user_states[user_id]['state'] = 'group_lead_preview'
-        
-        msg_data = group_broadcast_data[user_id]
-        cities, price, has_time = parse_order_text(msg_data['text'])
-        preview_text = (
-            f"📋 **סיכום קריאה לפרסום בקבוצות המורשות:**\n\n"
-            f"📝 **תוכן:** {msg_data['text']}\n"
-            f"📞 **טלפון הלקוח:** {text}\n"
-            f"📍 **מסלול שזוהה:** {' ➔ '.join(cities) if cities else 'לא זוהה'}\n"
-            f"💰 **מחיר שזוהה:** ₪{price if price else 'לא זוהה'}\n\n"
-            f"האם לאשר ולפרסם כעת לקבוצות שהוגדרו?"
-        )
-        buttons = [
-            [Button.inline("✅ אישור ופרסם לקבוצות", b"confirm_group_lead"), Button.inline("✏️ ערוך מחיר", b"edit_group_price")],
-            [Button.inline("✏️ ערוך טקסט", b"edit_group_text"), Button.inline("✏️ ערוך טלפון", b"edit_group_phone")],
+            [Button.inline("✅ אישור ופרסם", b"confirm_bot_lead"), Button.inline("✏️ ערוך מחיר", b"edit_bot_price")],
+            [Button.inline("✏️ ערוך טקסט", b"edit_bot_text"), Button.inline("✏️ ערוך טלפון", b"edit_bot_phone")],
             [Button.inline("❌ ביטול", b"cancel_bot_flow")]
         ]
         await event.respond(preview_text, buttons=buttons)
@@ -989,8 +919,7 @@ async def bot_listener(event):
         stations = cursor.fetchall()
         conn.close()
         
-        st_text = "🏢 **ניהול תחנות וקבוצות פרסום מורשות:**\n\n"
-        st_text += "\n🏢 **תחנות שילוח:**\n"
+        st_text = "🏢 **ניהול תחנות שילוח:**\n\n"
         st_buttons = [
             [Button.inline("➕ הוסף תחנה חדשה", b"add_new_station")],
             [Button.inline("🏢 הוסף מנהל לתחנה", b"add_station_manager")],
@@ -1109,7 +1038,7 @@ async def callback_handler(event):
             s_name, s_comm = st_row
             txt = f"🏢 **ניהול תחנה: {s_name}**\nעמלה נוכחית מעל 50₪: {s_comm}%\n\nבחר פעולה רצויה:"
             btns = [
-                [Button.inline("✏️ שנה שם תחנה", f"edit_st_name_{st_id}".encode('utf-8'))],
+                [Button.inline("✏️️ שנה שם תחנה", f"edit_st_name_{st_id}".encode('utf-8'))],
                 [Button.inline("💰 שנה אחוז עמלה", f"edit_st_comm_{st_id}".encode('utf-8'))],
                 [Button.inline("🗑️ מחק תחנה זו לצמיתות", f"delete_station_{st_id}".encode('utf-8'))],
                 [Button.inline("↩️ חזרה לניהול תחנות", b"back_to_stations")]
@@ -1196,7 +1125,7 @@ async def callback_handler(event):
             [Button.inline("📊 סטטיסטיקות תחנות", b"station_stats")]
         ]
         for s_id, s_name, s_comm in stations:
-            st_buttons.append([Button.inline(f"⚙️ ע/מ תחנה: {s_name}", f"manage_station_{s_id}".encode('utf-8'))])
+            st_buttons.append([Button.inline(f"⚙️️ ע/מ תחנה: {s_name}", f"manage_station_{s_id}".encode('utf-8'))])
             
         st_buttons.append([Button.inline("↩️ חזרה לפאנל מנהל", b"back_to_admin_cb")])
         await event.edit(st_text, buttons=st_buttons)
@@ -1576,7 +1505,7 @@ async def process_lead_request_final(event, requester_id, lead_id, driver_time):
         else:
             await event.edit("⚠️ שגיאה בשליחת הבקשה למפרסם.")
 
-# הרצת הבוט לבדו בצורה נקייה ויציבה בענן
+# הרצת הבוט בצורה נקייה ויציבה בענן
 async def main():
     print("✨ בוט השילוח והניהול פועל בהצלחה!")
     await bot_client.start(bot_token=bot_token)
