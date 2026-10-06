@@ -8,7 +8,7 @@ from telethon.tl.custom import Button
 
 api_id = int(os.environ.get("API_ID", "36364878"))
 api_hash = os.environ.get("API_HASH", "c9d51bb77653adefd4e5092581145cb3")
-bot_token = os.environ.get("BOT_TOKEN")
+bot_token = os.environ.get("8954258047:AAGTBHGEPOe9MTfQkvB4_gVGlY6nA1v9KPo")
 from telethon.sessions import StringSession
 string_session = os.environ.get("STRING_SESSION")
 client = TelegramClient(StringSession(string_session), api_id, api_hash)
