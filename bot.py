@@ -15,7 +15,7 @@ from aiogram.enums import ParseMode
 # הפעלת לוגים בסיסית
 logging.basicConfig(level=logging.INFO)
 
-# הגדרת טוקן הבוט בלבד - ללא שום תלות בחשבון אישי או מזהי API
+# הגדרת טוקן הבוט בלבד - ללא שום תלות בחשבון אישי או מזהي API
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8954258047:AAGTBHGEPOe9MTfQkvB4_gVGlY6nA1v9KPo")
 ADMIN_IDS = [8644923212, 552821474]
 DB_FILE = 'bot_database_v3.db'
@@ -97,7 +97,6 @@ async def init_db():
             )
         ''')
 
-        # טבלה חדשה לניהול וסינון קבוצות שבהן הבוט חבר
         await db.execute('''
             CREATE TABLE IF NOT EXISTS bot_groups (
                 group_id INTEGER PRIMARY KEY,
@@ -186,7 +185,6 @@ def get_admin_keyboard():
         [KeyboardButton(text="⚙️ ניהול קבוצות הבוט"), KeyboardButton(text="⬅️ חזרה לתפריט הראשי")]
     ], resize=True)
 
-# מעקב אחר חיבור הבוט לקבוצות או הסרתו מהן
 @dp.my_chat_member()
 async def bot_chat_member_handler(event: ChatMemberUpdated):
     chat = event.chat
@@ -242,7 +240,7 @@ async def cmd_start(message: Message, state: FSMContext):
                     if lead and lead[0] == 'active':
                         await state.update_data(active_lead_id=lead_id)
                         await state.set_state(BotStates.waiting_driver_time)
-                        await message.answer("⏱️ **קריאה זו נקלטה!**\nאנא שלח כעת את **הזמן** שלך בכתובת (למשל: 15 דקות):")
+                        await message.answer("⏱️️ **קריאה זו נקלטה!**\nאנא שלח כעת את **הזמן** שלך בכתובת (למשל: 15 דקות):")
         return
 
     if not user:
@@ -255,7 +253,6 @@ async def cmd_start(message: Message, state: FSMContext):
 
     await message.answer("🎛️ **תפריט ראשי:** בחר אפשרות מהמקלדת למטה:", reply_markup=get_main_keyboard(is_admin, is_advertiser, current_status))
 
-# תהליך רישום משתמש חדש
 @dp.message(RegistrationStates.waiting_name)
 async def reg_name(message: Message, state: FSMContext):
     await state.update_data(name=message.text)
@@ -299,7 +296,6 @@ async def reg_birth(message: Message, state: FSMContext):
                     await state.set_state(BotStates.waiting_driver_time)
                     await message.answer("⏱️ **קריאה זו נקלטה!**\nאנא שלח כעת את **הזמן** שלך בכתובת:")
 
-# ניהול קבוצות הבוט למנהלים
 @dp.message(F.text == "⚙️ ניהול קבוצות הבוט")
 async def manage_bot_groups(message: Message):
     if message.from_user.id not in ADMIN_IDS:
@@ -335,7 +331,6 @@ async def toggle_group_cb(callback: CallbackQuery):
             await db.execute('UPDATE bot_groups SET is_active = ? WHERE group_id = ?', (new_status, g_id))
             await db.commit()
             await callback.answer(f"סטטוס קבוצה עודכן בהצלחה!")
-            # רענון הודעת הניהול
             async with db.execute('SELECT group_id, group_title, is_active FROM bot_groups') as cursor:
                 groups = await cursor.fetchall()
             text = "🏢 **ניהול קבוצות מחוברות לבוט:**\n\n"
@@ -347,7 +342,6 @@ async def toggle_group_cb(callback: CallbackQuery):
                 buttons.append([InlineKeyboardButton(text=b_txt, callback_data=f"toggle_group_{gid}")])
             await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
-# פרסום הודעה עם בחירת יעד (משתמשי בוט / קבוצות בוט / גם וגם)
 @dp.message(F.text == "📢 פרסום הודעה")
 async def broadcast_prompt(message: Message, state: FSMContext):
     user = await get_user(message.from_user.id)
@@ -377,7 +371,6 @@ async def receive_lead_phone(message: Message, state: FSMContext):
         return
     await state.update_data(lead_phone=message.text)
     
-    # הצגת תפריט בחירת יעד פרסום
     dest_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 למשתמשי הבוט הפרטיים בלבד", callback_data="dest_users")],
         [InlineKeyboardButton(text="🏢 לקבוצות הבוט בלבד", callback_data="dest_groups")],
@@ -406,11 +399,11 @@ async def destination_chosen(callback: CallbackQuery, state: FSMContext):
 
     async with aiosqlite.connect(DB_FILE) as db:
         now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        async with db.execute('''
+        cursor = await db.execute('''
             INSERT INTO leads (publisher_id, message_text, phone_number, created_at, price, route_cities, station_id) 
             VALUES (?, ?, ?, ?, ?, ?, ?)
         ''', (user_id, text_content, phone_content, now_str, price if price else 0.0, " ➔ ".join(cities) if cities else "", st_id))
-        lead_id = cursor_lastrowid = db.lastrowid
+        lead_id = cursor.lastrowid
         await db.commit()
 
     await state.clear()
@@ -436,7 +429,6 @@ async def destination_chosen(callback: CallbackQuery, state: FSMContext):
     sent_users = 0
     sent_groups = 0
 
-    # שליחה למשתמשי הבוט הפרטיים
     if action in ["users", "both"]:
         async with aiosqlite.connect(DB_FILE) as db:
             async with db.execute("SELECT user_id, cities FROM users WHERE status = 'free'") as cursor:
@@ -452,16 +444,13 @@ async def destination_chosen(callback: CallbackQuery, state: FSMContext):
                         matched = True
                         break
             if matched:
-                req_btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👉 תן את הקריאה", callback_data=f"req_lead_{lead_id}")]])
                 try:
-                    # הוספת כפתור התחלה עמוקה לקריאה בקבוצות או הודעה ישירה עם לינק
                     link_btn = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="👉 בקש קריאה", url=f"https://t.me/{(await bot.get_me()).username}?start=lead_{lead_id}")]])
                     await bot.send_message(f_uid, alert_msg, reply_markup=link_btn)
                     sent_users += 1
                 except:
                     pass
 
-    # שליחה לקבוצות שהבוט מחובר אליהן ופעילות
     if action in ["groups", "both"]:
         async with aiosqlite.connect(DB_FILE) as db:
             async with db.execute("SELECT group_id FROM bot_groups WHERE is_active = 1") as cursor:
@@ -476,7 +465,6 @@ async def destination_chosen(callback: CallbackQuery, state: FSMContext):
 
     await bot.send_message(user_id, f"📢 הקריאה הופצה בהצלחה ל-{sent_users} שליחים פרטיים ו-{sent_groups} קבוצות ציבוריות!")
 
-# מענה לבקשת קריאה ע"י שליח
 @dp.callback_query(F.data.startswith("req_lead_"))
 async def request_lead_callback(callback: CallbackQuery, state: FSMContext):
     lead_id = int(callback.data.replace("req_lead_", ""))
@@ -487,7 +475,7 @@ async def request_lead_callback(callback: CallbackQuery, state: FSMContext):
             lead = await cursor.fetchone()
 
     if not lead or lead[3] != 'active':
-        await callback.answer("⚠️ קריאה זו אינה פעילה עוד או סגורה.", show_alert=True)
+        await callback.answer("⚠️️ קריאה זו אינה פעילה עוד או סגורה.", show_alert=True)
         return
 
     _, _, _, _, _, has_time = parse_order_text(lead[1])
@@ -552,7 +540,6 @@ async def process_lead_request(message: Message, requester_id: int, lead_id: int
 
     await bot.send_message(publisher_id, alert_to_publisher, reply_markup=buttons)
 
-# פונקציית הרצה ראשית
 async def main():
     await init_db()
     print("✨ בוט השילוח והניהול (גרסת aiogram נקייה) פועל בהצלחה!")
