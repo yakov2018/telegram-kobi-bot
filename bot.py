@@ -8,7 +8,7 @@ from telethon.tl.custom import Button
 
 api_id = 36364878
 api_hash = 'c9d51bb77653adefd4e5092581145cb3'
-bot_token = '8954258047:AAEdUPh75Zo88JisfpeRMfd49t8mLkVueyo'
+bot_token = '8954258047:AAGTBHGEPOe9MTfQkvB4_gVGlY6nA1v9KPo'
 
 ADMIN_IDS = [8644923212, 552821474]
 DB_FILE = 'bot_database_v2.db'
