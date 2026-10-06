@@ -122,6 +122,7 @@ def init_db():
 
 init_db()
 
+# שני הלקוחות נשמרים במלואם כפי שהיו:
 client = TelegramClient('my_monitor_session', api_id, api_hash)
 bot_client = TelegramClient('bot_session', api_id, api_hash)
 
@@ -467,7 +468,6 @@ async def bot_listener(event):
 
     current_state = user_states.get(user_id, {}).get('state')
 
-    # קליטת עריכת שם תחנה
     if is_admin and current_state and current_state.startswith('editing_station_name_'):
         st_id = int(current_state.replace('editing_station_name_', ''))
         new_name = text.strip()
@@ -481,7 +481,6 @@ async def bot_listener(event):
         await event.respond(f"✅ שם התחנה עודכן בהצלחה ל-**{new_name}**!", buttons=get_admin_keyboard())
         return
 
-    # קליטת עריכת עמלת תחנה
     if is_admin and current_state and current_state.startswith('editing_station_comm_'):
         st_id = int(current_state.replace('editing_station_comm_', ''))
         user_states.pop(user_id, None)
@@ -549,7 +548,7 @@ async def bot_listener(event):
             await event.respond(f"✅ המשתמש הוגדר בהצלחה כמנהל תחנה!", buttons=get_admin_keyboard())
         else:
             conn.close()
-            await event.respond("⚠️ לא נמצא משתמש רשום במערכת עם הנתון הזה.", buttons=get_admin_keyboard())
+            await event.respond("⚠️️ לא נמצא משתמש רשום במערכת עם הנתון הזה.", buttons=get_admin_keyboard())
         return
 
     if current_state and current_state.startswith('waiting_driver_time_'):
@@ -562,7 +561,7 @@ async def bot_listener(event):
 
     if text == "ℹ️ אודות ויצירת קשר":
         about_contact_buttons = [
-            [Button.text("ℹ️️ אודות המערכת", resize=True), Button.text("📞 יצירת קשר", resize=True)],
+            [Button.text("ℹ אודות המערכת", resize=True), Button.text("📞 יצירת קשר", resize=True)],
             [Button.text("⬅ חזרה לתפריט הראשי", resize=True)]
         ]
         await event.respond("ℹ️ **אודות ויצירת קשר:**\nבחר את האפשרות הרצויה מהמקלדת:", buttons=about_contact_buttons)
@@ -653,7 +652,7 @@ async def bot_listener(event):
 
         buttons = [
             [Button.inline("✅ אישור ופרסם", confirm_cb), Button.inline("✏️ ערוך מחיר", edit_price_cb)],
-            [Button.inline("✏️ ערוך טקסט", edit_text_cb), Button.inline("✏️ ערוך טלפון", edit_phone_cb)],
+            [Button.inline("✏️️ ערוך טקסט", edit_text_cb), Button.inline("✏️ ערוך טלפון", edit_phone_cb)],
             [Button.inline("❌ ביטול", b"cancel_bot_flow")]
         ]
         await event.respond(preview_text, buttons=buttons)
@@ -683,7 +682,7 @@ async def bot_listener(event):
         edit_phone_cb = b"edit_group_phone" if flow_key == 'group_broadcast_data' else b"edit_bot_phone"
 
         buttons = [
-            [Button.inline("✅ אישור ופרסם", confirm_cb), Button.inline("✏️️ ערוך מחיר", edit_price_cb)],
+            [Button.inline("✅ אישור ופרסם", confirm_cb), Button.inline("✏️ ערוך מחיר", edit_price_cb)],
             [Button.inline("✏️ ערוך טקסט", edit_text_cb), Button.inline("✏️ ערוך טלפון", edit_phone_cb)],
             [Button.inline("❌ ביטול", b"cancel_bot_flow")]
         ]
@@ -833,7 +832,7 @@ async def bot_listener(event):
         if success:
             await event.respond(f"✅ נוספת בהצלחה כפנוי!\n📍 הערים שלך כעת: {msg}", buttons=get_main_keyboard(is_admin, is_advertiser, new_status))
         else:
-            await event.respond(f"⚠️️ {msg}", buttons=get_main_keyboard(is_admin, is_advertiser, new_status))
+            await event.respond(f"⚠ {msg}", buttons=get_main_keyboard(is_admin, is_advertiser, new_status))
         return
 
     if text.startswith("פ א ") or text.startswith("פא "):
@@ -1070,7 +1069,7 @@ async def bot_listener(event):
 
     if text == "➕ מילה חדשה":
         setattr(bot_client, f'waiting_word_{user_id}', True)
-        await event.respond("✍️️ שלח את המילה לניטור:")
+        await event.respond("✍ שלח את המילה לניטור:")
 
     elif text == "📋 הצגת המילים שלי":
         words = get_user_keywords(user_id)
@@ -1098,14 +1097,13 @@ async def callback_handler(event):
     if data.startswith("del_city_"):
         city_to_del = data.replace("del_city_", "")
         remaining = remove_user_city(user_id, city_to_del)
-        await event.edit(f"🗑️️ העיר '{city_to_del}' הוסרה בהצלחה!\n📍 הערים שנותרו ברשימה: `{remaining if remaining else 'אין ערים מוגדרות'}`")
+        await event.edit(f"🗑 העיר '{city_to_del}' הוסרה בהצלחה!\n📍 הערים שנותרו ברשימה: `{remaining if remaining else 'אין ערים מוגדרות'}`")
         return
 
     elif data == "cancel_del_city":
         await event.edit("❌ פעולת מחיקת העיר בוטלה.")
         return
 
-    # ניהול תחנה ספציפית (עריכה או מחיקה)
     elif data.startswith("manage_station_"):
         st_id = int(data.replace("manage_station_", ""))
         conn = sqlite3.connect(DB_FILE)
@@ -1277,7 +1275,7 @@ async def callback_handler(event):
         t_data = get_user(target_uid)
         if t_data:
             card_text = (
-                f"⚙️ **כרטיסיית ניהול משתמש:**\n\n"
+                f"⚙️️ **כרטיסיית ניהול משתמש:**\n\n"
                 f"👤 שם: {t_data[0]}\n"
                 f"📱 טלפון: {t_data[1]}\n"
                 f"🛡️ תפקיד נוכחי: `{t_data[5]}`\n"
@@ -1300,7 +1298,7 @@ async def callback_handler(event):
         for u_id, u_name, u_phone, u_role, u_exp, u_stat in all_u:
             summary_text += f"• **{u_name}** | תפקיד: `{u_role}` | טלפון: `{u_phone}`\n"
             u_buttons.append([Button.inline(f"⚙️ ניהול: {u_name} ({u_role})", f"manage_user_{u_id}".encode('utf-8'))])
-        u_buttons.append([Button.inline("↩️️ חזרה לפאנל מנהל", b"back_to_admin_cb")])
+        u_buttons.append([Button.inline("↩ חזרה לפאנל מנהל", b"back_to_admin_cb")])
         await event.edit(summary_text, buttons=u_buttons)
         return
 
@@ -1628,7 +1626,7 @@ async def callback_handler(event):
                 buttons=follow_up_buttons
             )
         except Exception as e:
-            await event.edit(f"⚠️ שגיאה: {e}")
+            await event.edit(f"⚠️️ שגיאה: {e}")
         return
 
     elif data.startswith("reject_lead_"):
@@ -1703,10 +1701,19 @@ async def process_lead_request_final(event, requester_id, lead_id, driver_time):
         else:
             await event.edit("⚠️ שגיאה בשליחת הבקשה למפרסם.")
 
+# החלק הסופי המתוקן שמאפשר לשניהם לרוץ ביחד בלי קריסות של חלון קלט בענן:
 async def main():
-    print("✨ בוט השילוח והניהול פועל עם ניהול תחנות מלא הכולל עריכה ומחיקה!")
+    print("✨ בוט השילוח והניהול פועל בהצלחה!")
+    # מפעילים את שתי הלקוחות יחד (הלקוח האישי לסריקה והבוט לניהול)
+    await client.start()
     await bot_client.start(bot_token=bot_token)
+    print("🤖 שני הלקוחות מחוברים ופעילים בענן!")
+    
+    # ממתינים ששניהם ירוצו יחד ברקע
+    await asyncio.gather(
+        client.run_until_disconnected(),
+        bot_client.run_until_disconnected()
+    )
 
-with client:
-    client.loop.run_until_complete(main())
-    client.run_until_disconnected()
+if __name__ == '__main__':
+    asyncio.run(main())
