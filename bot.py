@@ -17,15 +17,21 @@ active_broadcasts = {}
 
 CITY_ALIASES = {
     "ים": "ירושלים",
+    "פת" : "פתח תקווה",
+    "תא" : "תל אביב",
+    "שדה" : "שדה תעופה",
+    "סבא" : "כפר סבא",
+    "ראשון" : "ראשון לציון",
+    "רג" : "רמת גן",
     "ירושלים": "ירושלים",
     "שמש": "בית שמש",
     "בית שמש": "בית שמש",
-    "ב' ב'": "בני ברק",
+    "בב": "בני ברק",
     "בני ברק": "בני ברק",
-    "ר' ג'": "רמת גן",
+    "רג'": "רמת גן",
     "רמת גן": "רמת גן",
-    "ספר": "קריית ספר",
-    "קריית ספר": "קריית ספר"
+    "ספר": "מודיעין עלית",
+    "מודיעין עלית": "מודיעין עלית"
 }
 
 def init_db():
@@ -337,7 +343,7 @@ group_broadcast_data = {}
 station_creation_data = {}
 
 def get_main_keyboard(is_admin=False, is_advertiser=False, current_status='busy'):
-    status_btn_text = "🟢 פנוי לקריאות" if current_status == 'free' else "🔴 תפוס"
+    status_btn_text = "🟢 פנוי" if current_status == 'free' else "🔴 תפוס"
     kb = []
     
     if is_admin or is_advertiser:
