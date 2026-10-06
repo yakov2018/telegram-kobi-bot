@@ -15,7 +15,8 @@ from aiogram.enums import ParseMode
 
 logging.basicConfig(level=logging.INFO)
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8954258047:AAGTBHGEPOe9MTfQkvB4_gVGlY6nA1v9KPo")
+# הטוקן החדש והנקי שלך
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8954258047:AAFVjP0kntKxD10Q2_a97-VyPwGJFrwSFqo")
 ADMIN_IDS = [8644923212, 552821474]  # מנהלי המערכת הראשיים
 DB_FILE = 'bot_database_v3.db'
 
@@ -743,7 +744,7 @@ async def cb_add_station(callback: CallbackQuery):
     ]
     for s_id, s_name, s_comm in stations:
         st_text += f"• {s_name} | עמלה: {s_comm}%\n"
-        st_buttons.append([InlineKeyboardButton(text=f"⚙️ ערוך תחנה: {s_name}", callback_data=f"edit_station_{s_id}")])
+        st_buttons.append([InlineKeyboardButton(text=f"⚙️️ ערוך תחנה: {s_name}", callback_data=f"edit_station_{s_id}")])
     await callback.message.edit_text(st_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=st_buttons))
 
 @dp.callback_query(F.data.startswith("edit_station_"))
@@ -764,7 +765,7 @@ async def cb_edit_station(callback: CallbackQuery):
         [InlineKeyboardButton(text="🗑️ מחק תחנה", callback_data=f"del_station_{st_id}")],
         [InlineKeyboardButton(text="⬅️ חזרה", callback_data="back_to_stations")]
     ])
-    await callback.message.edit_text(f"⚙️ **הגדרות תחנה: {st_name}**\nעמלה נוכחית: {st_comm}%\n\nבחר עמלה:", reply_markup=kb)
+    await callback.message.edit_text(f"⚙️️ **הגדרות תחנה: {st_name}**\nעמלה נוכחית: {st_comm}%\n\nבחר עמלה:", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("setcomm_"))
 async def cb_set_commission(callback: CallbackQuery):
