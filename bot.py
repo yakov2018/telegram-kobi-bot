@@ -1,6 +1,7 @@
 import os
 import asyncio
 import logging
+import sys
 from datetime import datetime, timedelta
 import aiosqlite
 from aiohttp import web
@@ -15,9 +16,15 @@ from aiogram.enums import ParseMode
 
 logging.basicConfig(level=logging.INFO)
 
-# טעינה וניקוי אוטומטי של טוקן הבוט ממשתני הסביבה (עם גיבוי למקרה הצורך)
-RAW_TOKEN = os.environ.get("BOT_TOKEN", "8954258047:AAFVjP0kntKxD10Q2_a97-VyPwGJFrwSFqo")
-BOT_TOKEN = RAW_TOKEN.strip().replace("[", "").replace("]", "").replace("'", "").replace('"', "")
+# טעינה וניקוי אוטומטי של טוקן הבוט ממשתני הסביבה (מנקה רווחים, מרכאות או תווים מיותרים)
+RAW_TOKEN = os.environ.get("BOT_TOKEN", "")
+BOT_TOKEN = RAW_TOKEN.strip().replace("[", "").replace("]", "").replace("'", "").replace('"', "").replace(" ", "")
+
+print(f"DEBUG_CHECK -> Final Cleaned Token: '{BOT_TOKEN}'")
+
+if not BOT_TOKEN:
+    print("שגיאה קריטית: משתנה הסביבה BOT_TOKEN ריק או לא מוגדר!")
+    sys.exit(1)
 
 ADMIN_IDS = [8644923212, 552821474]  # מנהלי המערכת הראשיים
 DB_FILE = 'bot_database_v3.db'
