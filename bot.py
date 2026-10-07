@@ -14,10 +14,13 @@ import os
 # הגדרת לוגים
 logging.basicConfig(level=logging.INFO)
 
-# טעינת טוקן הבוט ממשתני הסביבה
-TOKEN = os.getenv("BOT_TOKEN")
+# טעינה וניקוי אוטומטי של טוקן הבוט ממשתני הסביבה
+RAW_TOKEN = os.getenv("BOT_TOKEN", "")
+TOKEN = RAW_TOKEN.strip().replace("[", "").replace("]", "").replace("'", "").replace('"', "")
 
-if not TOKEN or TOKEN.strip() == "":
+print(f"DEBUG_CHECK -> Cleaned Token: '{TOKEN}'")
+
+if not TOKEN:
     print("שגיאה קריטית: משתנה הסביבה BOT_TOKEN לא הוגדר או שהוא ריק לחלוטין!")
     sys.exit(1)
 
@@ -30,6 +33,7 @@ DB_PATH = "bot_database_v3.db"
 # --- אתחול מסד הנתונים ---
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
+        # טבלת משתמשים / נהגים
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
@@ -38,6 +42,7 @@ async def init_db():
                 role TEXT DEFAULT 'client'
             )
         """)
+        # טבלת נסיעות / לידים
         await db.execute("""
             CREATE TABLE IF NOT EXISTS rides (
                 ride_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,7 +54,7 @@ async def init_db():
         """)
         await db.commit()
 
-# --- מצבי FSM לדוגמה ---
+# --- מצבי FSM לדוגמה (ניהול תהליכים) ---
 class RideState(StatesGroup):
     waiting_for_origin = State()
     waiting_for_destination = State()
@@ -124,8 +129,10 @@ async def start_web_server():
 async def main():
     await init_db()
     
+    # הפעלת שרת ה-Web ברקע לצורך דרישות Render
     asyncio.create_task(start_web_server())
 
+    # מחיקת Webhooks ישנים למניעת התנגשויות
     await bot.delete_webhook(drop_pending_updates=True)
     
     print("Bot is starting polling...")
