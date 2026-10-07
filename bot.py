@@ -46,7 +46,6 @@ async def start_web_server():
     await site.start()
     logging.info(f"Web server started on port {port}")
 
-# --- מצבי הרשמה וניהול מתקדמים ---
 class RegistrationStates(StatesGroup):
     waiting_name = State()
     waiting_phone = State()
@@ -66,7 +65,6 @@ class BotStates(StatesGroup):
     waiting_station_name_input = State()
     editing_lead_content = State()
 
-# רשימת חברות רכב נפוצות בישראל
 CAR_BRANDS = [
     "טיוטה (Toyota)", "הונדה (Honda)", "יונדאי (Hyundai)", "קיה (Kia)",
     "מזדה (Mazda)", "סקודה (Skoda)", "פולקסווגן (Volkswagen)", "מיצובישי (Mitsubishi)",
@@ -75,19 +73,16 @@ CAR_BRANDS = [
     "ב.מ.וו (BMW)", "אאודי (Audi)", "רנו (Renault)", "פיג'ו (Peugeot)", "סיטרואן (Citroen)", "אחר"
 ]
 
-# רשימת יישובים, ערים, קיבוצים וכפרים מקיפה בישראל
 ISRAELI_CITIES = [
     "ירושלים", "תל אביב - יפו", "חיפה", "ראשון לציון", "פתח תקווה", "אשדוד", "נתניה", "בני ברק", "באר שבע", "חולון",
     "רמת גן", "אשקלון", "בת ים", "בית שמש", "הרצליה", "כפר סבא", "חדרה", "מודיעין-מכבים-רעות", "נצרת", "לוד",
-    "רמדה", "רחובות", "בת ים", "מודיעין עילית", "ביתר עילית", "אלעד", "בית שאן", "אופקים", "אריאל", "אילת",
-    "בקה אל-גרבייה", "דימונה", "הוד השרון", "זכרון יעקב", "טבריה", "טירה", "טמרה", "יבנה", "יהוד-מונוסון", "יקנעם עילית",
-    "כפר יונה", "כפר קאסם", "כרמיאל", "מגדל העמק", "מודיעין עילית", "מעלה אדומים", "מעלות-תרשיחא", "נהריה", "נס ציונה",
-    "נשר", "נתיבות", "נתניה", "סח'נין", "עכו", "עפולה", "ערד", "פאת תקווה", "צפת", "קלנסווה",
+    "רמלה", "רחובות", "מודיעין עילית", "ביתר עילית", "אלעד", "בית שאן", "אופקים", "אריאל", "אילת",
+    "דימונה", "הוד השרון", "זכרון יעקב", "טבריה", "טירה", "טמרה", "יבנה", "יהוד-מונוסון", "יקנעם עילית",
+    "כפר יונה", "כפר קאסם", "כרמיאל", "מגדל העמק", "מעלה אדומים", "מעלות-תרשיחא", "נהריה", "נס ציונה",
+    "נשר", "נתיבות", "עכו", "עפולה", "ערד", "צפת", "קלנסווה",
     "קריית אונו", "קריית אתא", "קריית ביאליק", "קריית גת", "קריית ים", "קריית מוצקין", "קריית מלאכי", "קריית שמונה",
-    "ראש העין", "ראשון לציון", "רהט", "רחובות", "רמלה", "רמת גן", "רמת השרון", "רעננה", "שדרות", "שפרעם",
-    "תל אביב - יפו", "אבו גוש", "בית דגן", "גבעת שמואל", "גבעתיים", "גָדֵרָה", "זכרון יעקב", "חריש", "מבשרת ציון",
-    "מצפה רמון", "עומר", "פורדיס", "פרדס חנה-כרכור", "צכרון יעקב", "קצרין", "שילה", "אדם", "אלון מורה", "אפרת",
-    "בית אל", "גוש עציון", "חברון", "טל몬", "כוכב השחר", "קריית ארבע", "שילה", "אשחר", "כפר האורנים", "לפיד", "חשמונאים"
+    "ראש העין", "רהט", "רמת השרון", "רעננה", "שדרות", "שפרעם", "אבו גוש", "בית דגן", "גבעת שמואל", "גבעתיים", "גָדֵרָה", "חריש", "מבשרת ציון",
+    "מצפה רמון", "עומר", "פרדס חנה-כרכור", "קצרין", "אפרת", "בית אל", "גוש עציון", "חשמונאים"
 ]
 
 CITY_ALIASES = {
@@ -264,9 +259,8 @@ async def cmd_start(message: Message, state: FSMContext):
             await db.commit()
         user = await get_user(user_id)
 
-    # בדיקת תוקף מנוי (30 יום) למשתמשים שאינם אדמין
     if user and not is_admin:
-        expiry_str = user[8]  # expiry_date
+        expiry_str = user[8]
         try:
             expiry_dt = datetime.strptime(expiry_str, '%Y-%m-%d %H:%M:%S')
             if datetime.now() > expiry_dt:
@@ -334,7 +328,6 @@ async def handle_all_messages(message: Message, state: FSMContext):
     user = await get_user(user_id)
     is_admin = (user_id in ADMIN_IDS)
 
-    # בדיקת תוקף מנוי
     if user and not is_admin:
         expiry_str = user[8]
         try:
@@ -359,7 +352,6 @@ async def handle_all_messages(message: Message, state: FSMContext):
 
     current_state = await state.get_state()
 
-    # --- תהליך הרשמה מדורג ---
     if current_state == RegistrationStates.waiting_name.state:
         await state.update_data(reg_name=text)
         await state.set_state(RegistrationStates.waiting_phone)
@@ -372,7 +364,6 @@ async def handle_all_messages(message: Message, state: FSMContext):
         await state.update_data(reg_phone=phone)
         await state.set_state(RegistrationStates.waiting_car_brand)
         
-        # בניית מקלדת חברות רכב
         brand_buttons = [[KeyboardButton(text=b)] for b in CAR_BRANDS[:12]]
         brand_buttons.append([KeyboardButton(text="⬅️ חזרה לתפריט הראשי")])
         brand_kb = ReplyKeyboardMarkup(keyboard=brand_buttons, resize_keyboard=True)
@@ -406,7 +397,7 @@ async def handle_all_messages(message: Message, state: FSMContext):
             [KeyboardButton(text="10"), KeyboardButton(text="14"), KeyboardButton(text="20"), KeyboardButton(text="50")],
             [KeyboardButton(text="⬅️ חזרה לתפריט הראשי")]
         ], resize_keyboard=True)
-        await message.answer("💺 כמה **מקומות ישיבה** יש ברכב שלך (ללא הנהג, בין 4 ל-50)? בחר או הקלד מספר:", reply_markup=seats_kb)
+        await message.answer("💺 כמה **מקומות ישיבה** יש ברכב שלך (ללא הנהג, בין 4 ל-50)?", reply_markup=seats_kb)
         return
 
     if current_state == RegistrationStates.waiting_car_seats.state:
@@ -425,7 +416,6 @@ async def handle_all_messages(message: Message, state: FSMContext):
         car_year = data.get('reg_car_year')
         
         role = 'admin' if is_admin else 'user'
-        # מנוי חינמי אוטומטי ל-30 יום בדיוק
         expiry = (datetime.now() + timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
 
         async with aiosqlite.connect(DB_FILE) as db:
@@ -459,13 +449,12 @@ async def handle_all_messages(message: Message, state: FSMContext):
                             await process_lead_request_safe(message, user_id, pending_lead, "לא צוין זמן")
         return
 
-    # --- שאר הפונקציות (פנוי/תפוס, הגדרת ערים מדויקת, פרופיל, ניהול אדמין) ---
     if text == "🟢 פנוי לקריאות":
         await state.set_state(BotStates.waiting_add_city)
         kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ חזרה לתפריט הראשי")]], resize_keyboard=True)
         await message.answer(
             "🟢 מעבר למצב פנוי לקריאות:\n"
-            "שלח כעת את שם העיר/ישוב שבה אתה פנוי מתוך רשימת היישובים בישראל (או כתוב למשל 'ירושלים'):",
+            "שלח כעת את שם העיר/ישוב שבה אתה פנוי מתוך רשימת היישובים בישראל:",
             reply_markup=kb
         )
         return
@@ -532,12 +521,19 @@ async def handle_all_messages(message: Message, state: FSMContext):
 
     if text == "💎 מצב מנוי ופרופיל":
         u_data = await get_user(user_id)
-        u_name = u_data[0] if u_data else "לא ידוע"
-        brand, model, car_year, seats = u_data[3], u_data[4], u_data[5], u_data[6]
-        radius_val = u_data[11] if u_data else 5
-        cities_val = u_data[12] if u_data else ""
-        total_trips = u_data[13] if u_data and len(u_data) > 13 else 0
-        expiry_val = u_data[8] if u_data and len(u_data) > 8 else "לא מוגבל"
+        if not u_data:
+            await message.answer("⚠️ לא נמצאו נתוני פרופיל. שלח /start כדי להירשם.")
+            return
+            
+        u_name = u_data[0] if u_data[0] else "לא ידוע"
+        brand = u_data[3] if u_data[3] else "לא מוגדר"
+        model = u_data[4] if u_data[4] else ""
+        car_year = u_data[5] if u_data[5] else ""
+        seats = u_data[6] if u_data[6] else 4
+        expiry_val = u_data[8] if u_data[8] else "לא מוגבל"
+        radius_val = u_data[11] if u_data[11] else 5
+        cities_val = u_data[12] if u_data[12] else ""
+        total_trips = u_data[13] if u_data[13] else 0
 
         await message.answer(
             f"💎 **האזור האישי והפרופיל שלך:**\n\n"
@@ -675,10 +671,6 @@ async def handle_all_messages(message: Message, state: FSMContext):
         phone_val = text
         await state.update_data(lead_phone=phone_val)
         
-        data = await state.get_data()
-        text_content = data.get('lead_text')
-        cities, price, has_time = parse_order_text(text_content)
-
         dest_kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="👥 למשתמשי הבוט הפרטיים", callback_data="dest_users")],
             [InlineKeyboardButton(text="🏢 לקבוצות הבוט", callback_data="dest_groups")],
@@ -688,7 +680,6 @@ async def handle_all_messages(message: Message, state: FSMContext):
         await message.answer("🎯 **בחר לאן לפרסם:**", reply_markup=dest_kb)
         return
 
-# --- ניהול משתמשים ואורך מנוי מתקדם ע"י אדמין ---
 @dp.callback_query(F.data == "admin_list_users")
 async def cb_admin_list_users(callback: CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
@@ -725,8 +716,7 @@ async def cb_manage_user(callback: CallbackQuery):
         f"👤 **ניהול משתמש:** {name}\n"
         f"• ID: `{uid}` | טלפון: {phone}\n"
         f"• רכב: {brand} {model} ({year}) | מקומות: {seats}\n"
-        f"• תוקף מנוי נוכחי: **{expiry}**\n"
-        f"• סטטוס חסימה: {'חסום ❌' : 'פעיל 🟢' if not blocked else 'חסום ❌'}",
+        f"• תוקף מנוי נוכחי: **{expiry}**",
         reply_markup=kb
     )
 
@@ -753,7 +743,7 @@ async def cb_extend_sub(callback: CallbackQuery):
         await db.execute("UPDATE users SET expiry_date = ? WHERE user_id = ?", (new_expiry, uid))
         await db.commit()
 
-    await callback.answer(f"המנוי האריך בהצלחה עד {new_expiry}!")
+    await callback.answer(f"המנוי הואריך עד {new_expiry}!")
     await cb_manage_user(callback)
 
 @dp.callback_query(F.data.startswith("toggle_block_"))
@@ -775,7 +765,6 @@ async def cb_toggle_block(callback: CallbackQuery):
 async def cb_admin_back(callback: CallbackQuery):
     await callback.message.edit_text("🛠️ פאנל ניהול ראשי:", reply_markup=get_admin_keyboard())
 
-# --- פרסום קריאות וסינון לפי עיר מוצא מדויק ---
 @dp.callback_query(F.data.startswith("dest_"))
 async def destination_chosen(callback: CallbackQuery, state: FSMContext):
     action = callback.data.replace("dest_", "")
@@ -833,7 +822,7 @@ async def finish_publishing_lead(message_or_cb, lead_id: int, action="both"):
             if not origin_city:
                 matched = True
             else:
-                user_cities_list = [c.strip() for c in f_cities.split(',') if c.strip()]
+                user_cities_list = [c.strip() for c in f_cities.split(',') if f_cities]
                 for u_c in user_cities_list:
                     if u_c in origin_city or origin_city in u_c:
                         matched = True
@@ -976,7 +965,7 @@ async def app_close_callback(callback: CallbackQuery):
 async def main():
     await init_db()
     await start_web_server()
-    print("✨ בוט השילוח והניהול פועל בהצלחה עם שרת Web פנימי וסינון ערים מלא!")
+    print("✨ בוט השילוח והניהול פועל בהצלחה עם שרת Web פנימי ופרופיל מתוקן!")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
