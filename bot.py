@@ -64,6 +64,7 @@ class BotStates(StatesGroup):
     waiting_driver_time = State()
     waiting_station_name_input = State()
     editing_lead_content = State()
+    waiting_manual_close_driver = State()  # מצב להקלדת נהג ידנית לסגירת קריאה
 
 CAR_BRANDS = [
     "טיוטה (Toyota)", "הונדה (Honda)", "יונדאי (Hyundai)", "קיה (Kia)",
@@ -351,6 +352,64 @@ async def handle_all_messages(message: Message, state: FSMContext):
         return
 
     current_state = await state.get_state()
+
+    # טיפול בסגירת קריאה ידנית לפי נהג (יוזר או טלפון)
+    if current_state == BotStates.waiting_manual_close_driver.state:
+        if text == "❌ ביטול":
+            await state.clear()
+            await message.answer("❌ בוטל.", reply_markup=get_main_keyboard(user_id, role_val, current_status))
+            return
+        data = await state.get_data()
+        lead_id = data.get('manual_lead_id')
+        
+        # חיפוש נהג לפי יוזר או טלפון במסד הנתונים
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute("SELECT user_id, full_name, phone FROM users WHERE phone = ? OR full_name LIKE ?", (text, f"%{text}%")) as cur:
+                target_driver = await cur.fetchone()
+        
+        if not target_driver:
+            await message.answer("⚠️ לא נמצא נהג התואם לנתונים שהוזנו. אנא נסה שוב או לחץ ביטול:")
+            return
+            
+        driver_id = target_driver[0]
+        driver_name = target_driver[1]
+        
+        # סגירת הקריאה על הנהג שנמצא
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute('UPDATE leads SET status = "closed", closed_with = ? WHERE lead_id = ?', (driver_name, lead_id))
+            await db.execute('UPDATE users SET total_trips = total_trips + 1 WHERE user_id = ?', (driver_id,))
+            
+            async with db.execute('SELECT message_text, phone_number, price FROM leads WHERE lead_id = ?', (lead_id,)) as cur:
+                lead_data = await cur.fetchone()
+            
+            msg_text = lead_data[0] if lead_data else ""
+            customer_phone = lead_data[1] if lead_data else "לא זמין"
+            price_val = lead_data[2] if lead_data else 0.0
+
+            if price_val > 0:
+                comm_amount = (price_val * 10.0) / 100.0
+                now_str = datetime.now().strftime('%d/%m/%Y %H:%M')
+                publisher = await bot.get_chat(user_id)
+                pub_username = f"@{publisher.username}" if publisher.username else f"מזהה: {user_id}"
+                await db.execute('''
+                    INSERT INTO driver_debts (user_id, station_id, amount, order_id, order_text, publisher_name, publisher_username, is_paid, date)
+                    VALUES (?, 1, ?, ?, ?, ?, ?, 0, ?)
+                ''', (driver_id, comm_amount, lead_id, msg_text, message.from_user.full_name, pub_username, now_str))
+
+            await db.commit()
+
+        try:
+            await bot.send_message(
+                driver_id,
+                f"🎉 **עדכון משמח! הקריאה #{lead_id} נסגרה עליך ידנית על ידי הסדרן!**\n\n"
+                f"📝 תוכן: {msg_text}\n📞 טלפון לקוח: {customer_phone}"
+            )
+        except:
+            pass
+
+        await state.clear()
+        await message.answer(f"✅ קריאה #{lead_id} נסגרה בהצלחה על הנהג **{driver_name}** והוא חויב בעמלה!", reply_markup=get_main_keyboard(user_id, role_val, current_status))
+        return
 
     if current_state == RegistrationStates.waiting_name.state:
         await state.update_data(reg_name=text)
@@ -888,10 +947,13 @@ async def process_lead_request_safe(message_or_callback, requester_id: int, lead
         f"האם לאשר או לסגור את הפנייה?"
     )
 
+    # כפתורי ניהול מלאים שאינם נעלמים ומאפשרים שליטה מלאה
     buttons = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ אישור בלבד", callback_data=f"app_only_{lead_id}_{requester_id}")],
-        [InlineKeyboardButton(text="✅ אישור + סגירת קריאה וחיוב", callback_data=f"app_close_{lead_id}_{requester_id}")],
-        [InlineKeyboardButton(text="❌ דחייה", callback_data=f"rej_lead_{lead_id}_{requester_id}")],
+        [InlineKeyboardButton(text="✅ אישור פנייה (פתיחת שיחה)", callback_data=f"app_only_{lead_id}_{requester_id}")],
+        [InlineKeyboardButton(text="✅ סגור קריאה על נהג זה + עמלה", callback_data=f"app_close_{lead_id}_{requester_id}")],
+        [InlineKeyboardButton(text="🔒 סגור קריאה ידנית על נהג אחר", callback_data=f"manual_close_{lead_id}")],
+        [InlineKeyboardButton(text="🗑️ מחק קריאה", callback_data=f"delete_lead_{lead_id}")],
+        [InlineKeyboardButton(text="❌ דחייה", callback_data=f"rej_lead_{lead_id}_{requester_id}")]
     ])
 
     await bot.send_message(publisher_id, alert_to_publisher, reply_markup=buttons)
@@ -905,7 +967,8 @@ async def cb_app_only(callback: CallbackQuery):
         await bot.send_message(requester_id, f"✅ הבקשה שלך לקריאה #{lead_id} אושרה על ידי הסדרן!")
     except:
         pass
-    await callback.message.edit_text(f"✅ הבקשה לקריאה #{lead_id} אושרה.")
+    # משאיר את ההודעה עם הכפתורים פעילים כך שהסדרן יוכל להמשיך לנהל או לסגור את הקריאה בהמשך
+    await callback.answer("הפנייה אושרה. חלון הניהול נשאר פעיל.")
 
 @dp.callback_query(F.data.startswith("rej_lead_"))
 async def cb_rej_lead(callback: CallbackQuery):
@@ -916,7 +979,22 @@ async def cb_rej_lead(callback: CallbackQuery):
         await bot.send_message(requester_id, f"❌ בקשתך לקריאה #{lead_id} נדחתה.")
     except:
         pass
-    await callback.message.edit_text(f"❌ הבקשה נדחתה.")
+    await callback.message.edit_text(f"❌ בקשת הנהג לקריאה #{lead_id} נדחתה.")
+
+@dp.callback_query(F.data.startswith("delete_lead_"))
+async def cb_delete_lead(callback: CallbackQuery):
+    lead_id = int(callback.data.replace("delete_lead_", ""))
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("UPDATE leads SET status = 'deleted' WHERE lead_id = ?", (lead_id,))
+        await db.commit()
+    await callback.message.edit_text(f"🗑️ קריאה #{lead_id} נמחקה בהצלחה מהמערכת.")
+
+@dp.callback_query(F.data.startswith("manual_close_"))
+async def cb_manual_close(callback: CallbackQuery, state: FSMContext):
+    lead_id = int(callback.data.replace("manual_close_", ""))
+    await state.set_state(BotStates.waiting_manual_close_driver)
+    await state.update_data(manual_lead_id=lead_id)
+    await callback.message.answer("✍️ שלח כעת את **שם הנהג** או **מספר הטלפון** שלו כדי לסגור עליו את הקריאה ידנית:")
 
 @dp.callback_query(F.data.startswith("app_close_"))
 async def app_close_callback(callback: CallbackQuery):
@@ -965,7 +1043,7 @@ async def app_close_callback(callback: CallbackQuery):
 async def main():
     await init_db()
     await start_web_server()
-    print("✨ בוט השילוח והניהול פועל בהצלחה עם שרת Web פנימי ופרופיל מתוקן!")
+    print("✨ בוט השילוח והניהול פועל בהצלחה עם חלון ניהול קריאות מתקדם!")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
