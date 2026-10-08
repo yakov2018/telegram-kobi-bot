@@ -21,11 +21,10 @@ RAW_TOKEN = os.environ.get("BOT_TOKEN", "")
 BOT_TOKEN = RAW_TOKEN.strip().replace("[", "").replace("]", "").replace("'", "").replace('"', "").replace(" ", "")
 
 if not BOT_TOKEN:
-    print("שגיאה קריטית: משתנה הסביבה BOT_TOKEN ריק או לא מוגדר!")
     sys.exit(1)
 
 ADMIN_IDS = [8644923212, 552821474]
-DB_FILE = 'bot_database_v5.db'
+DB_FILE = 'bot_database_v6.db'
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
 dp = Dispatcher()
@@ -66,16 +65,13 @@ class BotStates(StatesGroup):
     waiting_debt_cancel_reason = State()
 
 CAR_DATABASE = {
-    "טויוטה (Toyota)": {"קורולה": list(range(1995, 2027)), "יאריס": list(range(1999, 2027)), "C-HR": list(range(2017, 2027)), "ראב 4": list(range(1995, 2027)), "קאמרי": list(range(1995, 2027)), "לנד קרוזר": list(range(1995, 2027))},
-    "יונדאי (Hyundai)": {"אלנטרה": list(range(1995, 2027)), "איוניק": list(range(2016, 2023)), "טוסון": list(range(2004, 2027)), "סנטה פה": list(range(2001, 2027)), "i10": list(range(2008, 2027))},
-    "קיה (Kia)": {"פיקנטו": list(range(2011, 2027)), "ספורטאז'": list(range(1995, 2027)), "נירו": list(range(2016, 2027)), "סורנטו": list(range(2002, 2027))},
+    "טויוטה (Toyota)": {"קורולה": list(range(1995, 2027)), "יאריס": list(range(1999, 2027)), "C-HR": list(range(2017, 2027)), "ראב 4": list(range(1995, 2027))},
+    "יונדאי (Hyundai)": {"אלנטרה": list(range(1995, 2027)), "איוניק": list(range(2016, 2023)), "טוסון": list(range(2004, 2027))},
+    "קיה (Kia)": {"פיקנטו": list(range(2011, 2027)), "ספורטאז'": list(range(1995, 2027)), "נירו": list(range(2016, 2027))},
     "אחר (הקלדה ידנית)": {}
 }
 
-ISRAELI_CITIES = [
-    "ירושלים", "תל אביב", "חיפה", "ראשון לציון", "פתח תקווה", "אשדוד", "נתניה", "בני ברק", "באר שבע", "חולון",
-    "רמת גן", "אשקלון", "בת ים", "בית שמש", "הרצליה", "כפר סבא", "חדרה", "מודיעין", "לוד", "רמלה", "רחובות", "מודיעין עילית"
-]
+ISRAELI_CITIES = ["ירושלים", "תל אביב", "חיפה", "ראשון לציון", "פתח תקווה", "אשדוד", "נתניה", "בני ברק", "באר שבע", "חולון", "רמת גן", "מודיעין עילית"]
 CITY_ALIASES = {"ים": "ירושלים", "פת": "פתח תקווה", "תא": "תל אביב", "סבא": "כפר סבא", "ראשון": "ראשון לציון", "רג": "רמת גן", "שמש": "בית שמש", "בב": "בני ברק", "ספר": "מודיעין עילית"}
 
 async def init_db():
@@ -118,6 +114,7 @@ def get_main_keyboard(user_id, role='user', current_status='busy'):
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
     user_id = message.from_user.id
     auth_status = await check_user_auth(user_id)
     is_admin = (user_id in ADMIN_IDS)
@@ -140,33 +137,91 @@ async def cmd_start(message: Message, state: FSMContext):
     if auth_status == "new":
         if not message.from_user.username: return await message.answer("⚠️ חובה להגדיר שם משתמש בטלגרם.")
         await state.set_state(RegistrationStates.waiting_name)
-        return await message.answer("👋 שלום וברוכים הבאים! אנא שלח את **השם המלא** שלך:")
+        return await message.answer("👋 שלום וברוכים הבאים!\nאנא שלח את **השם המלא** שלך:")
 
-    await state.clear()
     await message.answer("🎛️ **תפריט ראשי:**", reply_markup=get_main_keyboard(user_id, role_val, current_status))
 
 @dp.message()
 async def handle_all_messages(message: Message, state: FSMContext):
     user_id = message.from_user.id
-    user = await get_user_dict(user_id)
-    
-    # הגנה מפני משתמש שלא עבר רישום
-    if not user:
-        if message.text and not message.text.startswith('/'):
+    text = message.text.strip() if message.text else ""
+    current_state = await state.get_state()
+
+    if text in ["/start", "תפריט", "⬅️ חזרה לתפריט הראשי", "⬅ חזרה", "❌ ביטול"]:
+        await state.clear()
+        user = await get_user_dict(user_id)
+        if user:
+            return await message.answer("🎛️ **תפריט ראשי:**", reply_markup=get_main_keyboard(user_id, user['role'], user['status']))
+        else:
             await state.set_state(RegistrationStates.waiting_name)
-            await state.update_data(reg_name=message.text)
-            await state.set_state(RegistrationStates.waiting_birth_year)
-            return await message.answer("📅 באיזו **שנת לידה** נולדת? (מספר בלבד):")
-        return await message.answer("⚠️ יש לשלוח `/start` כדי להתחיל את ההרשמה מחדש.")
+            return await message.answer("👋 אנא שלח את **השם המלא** שלך:")
+
+    # --- ניהול שלבי ההרשמה ---
+    if current_state == RegistrationStates.waiting_name.state:
+        await state.update_data(reg_name=text)
+        await state.set_state(RegistrationStates.waiting_birth_year)
+        return await message.answer("📅 באיזו **שנת לידה** נולדת? (מספר בלבד, למשל 1995):", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="⬅️ חזרה")]], resize_keyboard=True))
+
+    if current_state == RegistrationStates.waiting_birth_year.state:
+        if not text.isdigit() or not (1920 <= int(text) <= 2026):
+            return await message.answer("⚠️ נא להזין שנת לידה חוקית במספרים בלבד.")
+        if 2026 - int(text) < 18:
+            await state.clear()
+            return await message.answer("❌ **שגיאה:** המערכת מיועדת לגילאי 18 ומעלה בלבד.")
+        
+        await state.update_data(reg_birth_year=text)
+        await state.set_state(RegistrationStates.waiting_phone)
+        return await message.answer("📱 לחץ על הכפתור למטה כדי **לשתף את מספר הטלפון** (חובה):", reply_markup=ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📱 שיתוף מספר טלפון", request_contact=True), KeyboardButton(text="⬅️ חזרה")]], resize_keyboard=True))
+
+    if current_state == RegistrationStates.waiting_phone.state:
+        if not message.contact:
+            return await message.answer("⚠️ חובה ללחוץ על כפתור שיתוף מספר הטלפון למטה.")
+        await state.update_data(reg_phone=message.contact.phone_number)
+        await state.set_state(RegistrationStates.waiting_car_brand)
+        return await message.answer("🚗 בחר **חברת רכב**:", reply_markup=create_keyboard(list(CAR_DATABASE.keys()), columns=2))
+
+    if current_state == RegistrationStates.waiting_car_brand.state:
+        await state.update_data(reg_car_brand=text)
+        await state.set_state(RegistrationStates.waiting_car_model)
+        if text in CAR_DATABASE and text != "אחר (הקלדה ידנית)":
+            return await message.answer(f"בחר דגם עבור **{text}**:", reply_markup=create_keyboard(list(CAR_DATABASE[text].keys()), columns=2))
+        return await message.answer("✍️ הקלד ידנית את **דגם הרכב**:")
+
+    if current_state == RegistrationStates.waiting_car_model.state:
+        await state.update_data(reg_car_model=text)
+        await state.set_state(RegistrationStates.waiting_car_year)
+        return await message.answer("📅 הקלד את **שנת הרכב** (למשל 2020):")
+
+    if current_state == RegistrationStates.waiting_car_year.state:
+        if not text.isdigit(): return await message.answer("⚠️ נא להזין מספר שנת רכב.")
+        await state.update_data(reg_car_year=text)
+        await state.set_state(RegistrationStates.waiting_car_seats)
+        return await message.answer("💺 כמה **מקומות ישיבה** (4-50)?", reply_markup=create_keyboard(["4", "5", "6", "7", "10"], columns=3))
+
+    if current_state == RegistrationStates.waiting_car_seats.state:
+        seats_val = int(text) if text.isdigit() and 4 <= int(text) <= 50 else 4
+        data = await state.get_data()
+        expiry = (datetime.now() + timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
+
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute('''INSERT OR REPLACE INTO users (user_id, full_name, phone, birth_date, car_brand, car_model, car_year, car_seats, status, expiry_date, role)
+                              VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'busy', ?, 'admin')''', 
+                             (user_id, data.get('reg_name'), data.get('reg_phone'), data.get('reg_birth_year'), data.get('reg_car_brand'), data.get('reg_car_model'), data.get('reg_car_year'), seats_val, expiry))
+            await db.commit()
+
+        await state.clear()
+        user = await get_user_dict(user_id)
+        return await message.answer("✅ **ההרשמה הושלמה בהצלחה!** מנוי הופעל.", reply_markup=get_main_keyboard(user_id, user['role'], user['status']))
+
+    # --- משתמש רשום לחלוטין ---
+    user = await get_user_dict(user_id)
+    if not user:
+        await state.set_state(RegistrationStates.waiting_name)
+        return await message.answer("👋 אנא שלח את **השם המלא** שלך:")
 
     is_admin = (user_id in ADMIN_IDS)
     role_val = user['role']
     current_status = user['status']
-    text = message.text.strip() if message.text else ""
-
-    if text in ["/start", "תפריט", "⬅️ חזרה לתפריט הראשי", "⬅ חזרה", "❌ ביטול"]:
-        await state.clear()
-        return await message.answer("🎛️ **תפריט ראשי:**", reply_markup=get_main_keyboard(user_id, role_val, current_status))
 
     if text == "ℹ️ אודות ויצירת קשר":
         return await message.answer("ℹ️ מערכת ניהול ושילוח חכמה בטלגרם.\nלפניות תמיכה פנה למנהל.", reply_markup=get_main_keyboard(user_id, role_val, current_status))
@@ -182,6 +237,17 @@ async def handle_all_messages(message: Message, state: FSMContext):
 
     await message.answer("🎛️ בחר אפשרות מהתפריט:", reply_markup=get_main_keyboard(user_id, role_val, current_status))
 
+def create_keyboard(items, columns=3, add_back=True):
+    kb, row = [], []
+    for item in items:
+        row.append(KeyboardButton(text=str(item)))
+        if len(row) == columns:
+            kb.append(row)
+            row = []
+    if row: kb.append(row)
+    if add_back: kb.append([KeyboardButton(text="⬅️ חזרה")])
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
 def get_admin_keyboard():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="👥 ניהול משתמשים"), KeyboardButton(text="📊 סטטיסטיקות מערכת")],
@@ -191,7 +257,7 @@ def get_admin_keyboard():
 async def main():
     await init_db()
     await start_web_server()
-    print("✨ בוט פועל בצורה תקינה!")
+    print("✨ בוט פועל בצורה מושלמת!")
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
