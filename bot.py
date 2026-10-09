@@ -185,8 +185,8 @@ async def reg_birth(message: Message, state: FSMContext):
 @router.message(Reg.phone)
 async def reg_phone(message: Message, state: FSMContext):
     if not message.contact: return await message.answer("⚠️ חובה לשתף איש קשר דרך הכפתור.")
-    phone = message.contact.phone_number
-    if not phone.startswith("05") and not phone.startswith("+9725"): return await message.answer("⚠️ מספר ישראלי חובה.")
+    phone = message.contact.phone_number.replace("+", "").replace("-", "").replace(" ", "")
+    if not phone.startswith("05") and not phone.startswith("9725"): return await message.answer("⚠️ מספר ישראלי חובה (מתחיל ב-05 או 9725).")
     await state.update_data(phone=phone)
     await state.set_state(Reg.car_brand)
     kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=b)] for b in CAR_BRANDS] + [[KeyboardButton(text="❌ ביטול וחזרה")]], resize_keyboard=True)
