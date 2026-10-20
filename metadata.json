@@ -1,0 +1,7 @@
+{
+  "name": "Kobi ERP Bot - Taxi & Courier Dispatch System",
+  "description": "Full-stack ERP and dispatch management system for taxi and courier stations, featuring smart call distribution, automated commission and debt tracking, driver work zones, dispatcher controls, and admin God Mode.",
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
