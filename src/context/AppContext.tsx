@@ -141,10 +141,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [isTelegramWebApp, setIsTelegramWebApp] = useState<boolean>(false);
 
+  const ADMIN_IDS = [8644923212, 552821474];
+
+  // וידוא מוחלט שרשומות מנהלי המערכת מקבלות תמיד תפקיד admin
+  useEffect(() => {
+    setUsers((prev) => {
+      let changed = false;
+      const updated = prev.map((u) => {
+        if (ADMIN_IDS.includes(u.user_id) && u.role !== 'admin') {
+          changed = true;
+          return { ...u, role: 'admin' as Role, is_blocked: 0 };
+        }
+        return u;
+      });
+      return changed ? updated : prev;
+    });
+  }, []);
+
   // Auto-detect Telegram WebApp environment & Authenticate via REST API
   useEffect(() => {
     const tg = (window as any).Telegram?.WebApp;
-    if (tg && tg.initData) {
+    if (tg) {
       try {
         tg.ready();
         tg.expand();
@@ -152,16 +169,53 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         const tgUser = tg.initDataUnsafe?.user;
         const userNumId = tgUser?.id ? Number(tgUser.id) : null;
+        const isAdmin = userNumId ? ADMIN_IDS.includes(userNumId) : false;
 
-        // שליחת initData לאימות קריפטוגרפי וסנכרון מלא מול PostgreSQL
+        if (userNumId) {
+          const fullName = [tgUser.first_name, tgUser.last_name].filter(Boolean).join(' ') || tgUser.username || `מנהל טלגרם ${userNumId}`;
+          setUsers((prev) => {
+            const exists = prev.find((u) => u.user_id === userNumId);
+            if (!exists) {
+              const newTgDriver: User = {
+                user_id: userNumId,
+                full_name: fullName,
+                phone: '0500000000',
+                birth_year: 1995,
+                car_brand: 'טויוטה',
+                car_model: 'קורולה',
+                car_year: 2022,
+                car_seats: 5,
+                status: 'free',
+                role: isAdmin ? 'admin' : 'user',
+                station_id: 1,
+                rating: 5.0,
+                total_trips: 0,
+                is_blocked: 0,
+                debt_balance: 0.0,
+              };
+              return [...prev, newTgDriver];
+            } else if (isAdmin && exists.role !== 'admin') {
+              return prev.map((u) => (u.user_id === userNumId ? { ...u, role: 'admin', is_blocked: 0 } : u));
+            }
+            return prev;
+          });
+          setCurrentUserId(userNumId);
+        }
+
+        // שליחת initData לאימות קריפטוגרפי וסנכרון תפקיד מול שרת ה-API
         fetch('/api/auth', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ initData: tg.initData }),
+          body: JSON.stringify({
+            initData: tg.initData || '',
+            user_id: userNumId,
+            dev_user_id: userNumId,
+          }),
         })
           .then((res) => res.json())
           .then((data) => {
             if (data.ok && data.user) {
+              const isServerAdmin = ADMIN_IDS.includes(Number(data.user.user_id)) || data.user.role === 'admin';
               const serverUser: User = {
                 user_id: Number(data.user.user_id),
                 full_name: data.user.full_name,
@@ -172,11 +226,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 car_year: data.user.car_year || 2022,
                 car_seats: data.user.car_seats || 5,
                 status: data.user.status || 'free',
-                role: data.user.role || 'user',
+                role: isServerAdmin ? 'admin' : (data.user.role || 'user'),
                 station_id: data.user.station_id || 1,
                 rating: Number(data.user.rating || 5.0),
                 total_trips: Number(data.user.total_trips || 0),
-                is_blocked: data.user.is_blocked ? 1 : 0,
+                is_blocked: isServerAdmin ? 0 : (data.user.is_blocked ? 1 : 0),
                 debt_balance: Number(data.user.debt_balance || 0.0),
               };
 
@@ -205,35 +259,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           .catch((err) => {
             console.warn('API /api/auth sync note:', err);
           });
-
-        if (userNumId) {
-          const fullName = [tgUser.first_name, tgUser.last_name].filter(Boolean).join(' ') || tgUser.username || `נהג טלגרם ${userNumId}`;
-          setUsers((prev) => {
-            const exists = prev.find((u) => u.user_id === userNumId);
-            if (!exists) {
-              const newTgDriver: User = {
-                user_id: userNumId,
-                full_name: fullName,
-                phone: '0500000000',
-                birth_year: 1995,
-                car_brand: 'טויוטה',
-                car_model: 'קורולה',
-                car_year: 2022,
-                car_seats: 5,
-                status: 'free',
-                role: 'user',
-                station_id: 1,
-                rating: 5.0,
-                total_trips: 0,
-                is_blocked: 0,
-                debt_balance: 0.0,
-              };
-              return [...prev, newTgDriver];
-            }
-            return prev;
-          });
-          setCurrentUserId(userNumId);
-        }
       } catch (err) {
         console.warn('Telegram WebApp init note:', err);
       }

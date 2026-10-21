@@ -4,6 +4,7 @@ import { Header } from './components/Header';
 import { DispatcherPanel } from './components/DispatcherPanel';
 import { DriverPanel } from './components/DriverPanel';
 import { AdminPanel } from './components/AdminPanel';
+import { AdminDashboard } from './components/AdminDashboard';
 import { TelegramSimulator } from './components/TelegramSimulator';
 import { RegistrationModal } from './components/RegistrationModal';
 import { MiniAppGuideModal } from './components/MiniAppGuideModal';
@@ -27,6 +28,11 @@ export const AppContent: React.FC = () => {
   const [erpSubTab, setErpSubTab] = useState<'dispatcher' | 'admin' | 'driver'>('dispatcher');
   const [isRegisterOpen, setIsRegisterOpen] = useState(false);
   const [isGuideOpen, setIsGuideOpen] = useState(false);
+
+  // ברגע שהמשתמש הוא מנהל מערכת (admin), המערכת מסתירה את המסך הרגיל ומרנדרת את AdminDashboard הייעודי!
+  if (currentUser.role === 'admin') {
+    return <AdminDashboard />;
+  }
 
   const openOrdersCount = orders.filter((o) => o.status === 'open').length;
   const activeDriversCount = users.filter(
