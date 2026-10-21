@@ -102,7 +102,8 @@ export const DriverPanel: React.FC = () => {
     e.preventDefault();
     const minutes = parseInt(etaMinutes, 10);
     if (isNaN(minutes) || minutes <= 0) {
-      alert('נא להזין מספר דקות הגיוני.');
+      setFeedback('⚠️ נא להזין מספר דקות הגיוני.');
+      setTimeout(() => setFeedback(null), 3000);
       return;
     }
 
@@ -440,11 +441,13 @@ export const DriverPanel: React.FC = () => {
                         <button
                           onClick={() => {
                             if (currentUser.status !== 'free') {
-                              alert("⚠️ אתה בסטטוס תפוס! העבר ל'פנוי' בראש הדף קודם.");
+                              setFeedback("⚠️ אתה בסטטוס תפוס! העבר ל'פנוי' בראש הדף קודם.");
+                              setTimeout(() => setFeedback(null), 4000);
                               return;
                             }
                             if (isOverDebtLimit) {
-                              alert('🚫 חשבונך מוקפא עקב חובות (מעל 500 ש"ח)!');
+                              setFeedback('🚫 חשבונך מוקפא עקב חובות (מעל 500 ש"ח)!');
+                              setTimeout(() => setFeedback(null), 4000);
                               return;
                             }
                             setEtaModal({

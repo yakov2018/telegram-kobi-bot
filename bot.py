@@ -17,7 +17,7 @@ from psycopg2.extras import RealDictCursor
 from psycopg2.pool import ThreadedConnectionPool
 import aiosqlite
 
-from aiogram import Bot, Dispatcher, F, Router
+from aiogram import Bot, Dispatcher, F, Router, BaseMiddleware
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -27,7 +27,8 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     WebAppInfo,
-    MenuButtonWebApp
+    MenuButtonWebApp,
+    TelegramObject
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -75,6 +76,64 @@ bot = Bot(token=BOT_TOKEN or "DUMMY_TOKEN_PLEASE_SET_BOT_TOKEN", default=Default
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
+
+# ----------------- סעיף 3: אכיפה קשיחה של שם משתמש (@username) -----------------
+class UsernameEnforcementMiddleware(BaseMiddleware):
+    """
+    חוסם כל פעולה של משתמש שאין לו שם משתמש בטלגרם (@username).
+    שולח הדרכה מפורטת להגדרת שם משתמש ומחייב לחיצה על /start מחדש.
+    זה קריטי עבור יצירת הקישורים הישירים (Deep Links) בין סדרנים לנהגים!
+    """
+    async def __call__(self, handler, event: TelegramObject, data: dict):
+        from_user = getattr(event, "from_user", None)
+        if from_user and not from_user.is_bot:
+            # אם יש שם משתמש - מסנכרנים אותו במסד הנתונים
+            if from_user.username:
+                uname = from_user.username
+                uid = from_user.id
+                if USE_POSTGRES:
+                    def _sync_uname():
+                        try:
+                            with get_pg_cursor() as cur:
+                                cur.execute("UPDATE deliveries_users SET telegram_username = %s WHERE user_id = %s AND (telegram_username IS NULL OR telegram_username != %s)", (uname, uid, uname))
+                        except Exception: pass
+                    asyncio.create_task(run_in_thread(_sync_uname))
+                else:
+                    async def _sync_uname_sqlite():
+                        try:
+                            async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+                                await db.execute("UPDATE deliveries_users SET telegram_username = ? WHERE user_id = ? AND (telegram_username IS NULL OR telegram_username != ?)", (uname, uid, uname))
+                                await db.commit()
+                        except Exception: pass
+                    asyncio.create_task(_sync_uname_sqlite())
+            else:
+                # חסימה מחמירה של משתמש ללא @username
+                guide_text = (
+                    "🚫 <b>חסום לשימוש: חובה להגדיר שם משתמש בטלגרם (@username)!</b>\n\n"
+                    "מערכת ה-ERP פועלת באמצעות קישורים ישירים ומאובטחים (Deep Links) לשיחה בין נהגים, סדרנים ומנהלים.\n\n"
+                    "⚙️ <b>כיצד מגדירים שם משתמש תוך 10 שניות?</b>\n"
+                    "1️⃣ היכנס ל<b>הגדרות</b> בטלגרם (Settings).\n"
+                    "2️⃣ לחץ על <b>הגדר שם משתמש</b> (Username).\n"
+                    "3️⃣ הקלד כינוי באנגלית (לדוגמה: <code>@driver_israel</code>) ולחץ שמור.\n"
+                    "4️⃣ חזור לכאן ולחץ <b>/start</b> מחדש כדי להמשיך!"
+                )
+                if isinstance(event, Message):
+                    chat_type = getattr(event.chat, 'type', 'private')
+                    if chat_type in ('group', 'supergroup'):
+                        await event.reply(
+                            f"⚠️ {from_user.full_name}, חובה להגדיר @username בהגדרות טלגרם כדי להשתמש בבוט!",
+                            reply_markup=ReplyKeyboardRemove()
+                        )
+                    else:
+                        await event.answer(guide_text, parse_mode=ParseMode.HTML)
+                elif isinstance(event, CallbackQuery):
+                    await event.answer("⚠️ חובה להגדיר שם משתמש (@username) בהגדרות טלגרם!", show_alert=True)
+                return
+        return await handler(event, data)
+
+dp.message.middleware(UsernameEnforcementMiddleware())
+dp.callback_query.middleware(UsernameEnforcementMiddleware())
+
 
 ROLE_NAMES = {
     "admin": "מנהל מערכת",
@@ -288,14 +347,15 @@ def _init_db_sync():
             ("pickup_lat", "DOUBLE PRECISION"),
             ("pickup_lon", "DOUBLE PRECISION"),
             ("taken_at", "TIMESTAMP"),
-            ("completed_at", "TIMESTAMP")
+            ("completed_at", "TIMESTAMP"),
+            ("requires_eta", "INTEGER DEFAULT 0")
         ]
         for col_name, col_type in order_columns_to_add:
             try:
                 cur.execute(f"ALTER TABLE deliveries_orders ADD COLUMN IF NOT EXISTS {col_name} {col_type}")
             except Exception: pass
 
-        # 4. טבלת חובות ועמלות
+        # 4. טבלת חובות ועמלות (Ledger)
         cur.execute('''CREATE TABLE IF NOT EXISTS deliveries_debts (
             debt_id SERIAL PRIMARY KEY, 
             order_id INTEGER, 
@@ -304,8 +364,22 @@ def _init_db_sync():
             amount REAL, 
             status TEXT DEFAULT 'unpaid', 
             reason TEXT,
+            appeal_status TEXT DEFAULT 'none',
+            appeal_reason TEXT,
+            transaction_type TEXT DEFAULT 'commission',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             resolved_at TIMESTAMP)''')
+
+        debt_columns_to_add = [
+            ("appeal_status", "TEXT DEFAULT 'none'"),
+            ("appeal_reason", "TEXT"),
+            ("transaction_type", "TEXT DEFAULT 'commission'")
+        ]
+        for col_name, col_type in debt_columns_to_add:
+            try:
+                cur.execute(f"ALTER TABLE deliveries_debts ADD COLUMN IF NOT EXISTS {col_name} {col_type}")
+            except Exception: pass
+
 
         # 5. טבלת הצעות מחיר ו-ETA של נהגים
         cur.execute('''CREATE TABLE IF NOT EXISTS deliveries_order_bids (
@@ -409,11 +483,21 @@ async def init_db():
                 publisher_id INTEGER, station_id INTEGER, driver_id INTEGER, 
                 origin_city TEXT, dest_city TEXT, commission_amount REAL DEFAULT 0.0,
                 pickup_lat REAL, pickup_lon REAL, status TEXT DEFAULT 'open', created_at TEXT,
-                taken_at TEXT, completed_at TEXT)''')
+                taken_at TEXT, completed_at TEXT, requires_eta INTEGER DEFAULT 0)''')
+            try:
+                await db.execute("ALTER TABLE deliveries_orders ADD COLUMN requires_eta INTEGER DEFAULT 0")
+            except Exception: pass
             
             await db.execute('''CREATE TABLE IF NOT EXISTS deliveries_debts (
                 debt_id INTEGER PRIMARY KEY AUTOINCREMENT, order_id INTEGER, driver_id INTEGER,
-                station_id INTEGER, amount REAL, status TEXT DEFAULT 'unpaid', reason TEXT, created_at TEXT, resolved_at TEXT)''')
+                station_id INTEGER, amount REAL, status TEXT DEFAULT 'unpaid', reason TEXT, 
+                appeal_status TEXT DEFAULT 'none', appeal_reason TEXT, transaction_type TEXT DEFAULT 'commission',
+                created_at TEXT, resolved_at TEXT)''')
+            for col, ctype in [("appeal_status", "TEXT DEFAULT 'none'"), ("appeal_reason", "TEXT"), ("transaction_type", "TEXT DEFAULT 'commission'")]:
+                try:
+                    await db.execute(f"ALTER TABLE deliveries_debts ADD COLUMN {col} {ctype}")
+                except Exception: pass
+
 
             await db.execute('''CREATE TABLE IF NOT EXISTS deliveries_order_bids (
                 bid_id INTEGER PRIMARY KEY AUTOINCREMENT, order_id INTEGER, driver_id INTEGER, eta_minutes INTEGER,
@@ -700,7 +784,7 @@ STANDALONE_MINIAPP_HTML = """<!doctype html>
       </div>
     </div>
 
-    <!-- ADMIN TAB (God Mode Master Dashboard) -->
+    <!-- ADMIN TAB (God Mode Master Dashboard - Real CRUD) -->
     <div id="tab-admin" class="hidden space-y-4">
       <div class="bg-slate-900 border border-amber-500/40 rounded-2xl p-4 shadow-lg space-y-3">
         <div class="flex items-center justify-between">
@@ -708,47 +792,171 @@ STANDALONE_MINIAPP_HTML = """<!doctype html>
             <span class="text-xl">👑</span>
             <span class="font-extrabold text-sm text-white">פאנל מנהל ראשי (God Mode)</span>
           </div>
-          <span class="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/30 px-2 py-0.5 rounded font-bold">ADMIN ACTIVE</span>
+          <span class="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/30 px-2 py-0.5 rounded font-bold">LIVE API SYNC</span>
         </div>
-        <p class="text-xs text-slate-300">שליטה מלאה במשתמשים, הגדרות מערכת, מנויים, תחנות ושידורים.</p>
+        <p class="text-xs text-slate-300">שליטה מלאה במשתמשים, תחנות, מנויים, חובות והגדרות מערכת.</p>
       </div>
 
-      <!-- Quick Action Buttons: ניהול משתמשים, הגדרות מערכת, ניהול מנויים, ניהול תחנות -->
-      <div class="grid grid-cols-2 gap-2 text-xs">
-        <button onclick="adminAlert('👥 ניהול משתמשים: כל הנהגים והסדרנים מסונכרנים מול PostgreSQL!')" class="p-3 bg-slate-900 hover:bg-slate-800 rounded-xl border border-slate-800 text-right space-y-1 transition">
-          <span class="text-base block">👥</span>
-          <span class="font-bold text-white block">ניהול משתמשים</span>
-          <span class="text-[10px] text-slate-400 block">הרשאות, סדרנים, חסימות</span>
-        </button>
-
-        <button onclick="adminAlert('⚙️ הגדרות מערכת: עמלת ברירת מחדל 10%, תקרת Auto-Freeze מוגדרת ל-500 שח!')" class="p-3 bg-slate-900 hover:bg-slate-800 rounded-xl border border-slate-800 text-right space-y-1 transition">
-          <span class="text-base block">⚙️</span>
-          <span class="font-bold text-white block">הגדרות מערכת</span>
-          <span class="text-[10px] text-slate-400 block">עמלות, Auto-Freeze, קיצורים</span>
-        </button>
-
-        <button onclick="adminAlert('💎 ניהול מנויים: מנויי VIP Master, Basic ו-Free פעילים במערכת!')" class="p-3 bg-slate-900 hover:bg-slate-800 rounded-xl border border-slate-800 text-right space-y-1 transition">
-          <span class="text-base block">💎</span>
-          <span class="font-bold text-white block">ניהול מנויים</span>
-          <span class="text-[10px] text-slate-400 block">VIP Master, Basic, Free</span>
-        </button>
-
-        <button onclick="adminAlert('🏢 ניהול תחנות: תחנה ראשית פעילה עם 10% עמלה.')" class="p-3 bg-slate-900 hover:bg-slate-800 rounded-xl border border-slate-800 text-right space-y-1 transition">
-          <span class="text-base block">🏢</span>
-          <span class="font-bold text-white block">ניהול תחנות</span>
-          <span class="text-[10px] text-slate-400 block">פתיחת תחנות, עמלות</span>
-        </button>
+      <!-- Admin Sub-navigation -->
+      <div class="bg-slate-900 p-1.5 rounded-xl border border-slate-800 flex flex-wrap gap-1 text-xs">
+        <button onclick="switchAdminSubtab('users')" id="asub-btn-users" class="flex-1 py-1 px-2.5 rounded-lg font-bold bg-amber-500 text-slate-950 transition">👥 משתמשים</button>
+        <button onclick="switchAdminSubtab('stations')" id="asub-btn-stations" class="flex-1 py-1 px-2.5 rounded-lg font-bold bg-slate-800 text-slate-300 transition">🏢 תחנות</button>
+        <button onclick="switchAdminSubtab('subs')" id="asub-btn-subs" class="flex-1 py-1 px-2.5 rounded-lg font-bold bg-slate-800 text-slate-300 transition">💎 מנויים</button>
+        <button onclick="switchAdminSubtab('debts')" id="asub-btn-debts" class="flex-1 py-1 px-2.5 rounded-lg font-bold bg-slate-800 text-slate-300 transition">💳 חובות</button>
+        <button onclick="switchAdminSubtab('settings')" id="asub-btn-settings" class="flex-1 py-1 px-2.5 rounded-lg font-bold bg-slate-800 text-slate-300 transition">⚙️ הגדרות</button>
+        <button onclick="switchAdminSubtab('broadcast')" id="asub-btn-broadcast" class="flex-1 py-1 px-2.5 rounded-lg font-bold bg-slate-800 text-slate-300 transition">📢 שידור</button>
       </div>
 
-      <!-- Broadcast Section -->
-      <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-sm space-y-2.5">
-        <span class="text-xs font-bold text-white flex items-center gap-1.5">
-          📢 שידור הודעת Broadcast לכל המערכת
-        </span>
-        <textarea id="admin-broadcast-text" rows="2" placeholder="הקלד כאן הודעת הנהלה מתפרצת..." class="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-xs text-white focus:outline-none focus:border-amber-500 resize-none"></textarea>
-        <button onclick="sendAdminBroadcast()" class="w-full py-2.5 rounded-xl font-bold text-xs bg-amber-500 hover:bg-amber-400 text-slate-950 shadow">
-          שגר הודעה לכל הנהגים והסדרנים
-        </button>
+      <!-- Toast Feedback -->
+      <div id="admin-toast" class="hidden p-3 rounded-xl text-xs font-bold transition flex items-center justify-between"></div>
+
+      <!-- 1. USERS SUBTAB -->
+      <div id="asub-users" class="space-y-3">
+        <div class="flex items-center justify-between gap-2">
+          <input type="text" id="admin-user-search" oninput="renderAdminUsers()" placeholder="חפש משתמש לפי שם, טלפון או ID..." class="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-amber-500">
+          <button onclick="loadAdminUsers()" class="bg-slate-800 hover:bg-slate-700 text-white text-xs px-3 py-2 rounded-xl font-bold whitespace-nowrap">🔄 רענן</button>
+        </div>
+        <div id="admin-users-list" class="space-y-2.5 text-xs">
+          <div class="p-4 text-center text-slate-400">טוען משתמשים מ-PostgreSQL...</div>
+        </div>
+      </div>
+
+      <!-- 2. STATIONS SUBTAB -->
+      <div id="asub-stations" class="hidden space-y-4">
+        <!-- Create Station Card -->
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3 text-xs">
+          <span class="font-bold text-white block">➕ פתיחת תחנה חדשה במערכת</span>
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="text-[10px] text-slate-400 block mb-1">שם התחנה</label>
+              <input type="text" id="new-station-name" placeholder="למשל: תחנת הצפון" class="w-full bg-slate-950 border border-slate-700 rounded-xl p-2 text-xs text-white focus:outline-none focus:border-amber-500">
+            </div>
+            <div>
+              <label class="text-[10px] text-slate-400 block mb-1">אחוז עמלה (%)</label>
+              <input type="number" id="new-station-comm" value="10.0" step="0.5" class="w-full bg-slate-950 border border-slate-700 rounded-xl p-2 text-xs text-white focus:outline-none focus:border-amber-500">
+            </div>
+          </div>
+          <button onclick="createStationSubmit()" class="w-full py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-xl font-bold transition">
+            צור תחנה חדשה
+          </button>
+        </div>
+
+        <!-- Existing Stations -->
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-2.5 text-xs">
+          <span class="font-bold text-white block">🏢 תחנות פעילות ועמלות</span>
+          <div id="admin-stations-list" class="space-y-2">
+            <div class="p-3 text-center text-slate-400">טוען תחנות...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3. SUBSCRIPTIONS SUBTAB -->
+      <div id="asub-subs" class="hidden space-y-3 text-xs">
+        <div class="grid grid-cols-3 gap-2">
+          <div class="bg-slate-900 border border-amber-500/30 rounded-xl p-3 text-center space-y-1">
+            <span class="font-bold text-amber-400 block">👑 VIP Master</span>
+            <span class="text-[10px] text-slate-400 block">ללא הגבלת נסיעות</span>
+            <span class="text-[10px] text-emerald-400 font-bold block">0% עמלה</span>
+          </div>
+          <div class="bg-slate-900 border border-sky-500/30 rounded-xl p-3 text-center space-y-1">
+            <span class="font-bold text-sky-400 block">⚡ Basic</span>
+            <span class="text-[10px] text-slate-400 block">עד 10 נסיעות ביום</span>
+            <span class="text-[10px] text-slate-300 block">עמלה רגילה</span>
+          </div>
+          <div class="bg-slate-900 border border-slate-800 rounded-xl p-3 text-center space-y-1">
+            <span class="font-bold text-slate-300 block">🆓 Free</span>
+            <span class="text-[10px] text-slate-400 block">עד 3 נסיעות ביום</span>
+            <span class="text-[10px] text-red-400 block">הקפאה ב-₪500 חוב</span>
+          </div>
+        </div>
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
+          <span class="font-bold text-white block">שיוך מנוי מהיר למשתמש</span>
+          <div class="flex gap-2">
+            <input type="number" id="sub-user-id" placeholder="מזהה משתמש (ID)..." class="flex-1 bg-slate-950 border border-slate-700 rounded-xl p-2 text-xs text-white">
+            <select id="sub-plan-select" class="bg-slate-950 border border-slate-700 rounded-xl p-2 text-xs text-white">
+              <option value="vip_master">VIP Master</option>
+              <option value="basic">Basic</option>
+              <option value="free">Free</option>
+            </select>
+            <button onclick="assignSubscriptionSubmit()" class="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold px-3 py-2 rounded-xl transition">החל</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 4. DEBTS & LEDGER SUBTAB -->
+      <div id="asub-debts" class="hidden space-y-4 text-xs">
+        <!-- Manual Charge / Credit Card -->
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
+          <span class="font-bold text-white block">⚖️ חיוב ידני / זיכוי / קנס לנהג</span>
+          <div class="grid grid-cols-3 gap-2">
+            <input type="number" id="debt-driver-id" placeholder="ID נהג" class="bg-slate-950 border border-slate-700 rounded-xl p-2 text-xs text-white">
+            <input type="number" id="debt-amount" placeholder="סכום (ש\"ח)" class="bg-slate-950 border border-slate-700 rounded-xl p-2 text-xs text-white">
+            <input type="text" id="debt-reason" placeholder="סיבה (למשל קנס/בונוס)" class="bg-slate-950 border border-slate-700 rounded-xl p-2 text-xs text-white">
+          </div>
+          <div class="flex gap-2">
+            <button onclick="submitManualDebt('charge')" class="flex-1 py-2 bg-red-600/30 hover:bg-red-600 text-red-200 border border-red-500/40 rounded-xl font-bold transition">
+              ➕ חייב נהג (הוסף חוב)
+            </button>
+            <button onclick="submitManualDebt('credit')" class="flex-1 py-2 bg-emerald-600/30 hover:bg-emerald-600 text-emerald-200 border border-emerald-500/40 rounded-xl font-bold transition">
+              ➖ זכה נהג (הפחת חוב)
+            </button>
+          </div>
+        </div>
+
+        <!-- Ledger & Appeals List -->
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-2.5">
+          <div class="flex justify-between items-center">
+            <span class="font-bold text-white">יומן חיובים וערעורים פעילים</span>
+            <button onclick="loadAdminDebts()" class="text-amber-400 hover:underline">🔄 רענן</button>
+          </div>
+          <div id="admin-debts-list" class="space-y-2">
+            <div class="p-3 text-center text-slate-400">טוען נתוני חובות...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 5. SETTINGS & NLP SUBTAB -->
+      <div id="asub-settings" class="hidden space-y-4 text-xs">
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
+          <span class="font-bold text-white block">⚙️ הגדרות מערכת גלובליות</span>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="text-[10px] text-slate-400 block mb-1">עמלת ברירת מחדל (%)</label>
+              <input type="number" id="setting-def-comm" value="10.0" step="0.5" class="w-full bg-slate-950 border border-slate-700 rounded-xl p-2 text-xs text-white">
+            </div>
+            <div>
+              <label class="text-[10px] text-slate-400 block mb-1">תקרת Auto-Freeze (ש\"ח)</label>
+              <input type="number" id="setting-auto-freeze" value="500" class="w-full bg-slate-950 border border-slate-700 rounded-xl p-2 text-xs text-white">
+            </div>
+          </div>
+          <button onclick="saveGlobalSettingsSubmit()" class="w-full py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-xl font-bold transition">
+            שמור הגדרות מערכת
+          </button>
+        </div>
+
+        <!-- NLP City Aliases -->
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
+          <span class="font-bold text-white block">🗺️ מילון קיצורי ערים (מנוע NLP לסדרנים)</span>
+          <div class="flex gap-2">
+            <input type="text" id="new-alias-key" placeholder="קיצור (למשל: ים, בב, קס)" class="flex-1 bg-slate-950 border border-slate-700 rounded-xl p-2 text-xs text-white">
+            <input type="text" id="new-alias-val" placeholder="עיר תקנית (למשל: ירושלים)" class="flex-1 bg-slate-950 border border-slate-700 rounded-xl p-2 text-xs text-white">
+            <button onclick="addCityAliasSubmit()" class="bg-slate-800 hover:bg-slate-700 text-white font-bold px-3 py-2 rounded-xl transition">הוסף</button>
+          </div>
+          <div id="admin-aliases-list" class="flex flex-wrap gap-1.5 pt-2 max-h-40 overflow-y-auto">
+            <!-- Injected aliases -->
+          </div>
+        </div>
+      </div>
+
+      <!-- 6. BROADCAST SUBTAB -->
+      <div id="asub-broadcast" class="hidden space-y-3 text-xs">
+        <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
+          <span class="font-bold text-white block">📢 שידור הודעת Broadcast לכל המערכת</span>
+          <textarea id="admin-broadcast-text" rows="3" placeholder="הקלד כאן הודעת הנהלה מתפרצת שתשודר לכל הנהגים והסדרנים..." class="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-xs text-white focus:outline-none focus:border-amber-500 resize-none"></textarea>
+          <button onclick="sendAdminBroadcastSubmit()" class="w-full py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-xl font-bold transition shadow-md">
+            שגר הודעה לכל המשתמשים
+          </button>
+        </div>
       </div>
     </div>
   </main>
@@ -790,6 +998,385 @@ STANDALONE_MINIAPP_HTML = """<!doctype html>
       { id: 1002, text: 'מודיעין עילית (נתיבות שלום) - ירושלים (רוממה), 3 נוסעים, 180 שח', price: 180, time: 'לפני 5 דקות' },
       { id: 1003, text: 'בני ברק (חזון איש) - פתח תקווה (בילינסון), משלוח מעטפה דחוף, 85 שח', price: 85, time: 'לפני 12 דקות' }
     ];
+
+    let cachedAdminUsers = [];
+    let cachedAdminStations = [];
+    let cachedAdminDebts = [];
+
+    function showAdminToast(msg, isSuccess = true) {
+      const toast = document.getElementById('admin-toast');
+      if (!toast) return;
+      toast.className = `p-3 rounded-xl text-xs font-bold transition flex items-center justify-between ${
+        isSuccess ? 'bg-emerald-950/80 border border-emerald-500/40 text-emerald-200' : 'bg-red-950/80 border border-red-500/40 text-red-200'
+      }`;
+      toast.innerText = msg;
+      toast.classList.remove('hidden');
+      setTimeout(() => toast.classList.add('hidden'), 4000);
+    }
+
+    function switchAdminSubtab(subtab) {
+      const subtabs = ['users', 'stations', 'subs', 'debts', 'settings', 'broadcast'];
+      subtabs.forEach(st => {
+        const el = document.getElementById('asub-' + st);
+        const btn = document.getElementById('asub-btn-' + st);
+        if (el) el.classList.toggle('hidden', st !== subtab);
+        if (btn) {
+          btn.className = st === subtab
+            ? 'flex-1 py-1 px-2.5 rounded-lg font-bold bg-amber-500 text-slate-950 transition'
+            : 'flex-1 py-1 px-2.5 rounded-lg font-bold bg-slate-800 text-slate-300 transition';
+        }
+      });
+      if (subtab === 'users') loadAdminUsers();
+      if (subtab === 'stations') loadAdminStations();
+      if (subtab === 'debts') loadAdminDebts();
+      if (subtab === 'settings') loadAdminSettings();
+    }
+
+    async function loadAdminUsers() {
+      const container = document.getElementById('admin-users-list');
+      try {
+        const res = await fetch('/api/users');
+        const data = await res.json();
+        if (data.ok && data.users) {
+          cachedAdminUsers = data.users;
+          renderAdminUsers();
+        }
+      } catch (e) {
+        if (cachedAdminUsers.length > 0) renderAdminUsers();
+        else container.innerHTML = '<div class="p-4 text-center text-red-400">שגיאה בטעינת משתמשים.</div>';
+      }
+    }
+
+    function renderAdminUsers() {
+      const container = document.getElementById('admin-users-list');
+      const query = (document.getElementById('admin-user-search')?.value || '').trim();
+      const filtered = cachedAdminUsers.filter(u => 
+        (u.full_name || '').includes(query) || 
+        String(u.user_id).includes(query) || 
+        (u.phone || '').includes(query)
+      );
+
+      if (filtered.length === 0) {
+        container.innerHTML = '<div class="p-4 text-center text-slate-400">לא נמצאו משתמשים.</div>';
+        return;
+      }
+
+      container.innerHTML = filtered.map(u => `
+        <div class="bg-slate-950 border border-slate-800 rounded-xl p-3 space-y-2">
+          <div class="flex justify-between items-start">
+            <div>
+              <span class="font-bold text-white text-xs">${u.full_name || 'משתמש'}</span>
+              <span class="text-[10px] text-slate-400 font-mono block">ID: ${u.user_id} • 📱 ${u.phone || 'אין טלפון'}</span>
+              <span class="text-[10px] text-slate-400 block">🚗 ${u.car_brand || 'רכב'} ${u.car_model || ''}</span>
+            </div>
+            <div class="text-left font-mono">
+              <span class="text-xs font-bold ${u.debt_balance > 0 ? 'text-red-400' : 'text-emerald-400'}">חוב: ₪${(u.debt_balance || 0).toFixed(2)}</span>
+              <span class="text-[10px] text-amber-400 block">⭐ ${u.rating || 5.0} (${u.total_trips || 0} נסיעות)</span>
+            </div>
+          </div>
+          <div class="flex flex-wrap items-center gap-1.5 pt-1 border-t border-slate-800/80">
+            <select id="role-sel-${u.user_id}" class="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-[11px] text-white">
+              <option value="user" ${u.role === 'user' ? 'selected' : ''}>נהג / משתמש</option>
+              <option value="dispatcher" ${u.role === 'dispatcher' ? 'selected' : ''}>סדרן</option>
+              <option value="station_manager" ${u.role === 'station_manager' ? 'selected' : ''}>מנהל תחנה</option>
+              <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>מנהל ראשי (God Mode)</option>
+              <option value="blocked" ${u.is_blocked ? 'selected' : ''}>חסימה 🚫</option>
+            </select>
+            <input type="number" id="st-sel-${u.user_id}" value="${u.station_id || 1}" title="תחנה #" placeholder="תחנה" class="w-14 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-[11px] text-white text-center font-mono">
+            <button onclick="saveUserRow(${u.user_id})" class="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold px-2.5 py-1 rounded-lg text-[11px] transition">💾 שמור</button>
+            <button onclick="quickDriverDebt(${u.user_id}, 'charge')" class="bg-red-950 hover:bg-red-800 text-red-200 border border-red-800 px-2 py-1 rounded-lg text-[10px]">+ חיוב</button>
+            <button onclick="quickDriverDebt(${u.user_id}, 'credit')" class="bg-emerald-950 hover:bg-emerald-800 text-emerald-200 border border-emerald-800 px-2 py-1 rounded-lg text-[10px]">- זיכוי</button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    async function saveUserRow(userId) {
+      const roleSel = document.getElementById('role-sel-' + userId)?.value;
+      const stVal = parseInt(document.getElementById('st-sel-' + userId)?.value || '1', 10);
+      try {
+        const res = await fetch('/api/users/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_id: userId, role: roleSel, station_id: stVal })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          showAdminToast(`✅ משתמש ${userId} עודכן לתפקיד ${roleSel} בתחנה ${stVal}!`);
+          loadAdminUsers();
+        } else {
+          showAdminToast('שגיאה: ' + (data.error || 'נכשל'), false);
+        }
+      } catch (e) {
+        showAdminToast('שגיאת תקשורת בעדכון המשתמש', false);
+      }
+    }
+
+    async function quickDriverDebt(userId, action) {
+      const amountStr = prompt(action === 'charge' ? 'כמה שקלים לחייב את הנהג?' : 'כמה שקלים לזכות את הנהג?');
+      if (!amountStr || isNaN(parseFloat(amountStr))) return;
+      const amount = parseFloat(amountStr);
+      const reason = prompt('סיבת החיוב/זיכוי:') || (action === 'charge' ? 'חיוב מנהל' : 'זיכוי מנהל');
+      
+      const endpoint = action === 'charge' ? '/api/debts/charge' : '/api/debts/credit';
+      try {
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ driver_id: userId, amount: amount, reason: reason })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          showAdminToast(`✅ פעולת ${action === 'charge' ? 'חיוב' : 'זיכוי'} של ₪${amount} לנהג ${userId} בוצעה בהצלחה!`);
+          loadAdminUsers();
+        }
+      } catch (e) {
+        showAdminToast('שגיאה בביצוע פעולת החוב', false);
+      }
+    }
+
+    async function loadAdminStations() {
+      const container = document.getElementById('admin-stations-list');
+      try {
+        const res = await fetch('/api/stations');
+        const data = await res.json();
+        if (data.ok && data.stations) {
+          cachedAdminStations = data.stations;
+          container.innerHTML = data.stations.map(s => `
+            <div class="p-3 bg-slate-950 rounded-xl border border-slate-800 flex justify-between items-center text-xs">
+              <div>
+                <span class="font-bold text-white block">${s.name} (תחנה #${s.station_id})</span>
+                <span class="text-[10px] text-slate-400">עמלה פעילה: ${s.commission_percent}%</span>
+              </div>
+              <div class="flex items-center gap-1.5">
+                <input type="number" id="st-comm-${s.station_id}" value="${s.commission_percent}" step="0.5" class="w-16 bg-slate-900 border border-slate-700 rounded-lg p-1 text-xs text-white text-center font-mono">
+                <button onclick="updateStationCommSubmit(${s.station_id})" class="bg-amber-500 hover:bg-amber-400 text-slate-950 px-2 py-1 rounded-lg font-bold text-[11px]">עדכן %</button>
+              </div>
+            </div>
+          `).join('');
+        }
+      } catch (e) {
+        container.innerHTML = '<div class="p-3 text-center text-slate-400">שגיאה בטעינת תחנות</div>';
+      }
+    }
+
+    async function createStationSubmit() {
+      const name = document.getElementById('new-station-name').value.trim();
+      const comm = parseFloat(document.getElementById('new-station-comm').value || '10.0');
+      if (!name) return showAdminToast('נא להזין שם תחנה', false);
+      try {
+        const res = await fetch('/api/stations/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: name, commission_percent: comm })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          showAdminToast(`✅ תחנה "${name}" נוצרה בהצלחה עם ${comm}% עמלה!`);
+          document.getElementById('new-station-name').value = '';
+          loadAdminStations();
+        }
+      } catch (e) {
+        showAdminToast('שגיאה ביצירת תחנה', false);
+      }
+    }
+
+    async function updateStationCommSubmit(stationId) {
+      const comm = parseFloat(document.getElementById('st-comm-' + stationId)?.value || '10.0');
+      try {
+        const res = await fetch('/api/stations/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ station_id: stationId, commission_percent: comm })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          showAdminToast(`✅ עמלת תחנה #${stationId} עודכנה ל-${comm}%!`);
+          loadAdminStations();
+        }
+      } catch (e) {
+        showAdminToast('שגיאה בעדכון עמלה', false);
+      }
+    }
+
+    async function assignSubscriptionSubmit() {
+      const uid = parseInt(document.getElementById('sub-user-id').value, 10);
+      const plan = document.getElementById('sub-plan-select').value;
+      if (!uid) return showAdminToast('נא להזין מזהה משתמש תקין', false);
+      try {
+        const res = await fetch('/api/users/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_id: uid, subscription_plan: plan })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          showAdminToast(`✅ מנוי ${plan} הוקצה למשתמש ${uid} בהצלחה!`);
+          document.getElementById('sub-user-id').value = '';
+        }
+      } catch (e) {
+        showAdminToast('שגיאה בשיוך מנוי', false);
+      }
+    }
+
+    async function loadAdminDebts() {
+      const container = document.getElementById('admin-debts-list');
+      try {
+        const res = await fetch('/api/debts');
+        const data = await res.json();
+        if (data.ok && data.debts) {
+          cachedAdminDebts = data.debts;
+          if (data.debts.length === 0) {
+            container.innerHTML = '<div class="p-3 text-center text-slate-400">אין חובות או ערעורים פתוחים במערכת.</div>';
+            return;
+          }
+          container.innerHTML = data.debts.map(d => `
+            <div class="p-3 bg-slate-950 rounded-xl border border-slate-800 flex justify-between items-center text-xs">
+              <div>
+                <span class="font-bold text-white block">חוב #${d.debt_id} (נהג: ${d.driver_id})</span>
+                <span class="text-[10px] text-slate-400 block">${d.reason || 'עמלה'} • סטטוס: ${d.status}</span>
+                ${d.appeal_status === 'pending' ? `<span class="text-[10px] text-amber-400 font-bold block">⚖️ ערעור ממתין: ${d.appeal_reason || 'ללא פירוט'}</span>` : ''}
+              </div>
+              <div class="text-left space-y-1">
+                <span class="font-bold text-red-400 block">₪${Number(d.amount).toFixed(2)}</span>
+                ${d.status === 'unpaid' ? `
+                  <div class="flex gap-1">
+                    <button onclick="resolveDebtSubmit(${d.debt_id}, true, ${d.driver_id}, ${d.amount})" class="text-[10px] bg-emerald-600/30 hover:bg-emerald-600 text-emerald-200 px-2 py-0.5 rounded border border-emerald-500/40">מחק חוב</button>
+                    <button onclick="resolveDebtSubmit(${d.debt_id}, false, ${d.driver_id}, ${d.amount})" class="text-[10px] bg-red-600/30 hover:bg-red-600 text-red-200 px-2 py-0.5 rounded border border-red-500/40">דחה</button>
+                  </div>
+                ` : ''}
+              </div>
+            </div>
+          `).join('');
+        }
+      } catch (e) {
+        container.innerHTML = '<div class="p-3 text-center text-slate-400">שגיאה בטעינת יומן חובות</div>';
+      }
+    }
+
+    async function resolveDebtSubmit(debtId, approve, driverId, amount) {
+      try {
+        const res = await fetch('/api/debts/credit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ debt_id: debtId, driver_id: driverId, amount: amount, approve: approve })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          showAdminToast(approve ? `✅ חוב #${debtId} בוטל וזוכה בהצלחה!` : `❌ ערעור נדחה לחוב #${debtId}.`);
+          loadAdminDebts();
+        }
+      } catch (e) {
+        showAdminToast('שגיאה בטיפול בחוב', false);
+      }
+    }
+
+    async function submitManualDebt(action) {
+      const driverId = parseInt(document.getElementById('debt-driver-id').value, 10);
+      const amount = parseFloat(document.getElementById('debt-amount').value);
+      const reason = document.getElementById('debt-reason').value.trim() || (action === 'charge' ? 'חיוב הנהלה' : 'זיכוי הנהלה');
+      if (!driverId || isNaN(amount) || amount <= 0) {
+        return showAdminToast('נא להזין ID נהג וסכום תקין', false);
+      }
+      const endpoint = action === 'charge' ? '/api/debts/charge' : '/api/debts/credit';
+      try {
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ driver_id: driverId, amount: amount, reason: reason })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          showAdminToast(`✅ פעולת ${action === 'charge' ? 'חיוב' : 'זיכוי'} של ₪${amount} לנהג ${driverId} נשמרה בהצלחה!`);
+          document.getElementById('debt-driver-id').value = '';
+          document.getElementById('debt-amount').value = '';
+          document.getElementById('debt-reason').value = '';
+          loadAdminDebts();
+        }
+      } catch (e) {
+        showAdminToast('שגיאה בביצוע הפעולה', false);
+      }
+    }
+
+    async function loadAdminSettings() {
+      try {
+        const res = await fetch('/api/settings');
+        const data = await res.json();
+        if (data.ok) {
+          if (data.settings) {
+            if (data.settings.default_commission) document.getElementById('setting-def-comm').value = data.settings.default_commission;
+            if (data.settings.auto_freeze_threshold) document.getElementById('setting-auto-freeze').value = data.settings.auto_freeze_threshold;
+          }
+          if (data.aliases) {
+            const listEl = document.getElementById('admin-aliases-list');
+            listEl.innerHTML = data.aliases.map(a => `
+              <span class="inline-flex items-center gap-1 bg-slate-950 text-slate-300 border border-slate-700 px-2 py-0.5 rounded text-[11px]">
+                <strong class="text-amber-400 font-mono">${a.alias}</strong> ➔ ${a.standard_city}
+              </span>
+            `).join('');
+          }
+        }
+      } catch (e) {}
+    }
+
+    async function saveGlobalSettingsSubmit() {
+      const comm = document.getElementById('setting-def-comm').value;
+      const freeze = document.getElementById('setting-auto-freeze').value;
+      try {
+        const res = await fetch('/api/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ default_commission: comm, auto_freeze_threshold: freeze })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          showAdminToast('✅ הגדרות המערכת הגלובליות נשמרו בהצלחה ב-PostgreSQL!');
+        }
+      } catch (e) {
+        showAdminToast('שגיאה בשמירת הגדרות', false);
+      }
+    }
+
+    async function addCityAliasSubmit() {
+      const key = document.getElementById('new-alias-key').value.trim();
+      const val = document.getElementById('new-alias-val').value.trim();
+      if (!key || !val) return showAdminToast('נא להזין קיצור ועיר מלאה', false);
+      try {
+        const res = await fetch('/api/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ alias: key, standard_city: val })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          showAdminToast(`✅ קיצור NLP "${key}" ➔ "${val}" נוסף בהצלחה למאגר!`);
+          document.getElementById('new-alias-key').value = '';
+          document.getElementById('new-alias-val').value = '';
+          loadAdminSettings();
+        }
+      } catch (e) {
+        showAdminToast('שגיאה בהוספת קיצור עיר', false);
+      }
+    }
+
+    async function sendAdminBroadcastSubmit() {
+      const text = document.getElementById('admin-broadcast-text').value.trim();
+      if (!text) return showAdminToast('נא להקליד תוכן להודעה', false);
+      try {
+        const res = await fetch('/api/broadcast', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: text })
+        });
+        const data = await res.json();
+        if (data.ok) {
+          showAdminToast(`✅ הודעת Broadcast שודרה בהצלחה לכל המשתמשים (${data.count || 0})!`);
+          document.getElementById('admin-broadcast-text').value = '';
+        }
+      } catch (e) {
+        showAdminToast('שגיאה בשידור הודעה', false);
+      }
+    }
 
     function renderCities() {
       const container = document.getElementById('cities-list');
@@ -893,12 +1480,12 @@ STANDALONE_MINIAPP_HTML = """<!doctype html>
 
     function takeOrder(id) {
       if (!isFree) {
-        alert("⚠️ אתה בסטטוס תפוס! העבר לפנוי למעלה קודם.");
+        showAdminToast("⚠️ אתה בסטטוס תפוס! העבר לפנוי למעלה קודם.", false);
         return;
       }
       const eta = prompt("⏱️ כמה זמן עד להגעה למוצא? (במספר דקות):", "10");
       if (eta) {
-        alert(`✅ בקשתך לקריאה #${id} עם זמן הגעה של ${eta} דקות שוגרה לסדרן!`);
+        showAdminToast(`✅ בקשתך לקריאה #${id} עם זמן הגעה של ${eta} דקות שוגרה לסדרן!`);
       }
     }
 
@@ -938,7 +1525,7 @@ STANDALONE_MINIAPP_HTML = """<!doctype html>
       const estPrice = prices ? parseInt(prices[prices.length - 1], 10) : 0;
 
       if (!estPrice) {
-        alert("⚠️ המערכת לא זיהתה מחיר. נא לכלול מחיר בספרות (למשל: 150).");
+        showAdminToast("⚠️ המערכת לא זיהתה מחיר. נא לכלול מחיר בספרות (למשל: 150).", false);
         return;
       }
 
@@ -947,29 +1534,15 @@ STANDALONE_MINIAPP_HTML = """<!doctype html>
       input.value = '';
       previewOrder();
       renderOrders();
-      alert(`✅ קריאה #${newId} שוגרה בהצלחה לנהגים באזורי היעד!`);
+      showAdminToast(`✅ קריאה #${newId} שוגרה בהצלחה לנהגים באזורי היעד!`);
       switchTab('driver');
     }
 
     function appealDebt(id) {
       const reason = prompt("✍️ מדוע אתה מבקש לבטל את החיוב הזה? (למשל: 'הלקוח ביטל במקום'):");
       if (reason) {
-        alert(`✅ ערעור על חיוב #${id} נשלח להנהלת המערכת לבדיקה.`);
+        showAdminToast(`✅ ערעור על חיוב #${id} נשלח להנהלת המערכת לבדיקה.`);
       }
-    }
-
-    function adminAlert(msg) {
-      alert(msg);
-    }
-
-    function sendAdminBroadcast() {
-      const text = document.getElementById('admin-broadcast-text').value.trim();
-      if (!text) {
-        alert("⚠️ נא להקליד תוכן להודעה.");
-        return;
-      }
-      alert("✅ הודעת Broadcast שודרה בהצלחה לכל הנהגים והסדרנים!");
-      document.getElementById('admin-broadcast-text').value = '';
     }
 
     function switchTab(tab) {
@@ -994,6 +1567,10 @@ STANDALONE_MINIAPP_HTML = """<!doctype html>
       const targetBtn = document.getElementById('tab-btn-' + tab);
       if (targetEl) targetEl.classList.remove('hidden');
       if (targetBtn) targetBtn.className = "flex-1 py-1.5 px-3 rounded-lg text-xs font-bold bg-amber-500 text-slate-950 transition text-center whitespace-nowrap shadow-md";
+
+      if (tab === 'admin') {
+        loadAdminUsers();
+      }
     }
 
     // Initial render
@@ -1003,6 +1580,7 @@ STANDALONE_MINIAPP_HTML = """<!doctype html>
   </script>
 </body>
 </html>"""
+
 
 # ----------------- שרת HTTP, נתיבי REST API ו-Telegram Mini App -----------------
 def cors_json_response(data, status=200):
@@ -1250,6 +1828,288 @@ async def handle_api_driver_profile(request):
 
     return cors_json_response({"ok": True, "message": "פרטי הרכב וערי העבודה נשמרו בהצלחה!"})
 
+# ----------------- נתיבי REST API נוספים לניהול מלא (CRUD) עבור ה-Mini App -----------------
+async def handle_api_users(request):
+    """החזרת כל משתמשי המערכת עבור פאנל הניהול של ה-Mini App"""
+    if USE_POSTGRES:
+        def _get():
+            with get_pg_cursor() as cur:
+                cur.execute("""SELECT user_id, full_name, phone, telegram_username, role, status, 
+                                      station_id, rating, total_trips, is_blocked, debt_balance, 
+                                      car_brand, car_model, car_year, car_seats, subscription_plan 
+                               FROM deliveries_users ORDER BY user_id ASC""")
+                return cur.fetchall()
+        rows = await run_in_thread(_get)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            rows = await (await db.execute("""SELECT user_id, full_name, phone, telegram_username, role, status, 
+                                                     station_id, rating, total_trips, is_blocked, debt_balance, 
+                                                     car_brand, car_model, car_year, car_seats, subscription_plan 
+                                              FROM deliveries_users ORDER BY user_id ASC""")).fetchall()
+    return cors_json_response({"ok": True, "users": [dict(r) for r in rows]})
+
+async def handle_api_users_update(request):
+    """עדכון הרשאות, תפקיד, שיוך לתחנה או מנוי של משתמש"""
+    try: data = await request.json()
+    except Exception: data = {}
+    user_id = data.get("user_id")
+    if not user_id:
+        return cors_json_response({"ok": False, "error": "user_id חובה"}, status=400)
+    
+    role = data.get("role")
+    is_blocked = 1 if role == 'blocked' else data.get("is_blocked")
+    if role == 'blocked':
+        role = 'user'
+    station_id = data.get("station_id")
+    sub_plan = data.get("subscription_plan")
+    
+    if USE_POSTGRES:
+        def _update():
+            with get_pg_cursor() as cur:
+                updates = []
+                params = []
+                if role is not None:
+                    updates.append("role = %s")
+                    params.append(role)
+                if is_blocked is not None:
+                    updates.append("is_blocked = %s")
+                    params.append(int(is_blocked))
+                if station_id is not None:
+                    updates.append("station_id = %s")
+                    params.append(int(station_id))
+                if sub_plan is not None:
+                    updates.append("subscription_plan = %s")
+                    params.append(sub_plan)
+                if updates:
+                    params.append(int(user_id))
+                    cur.execute(f"UPDATE deliveries_users SET {', '.join(updates)} WHERE user_id = %s", tuple(params))
+        await run_in_thread(_update)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            updates = []
+            params = []
+            if role is not None:
+                updates.append("role = ?")
+                params.append(role)
+            if is_blocked is not None:
+                updates.append("is_blocked = ?")
+                params.append(int(is_blocked))
+            if station_id is not None:
+                updates.append("station_id = ?")
+                params.append(int(station_id))
+            if sub_plan is not None:
+                updates.append("subscription_plan = ?")
+                params.append(sub_plan)
+            if updates:
+                params.append(int(user_id))
+                await db.execute(f"UPDATE deliveries_users SET {', '.join(updates)} WHERE user_id = ?", tuple(params))
+                await db.commit()
+    return cors_json_response({"ok": True})
+
+async def handle_api_stations_create(request):
+    """יצירת תחנה חדשה במערכת"""
+    try: data = await request.json()
+    except Exception: data = {}
+    name = (data.get("name") or "").strip()
+    comm = float(data.get("commission_percent") or 10.0)
+    if not name:
+        return cors_json_response({"ok": False, "error": "שם תחנה חובה"}, status=400)
+    if USE_POSTGRES:
+        def _cr():
+            with get_pg_cursor() as cur:
+                cur.execute("INSERT INTO deliveries_stations (name, commission_percent) VALUES (%s, %s) RETURNING station_id", (name, comm))
+                return cur.fetchone()['station_id']
+        sid = await run_in_thread(_cr)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            c = await db.execute("INSERT INTO deliveries_stations (name, commission_percent) VALUES (?, ?)", (name, comm))
+            sid = c.lastrowid
+            await db.commit()
+    return cors_json_response({"ok": True, "station_id": sid})
+
+async def handle_api_stations_update(request):
+    """עדכון עמלה או שם של תחנה"""
+    try: data = await request.json()
+    except Exception: data = {}
+    sid = data.get("station_id")
+    comm = data.get("commission_percent")
+    name = data.get("name")
+    if not sid:
+        return cors_json_response({"ok": False, "error": "station_id חובה"}, status=400)
+    if USE_POSTGRES:
+        def _up():
+            with get_pg_cursor() as cur:
+                if comm is not None:
+                    cur.execute("UPDATE deliveries_stations SET commission_percent = %s WHERE station_id = %s", (float(comm), int(sid)))
+                if name:
+                    cur.execute("UPDATE deliveries_stations SET name = %s WHERE station_id = %s", (name, int(sid)))
+        await run_in_thread(_up)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            if comm is not None:
+                await db.execute("UPDATE deliveries_stations SET commission_percent = ? WHERE station_id = ?", (float(comm), int(sid)))
+            if name:
+                await db.execute("UPDATE deliveries_stations SET name = ? WHERE station_id = ?", (name, int(sid)))
+            await db.commit()
+    return cors_json_response({"ok": True})
+
+async def handle_api_debts(request):
+    """החזרת יומן החובות והערעורים"""
+    if USE_POSTGRES:
+        def _get():
+            with get_pg_cursor() as cur:
+                cur.execute("""SELECT debt_id, order_id, driver_id, station_id, amount, status, reason, 
+                                      appeal_status, appeal_reason, transaction_type, created_at 
+                               FROM deliveries_debts ORDER BY debt_id DESC LIMIT 50""")
+                return cur.fetchall()
+        rows = await run_in_thread(_get)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            rows = await (await db.execute("""SELECT debt_id, order_id, driver_id, station_id, amount, status, reason, 
+                                                     appeal_status, appeal_reason, transaction_type, created_at 
+                                              FROM deliveries_debts ORDER BY debt_id DESC LIMIT 50""")).fetchall()
+    return cors_json_response({"ok": True, "debts": [dict(r) for r in rows]})
+
+async def handle_api_debts_charge(request):
+    """חיוב נהג ידני או הטלת קנס (רישום ביומן Ledger ועדכון debt_balance)"""
+    try: data = await request.json()
+    except Exception: data = {}
+    driver_id = int(data.get("driver_id") or 0)
+    amount = float(data.get("amount") or 0)
+    reason = data.get("reason") or "חיוב ידני מנהל"
+    station_id = int(data.get("station_id") or 1)
+    if not driver_id or amount <= 0:
+        return cors_json_response({"ok": False, "error": "פרמטרים לא תקינים"}, status=400)
+    if USE_POSTGRES:
+        def _ch():
+            with get_pg_cursor() as cur:
+                cur.execute("""INSERT INTO deliveries_debts (order_id, driver_id, station_id, amount, reason, status, transaction_type)
+                               VALUES (NULL, %s, %s, %s, %s, 'unpaid', 'manual_charge')""", (driver_id, station_id, amount, reason))
+                cur.execute("UPDATE deliveries_users SET debt_balance = debt_balance + %s WHERE user_id = %s", (amount, driver_id))
+        await run_in_thread(_ch)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            await db.execute("""INSERT INTO deliveries_debts (order_id, driver_id, station_id, amount, reason, status, transaction_type)
+                                VALUES (NULL, ?, ?, ?, ?, 'unpaid', 'manual_charge')""", (driver_id, station_id, amount, reason))
+            await db.execute("UPDATE deliveries_users SET debt_balance = debt_balance + ? WHERE user_id = ?", (amount, driver_id))
+            await db.commit()
+    return cors_json_response({"ok": True})
+
+async def handle_api_debts_credit(request):
+    """זיכוי נהג, מחיקת חוב או אישור/דחיית ערעור"""
+    try: data = await request.json()
+    except Exception: data = {}
+    driver_id = int(data.get("driver_id") or 0)
+    amount = float(data.get("amount") or 0)
+    debt_id = data.get("debt_id")
+    approve = data.get("approve", True)
+    if not driver_id:
+        return cors_json_response({"ok": False, "error": "driver_id חובה"}, status=400)
+    if USE_POSTGRES:
+        def _cr():
+            with get_pg_cursor() as cur:
+                if debt_id:
+                    if approve:
+                        cur.execute("UPDATE deliveries_debts SET status = 'cancelled', appeal_status = 'approved' WHERE debt_id = %s", (int(debt_id),))
+                        cur.execute("UPDATE deliveries_users SET debt_balance = GREATEST(0, debt_balance - %s) WHERE user_id = %s", (amount, driver_id))
+                    else:
+                        cur.execute("UPDATE deliveries_debts SET appeal_status = 'rejected' WHERE debt_id = %s", (int(debt_id),))
+                else:
+                    cur.execute("""INSERT INTO deliveries_debts (order_id, driver_id, station_id, amount, reason, status, transaction_type)
+                                   VALUES (NULL, %s, 1, %s, %s, 'paid', 'manual_credit')""", (driver_id, amount, data.get("reason", "זיכוי מנהל")))
+                    cur.execute("UPDATE deliveries_users SET debt_balance = GREATEST(0, debt_balance - %s) WHERE user_id = %s", (amount, driver_id))
+        await run_in_thread(_cr)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            if debt_id:
+                if approve:
+                    await db.execute("UPDATE deliveries_debts SET status = 'cancelled', appeal_status = 'approved' WHERE debt_id = ?", (int(debt_id),))
+                    await db.execute("UPDATE deliveries_users SET debt_balance = MAX(0, debt_balance - ?) WHERE user_id = ?", (amount, driver_id))
+                else:
+                    await db.execute("UPDATE deliveries_debts SET appeal_status = 'rejected' WHERE debt_id = ?", (int(debt_id),))
+            else:
+                await db.execute("""INSERT INTO deliveries_debts (order_id, driver_id, station_id, amount, reason, status, transaction_type)
+                                    VALUES (NULL, ?, 1, ?, ?, 'paid', 'manual_credit')""", (driver_id, amount, data.get("reason", "זיכוי מנהל")))
+                await db.execute("UPDATE deliveries_users SET debt_balance = MAX(0, debt_balance - ?) WHERE user_id = ?", (amount, driver_id))
+            await db.commit()
+    return cors_json_response({"ok": True})
+
+async def handle_api_settings_get(request):
+    """שליפת הגדרות מערכת וקיצורי ערים (NLP)"""
+    if USE_POSTGRES:
+        def _get():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT setting_key, setting_value FROM deliveries_system_settings")
+                st_rows = cur.fetchall()
+                cur.execute("SELECT alias, standard_city FROM deliveries_city_aliases ORDER BY alias ASC")
+                al_rows = cur.fetchall()
+                return st_rows, al_rows
+        st_rows, al_rows = await run_in_thread(_get)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            st_rows = await (await db.execute("SELECT setting_key, setting_value FROM deliveries_system_settings")).fetchall()
+            al_rows = await (await db.execute("SELECT alias, standard_city FROM deliveries_city_aliases ORDER BY alias ASC")).fetchall()
+    settings_dict = {r['setting_key'] if isinstance(r, dict) else r[0]: r['setting_value'] if isinstance(r, dict) else r[1] for r in st_rows}
+    aliases_list = [dict(a) for a in al_rows]
+    return cors_json_response({"ok": True, "settings": settings_dict, "aliases": aliases_list})
+
+async def handle_api_settings_post(request):
+    """שמירת הגדרות מערכת או הוספת קיצור עיר (NLP)"""
+    try: data = await request.json()
+    except Exception: data = {}
+    if USE_POSTGRES:
+        def _post():
+            with get_pg_cursor() as cur:
+                for k, v in data.items():
+                    if k not in ['alias', 'standard_city']:
+                        cur.execute("""INSERT INTO deliveries_system_settings (setting_key, setting_value)
+                                       VALUES (%s, %s) ON CONFLICT (setting_key) DO UPDATE SET setting_value = EXCLUDED.setting_value""", (k, str(v)))
+                if data.get('alias') and data.get('standard_city'):
+                    cur.execute("""INSERT INTO deliveries_city_aliases (alias, standard_city)
+                                   VALUES (%s, %s) ON CONFLICT (alias) DO UPDATE SET standard_city = EXCLUDED.standard_city""",
+                                (data['alias'].strip(), data['standard_city'].strip()))
+        await run_in_thread(_post)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            for k, v in data.items():
+                if k not in ['alias', 'standard_city']:
+                    await db.execute("""INSERT INTO deliveries_system_settings (setting_key, setting_value)
+                                        VALUES (?, ?) ON CONFLICT (setting_key) DO UPDATE SET setting_value = excluded.setting_value""", (k, str(v)))
+            if data.get('alias') and data.get('standard_city'):
+                await db.execute("""INSERT INTO deliveries_city_aliases (alias, standard_city)
+                                    VALUES (?, ?) ON CONFLICT (alias) DO UPDATE SET standard_city = excluded.standard_city""",
+                                (data['alias'].strip(), data['standard_city'].strip()))
+            await db.commit()
+    return cors_json_response({"ok": True})
+
+async def handle_api_broadcast(request):
+    """שידור הודעת Broadcast לכל משתמשי המערכת"""
+    try: data = await request.json()
+    except Exception: data = {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        return cors_json_response({"ok": False, "error": "טקסט ריק"}, status=400)
+    if USE_POSTGRES:
+        def _get_u():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT user_id FROM deliveries_users")
+                return cur.fetchall()
+        users = await run_in_thread(_get_u)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            users = await (await db.execute("SELECT user_id FROM deliveries_users")).fetchall()
+    count = 0
+    for u in users:
+        uid = u['user_id'] if isinstance(u, dict) else u[0]
+        try:
+            await bot.send_message(uid, f"📢 **הודעת הנהלה מיוחדת (Broadcast):**\n\n{text}")
+            count += 1
+        except Exception: pass
+    return cors_json_response({"ok": True, "count": count})
+
 async def start_web_server():
     app = web.Application()
     
@@ -1264,11 +2124,22 @@ async def start_web_server():
     app.router.add_post("/api/driver/status", handle_api_driver_status)
     app.router.add_post("/api/driver/profile", handle_api_driver_profile)
     app.router.add_get("/api/stations", handle_api_stations)
+    app.router.add_post("/api/stations/create", handle_api_stations_create)
+    app.router.add_post("/api/stations/update", handle_api_stations_update)
+    app.router.add_get("/api/users", handle_api_users)
+    app.router.add_post("/api/users/update", handle_api_users_update)
+    app.router.add_get("/api/debts", handle_api_debts)
+    app.router.add_post("/api/debts/charge", handle_api_debts_charge)
+    app.router.add_post("/api/debts/credit", handle_api_debts_credit)
+    app.router.add_get("/api/settings", handle_api_settings_get)
+    app.router.add_post("/api/settings", handle_api_settings_post)
+    app.router.add_post("/api/broadcast", handle_api_broadcast)
 
     # 1. בדיקה אם קיימת תיקיית dist מקומפלת (React SPA)
     dist_dir = os.path.join(os.path.dirname(__file__), "dist")
     dist_index = os.path.join(dist_dir, "index.html")
     dist_assets = os.path.join(dist_dir, "assets")
+
 
     if os.path.exists(dist_assets) and os.path.isdir(dist_assets):
         app.router.add_static("/assets", path=dist_assets, name="assets")
@@ -1290,8 +2161,23 @@ async def start_web_server():
     await site.start()
     logging.info(f"🌐 Mini App & REST API Web Server active on port {port} (Ready for Telegram initData sync)")
 
-# ----------------- מקלדות ועזרים -----------------
-def get_main_kb(role='user', status='busy'):
+# ----------------- מקלדות ועזרים (כולל העלמת כפתורים בקבוצות - סעיף 2) -----------------
+def safe_reply_markup(chat_type: str, markup):
+    """
+    סעיף 2: העלמת מקלדת הכפתורים התחתונה בקבוצות (ReplyKeyboardMarkup).
+    אם ההודעה נקראת/נשלחת בקבוצה (group או supergroup), חובה לשלוח ReplyKeyboardRemove()
+    כדי להעלים את המקלדת התחתונה המציקה. כפתורי Reply מוצגים אך ורק בשיחות פרטיות (private)!
+    """
+    if chat_type in ('group', 'supergroup'):
+        if isinstance(markup, ReplyKeyboardMarkup):
+            return ReplyKeyboardRemove()
+        return markup
+    return markup
+
+def get_main_kb(role='user', status='busy', chat_type='private'):
+    if chat_type in ('group', 'supergroup'):
+        return ReplyKeyboardRemove()
+
     kb = []
     # כפתור פתיחת מיני אפליקציה ישירות בתוך טלגרם (ללא שגיאות וללא חסימות)
     kb.append([KeyboardButton(text="📱 פתח מיני אפליקציה (Mini App)", web_app=WebAppInfo(url=WEBAPP_URL))])
@@ -1308,14 +2194,95 @@ def get_main_kb(role='user', status='busy'):
     kb.append([KeyboardButton(text="💳 חיובים וערעורים"), KeyboardButton(text="💎 הפרופיל שלי")])
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
-def cancel_kb():
+def cancel_kb(chat_type='private'):
+    if chat_type in ('group', 'supergroup'):
+        return ReplyKeyboardRemove()
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ ביטול וחזרה")]], resize_keyboard=True)
 
+# ----------------- סעיף 4: מנוע NLP לסדרנים ופענוח קריאות חכם -----------------
+def parse_dispatcher_order(raw_text: str) -> dict:
+    """
+    מנוע NLP ו-Regex חכם לפיענוח קריאות סדרנים:
+    א. ערים: זיהוי ונירמול 3-4 ערים/קיצורים (ים, בב, פת, תא, קס, אשד וכו'), כולל אותיות יחס (לבב, מים).
+    ב. מחיר (Regex): זיהוי גמיש של הסכום (150, 150ש, 150 ש, 150 שח, 150 ש\"ח, 150₪, ₪150).
+    ג. דרישת 'זמן': המילה 'זמן' (או דקות/תוך/דחוף/eta) תסמן בקריאה חובה לקבל ETA מהנהג.
+    """
+    text = (raw_text or "").strip()
+    
+    # 1. זיהוי דרישת 'זמן' / ETA
+    time_keywords = ['זמן', 'דקות', 'דק', 'תוך', 'דחוף', 'eta', 'מיידי', 'עכשיו']
+    requires_eta = False
+    for kw in time_keywords:
+        if re.search(r'(?:^|\s|[^\w])' + re.escape(kw) + r'(?:$|\s|[^\w])', text, re.IGNORECASE):
+            requires_eta = True
+            break
+
+    # 2. זיהוי מחיר ב-Regex גמיש
+    price_pattern = r'(?:₪\s*(\d{2,4})|(\d{2,4})\s*(?:₪|ש"ח|שח|שקלים|שקל|ש|\b))'
+    matches = re.findall(price_pattern, text)
+    est_price = 0.0
+    if matches:
+        for m in reversed(matches):
+            p_str = m[0] or m[1]
+            if p_str and 20 <= float(p_str) <= 5000:
+                est_price = float(p_str)
+                break
+
+    # 3. מילון קיצורים ונירמול שמות ערים (NLP)
+    alias_dict = {
+        'ים': 'ירושלים', 'י-ם': 'ירושלים', 'עיר הקודש': 'ירושלים',
+        'בב': 'בני ברק', 'ב"ב': 'בני ברק',
+        'פת': 'פתח תקווה', 'פ"ת': 'פתח תקווה',
+        'תא': 'תל אביב', 'ת"א': 'תל אביב',
+        'קס': 'מודיעין עילית', 'ק"ס': 'מודיעין עילית', 'ספר': 'מודיעין עילית',
+        'אשד': 'אשדוד', 'אשדו': 'אשדוד',
+        'בש': 'באר שבע', 'ב"ש': 'בית שמש',
+        'חי': 'חיפה', 'נת': 'נתניה', 'הרצ': 'הרצליה'
+    }
+
+    words = text.split()
+    cleaned_tokens = []
+    found_cities = []
+
+    for word in words:
+        clean_w = re.sub(r'[^\w\s"״\'-]', '', word).strip()
+        prefix = ""
+        check_w = clean_w
+        if len(clean_w) > 2 and clean_w[0] in ['ל', 'מ', 'ב'] and clean_w[1:] in alias_dict:
+            prefix = clean_w[0] + " "
+            check_w = clean_w[1:]
+
+        if check_w in alias_dict:
+            city_name = alias_dict[check_w]
+            cleaned_tokens.append(f"{prefix}{city_name}")
+            if city_name not in found_cities:
+                found_cities.append(city_name)
+        elif clean_w in POPULAR_CITIES:
+            cleaned_tokens.append(clean_w)
+            if clean_w not in found_cities:
+                found_cities.append(clean_w)
+        else:
+            cleaned_tokens.append(word)
+
+    cleaned_text = " ".join(cleaned_tokens)
+    cleaned_text = re.sub(r'[-=]+>', ' ➔ ', cleaned_text)
+    cleaned_text = re.sub(r'<[-=]+', ' ➔ ', cleaned_text)
+
+    origin_city = found_cities[0] if len(found_cities) > 0 else ""
+    dest_city = found_cities[1] if len(found_cities) > 1 else ""
+
+    return {
+        "cleaned_text": cleaned_text.strip(),
+        "price": est_price,
+        "requires_eta": requires_eta,
+        "found_cities": found_cities,
+        "origin_city": origin_city,
+        "dest_city": dest_city
+    }
+
 def clean_order_text(text):
-    text = re.sub(r'[-=]+>', '-', text)
-    text = re.sub(r'<[-=]+', '-', text)
-    text = text.replace("פת", "פתח תקווה").replace("ים", "ירושלים").replace("ספר", "מודיעין עילית")
-    return text.strip()
+    return parse_dispatcher_order(text)["cleaned_text"]
+
 
 # ----------------- תפריט ראשי, ביטול והרשמה (שלב ב' - Onboarding FSM) -----------------
 @router.message(Command("start"))
@@ -1324,6 +2291,18 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     user_id = message.from_user.id
     
+    # 0. סעיף 2: העלמת מקלדת הכפתורים התחתונה בקבוצות (ReplyKeyboardRemove)
+    if message.chat.type in ('group', 'supergroup'):
+        return await message.answer(
+            "👋 <b>שלום לכולם!</b> הבוט פעיל בקבוצה לשידור והפצת קריאות.\n\n"
+            "כדי לפתוח את ה-Mini App האישי, לנהל עמדת נהג/סדרן או לצפות בחובות:\n"
+            "לחץ על הכפתור למטה או פנה לבוט בהודעה פרטית:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🚖 פתח Mini App אישי", web_app=WebAppInfo(url=WEBAPP_URL))]
+            ])
+        )
+
     # 1. התנהגות God Mode למנהלים (בלי הרשמה כלל):
     # עבור שני ה-IDs של מנהלי המערכת (552821474, 8644923212): הבוט מדלג לחלוטין על ההרשמה!
     if user_id in ADMIN_IDS:
@@ -1351,7 +2330,7 @@ async def cmd_start(message: Message, state: FSMContext):
             "👑 **שלום מנהל מערכת! מצב God Mode פעיל.**\n"
             "ההרשאות שלך מאושרות לצמיתות ללא צורך בשום שלב הרשמה.\n"
             "כל פאנלי הניהול, שיגור הקריאות והמיני אפליקציה זמינים עבורך:",
-            reply_markup=get_main_kb('admin', admin_status)
+            reply_markup=get_main_kb('admin', admin_status, message.chat.type)
         )
 
     # בדיקת משתמש רגיל
@@ -1361,7 +2340,8 @@ async def cmd_start(message: Message, state: FSMContext):
 
     # אם המשתמש כבר השלים את תהליך הקליטה במלואו (כולל טלפון מאומת ותקנון)
     if user and user.get('is_phone_verified') and user.get('terms_accepted_at') and user.get('car_brand'):
-        return await message.answer("🎛️ **תפריט ראשי:**", reply_markup=get_main_kb(user['role'], user['status']))
+        return await message.answer("🎛️ **תפריט ראשי:**", reply_markup=get_main_kb(user['role'], user['status'], message.chat.type))
+
 
     # התחלת תהליך קליטה מסודר ומחמיר (שלב ב' - Onboarding FSM)
     await state.set_state(Onboarding.waiting_terms)
@@ -1842,17 +2822,49 @@ async def cmd_publish(message: Message, state: FSMContext):
 
 @router.message(OrderFlow.waiting_publish_text)
 async def process_publish_text(message: Message, state: FSMContext):
-    cleaned_text = clean_order_text(message.text)
-    prices = re.findall(r'\b\d{2,4}\b', cleaned_text)
-    est_price = float(prices[-1]) if prices else 0.0
-    
-    if est_price == 0:
-        return await message.answer("⚠️ המערכת לא זיהתה מחיר. נא לכלול מחיר בספרות (למשל 100).", reply_markup=cancel_kb())
+    if message.text == "❌ ביטול וחזרה":
+        return await cmd_start(message, state)
 
-    await state.update_data(order_text=cleaned_text, est_price=est_price)
+    parsed = parse_dispatcher_order(message.text)
+    cleaned_text = parsed['cleaned_text']
+    est_price = parsed['price']
+    requires_eta = 1 if parsed['requires_eta'] else 0
+    found_cities = parsed['found_cities']
+
+    if est_price == 0:
+        return await message.answer(
+            "⚠️ **המערכת לא זיהתה מחיר תקין.**\n"
+            "נא לכלול מחיר בספרות (למשל: 150, 150ש, 150 שח, 150₪).\n"
+            "הקלד שוב את פרטי הקריאה:",
+            reply_markup=cancel_kb(message.chat.type)
+        )
+
+    cities_note = f"\n📍 ערים שזוהו: {', '.join(found_cities)}" if found_cities else ""
+    eta_note = "\n⏱️ **דרישת זמן (ETA): כן (הנהג יידרש להצהיר על זמן הגעה)**" if requires_eta else ""
+
+    await state.update_data(
+        order_text=cleaned_text,
+        est_price=est_price,
+        requires_eta=requires_eta,
+        found_cities=found_cities,
+        origin_city=parsed['origin_city'],
+        dest_city=parsed['dest_city']
+    )
     await state.set_state(OrderFlow.waiting_publish_dest)
-    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="לנהגים בפרטי"), KeyboardButton(text="לקבוצות (חיצוני)")], [KeyboardButton(text="❌ ביטול וחזרה")]], resize_keyboard=True)
-    await message.answer(f"✅ טקסט נוקה.\n💵 מחיר שזוהה: {est_price} ש\"ח.\n\nלאן לשגר את הקריאה?", reply_markup=kb)
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="לנהגים בפרטי"), KeyboardButton(text="לקבוצות (חיצוני)")],
+            [KeyboardButton(text="❌ ביטול וחזרה")]
+        ],
+        resize_keyboard=True
+    )
+    await message.answer(
+        f"✅ **הקריאה פוענחה בהצלחה!**\n\n"
+        f"📝 טקסט מנוקה: {cleaned_text}\n"
+        f"💵 מחיר: {est_price} ש\"ח{cities_note}{eta_note}\n\n"
+        f"לאן תרצה לשגר את הקריאה?",
+        reply_markup=safe_reply_markup(message.chat.type, kb)
+    )
 
 @router.message(OrderFlow.waiting_publish_dest)
 async def process_publish_dest(message: Message, state: FSMContext):
@@ -1862,22 +2874,30 @@ async def process_publish_dest(message: Message, state: FSMContext):
     data = await state.get_data()
     user = await get_user(message.from_user.id)
     order_text = data['order_text']
+    requires_eta = data.get('requires_eta', 0)
+    origin_city = data.get('origin_city', '')
+    dest_city = data.get('dest_city', '')
     
     if USE_POSTGRES:
         def _create_order():
             with get_pg_cursor() as cur:
-                cur.execute('INSERT INTO deliveries_orders (text, price, publisher_id, station_id, created_at) VALUES (%s, %s, %s, %s, %s) RETURNING order_id', 
-                            (order_text, data['est_price'], user['user_id'], user['station_id'], datetime.now().isoformat()))
+                cur.execute('''INSERT INTO deliveries_orders 
+                               (text, price, publisher_id, station_id, created_at, requires_eta, origin_city, dest_city) 
+                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING order_id''', 
+                            (order_text, data['est_price'], user['user_id'], user['station_id'], datetime.now().isoformat(), requires_eta, origin_city, dest_city))
                 return cur.fetchone()['order_id']
         order_id = await run_in_thread(_create_order)
     else:
         async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-            cursor = await db.execute('INSERT INTO deliveries_orders (text, price, publisher_id, station_id, created_at) VALUES (?, ?, ?, ?, ?)', 
-                                      (order_text, data['est_price'], user['user_id'], user['station_id'], datetime.now().isoformat()))
+            cursor = await db.execute('''INSERT INTO deliveries_orders 
+                                         (text, price, publisher_id, station_id, created_at, requires_eta, origin_city, dest_city) 
+                                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', 
+                                      (order_text, data['est_price'], user['user_id'], user['station_id'], datetime.now().isoformat(), requires_eta, origin_city, dest_city))
             order_id = cursor.lastrowid
             await db.commit()
         
-    order_msg = f"🎫 **קריאה #{order_id}**\n🏢 סדרן: {user['full_name']}\n\n{order_text}\n\n💵 סכום: {data['est_price']} ש\"ח"
+    eta_badge = " [⏱️ נדרש ETA]" if requires_eta else ""
+    order_msg = f"🎫 **קריאה #{order_id}**{eta_badge}\n🏢 תחנה: {user['station_id']} | סדרן: {user['full_name']}\n\n{order_text}\n\n💵 סכום: {data['est_price']} ש\"ח"
     
     if message.text == "לנהגים בפרטי":
         sent = 0
@@ -1891,7 +2911,6 @@ async def process_publish_dest(message: Message, state: FSMContext):
                     return drivers, cities
             all_drivers, all_cities = await run_in_thread(_get_drivers_and_cities)
             
-            # מיפוי ערים מהיר בזיכרון
             driver_cities_map = {}
             for c in all_cities:
                 driver_cities_map.setdefault(c['user_id'], []).append(c['city_name'])
@@ -1905,7 +2924,7 @@ async def process_publish_dest(message: Message, state: FSMContext):
                     should_send = True
                 else:
                     for city_name in my_cities:
-                        if city_name in order_text:
+                        if city_name in order_text or city_name in [origin_city, dest_city]:
                             should_send = True
                             break
                 if should_send:
@@ -1929,7 +2948,7 @@ async def process_publish_dest(message: Message, state: FSMContext):
                     should_send = True
                 else:
                     for city_row in driver_cities:
-                        if city_row[0] in order_text:
+                        if city_row[0] in order_text or city_row[0] in [origin_city, dest_city]:
                             should_send = True
                             break
                 if should_send:
@@ -1938,7 +2957,7 @@ async def process_publish_dest(message: Message, state: FSMContext):
                         sent += 1
                     except Exception:
                         pass
-        await message.answer(f"✅ שוגר ל-{sent} נהגים בפרטי (סונן לפי אזורי העבודה שלהם).", reply_markup=get_main_kb(user['role'], user['status']))
+        await message.answer(f"✅ שוגר ל-{sent} נהגים בפרטי (סונן לפי אזורי העבודה שלהם).", reply_markup=get_main_kb(user['role'], user['status'], message.chat.type))
     
     elif message.text == "לקבוצות (חיצוני)":
         sent = 0
@@ -1963,11 +2982,11 @@ async def process_publish_dest(message: Message, state: FSMContext):
                     sent += 1
                 except Exception:
                     pass
-        await message.answer(f"✅ שוגר ל-{sent} קבוצות מוגדרות במערכת.", reply_markup=get_main_kb(user['role'], user['status']))
+        await message.answer(f"✅ שוגר ל-{sent} קבוצות מוגדרות במערכת.", reply_markup=get_main_kb(user['role'], user['status'], message.chat.type))
     
     await state.clear()
 
-# ----------------- ניהול מצב קריאות (לסדרן) -----------------
+# ----------------- ניהול מצב קריאות (לסדרן ולמנהל תחנה בלבד לפי station_id) -----------------
 @router.message(F.text == "📋 מצב קריאות")
 async def show_open_orders(message: Message):
     user = await get_user(message.from_user.id)
@@ -1976,19 +2995,26 @@ async def show_open_orders(message: Message):
     if USE_POSTGRES:
         def _get_orders():
             with get_pg_cursor() as cur:
-                cur.execute("SELECT * FROM deliveries_orders WHERE station_id = %s AND status = 'open'", (user['station_id'],))
+                if user['role'] == 'admin':
+                    cur.execute("SELECT * FROM deliveries_orders WHERE status = 'open' ORDER BY order_id DESC LIMIT 25")
+                else:
+                    cur.execute("SELECT * FROM deliveries_orders WHERE station_id = %s AND status = 'open' ORDER BY order_id DESC LIMIT 25", (user['station_id'],))
                 return cur.fetchall()
         orders = await run_in_thread(_get_orders)
     else:
         async with aiosqlite.connect(SQLITE_DB_FILE) as db:
             db.row_factory = aiosqlite.Row
-            orders = await (await db.execute("SELECT * FROM deliveries_orders WHERE station_id = ? AND status = 'open'", (user['station_id'],))).fetchall()
+            if user['role'] == 'admin':
+                orders = await (await db.execute("SELECT * FROM deliveries_orders WHERE status = 'open' ORDER BY order_id DESC LIMIT 25")).fetchall()
+            else:
+                orders = await (await db.execute("SELECT * FROM deliveries_orders WHERE station_id = ? AND status = 'open' ORDER BY order_id DESC LIMIT 25", (user['station_id'],))).fetchall()
         
     if not orders:
         return await message.answer("✅ אין קריאות פתוחות לתחנה שלך כרגע.")
         
     for o in orders:
-        txt = f"🎫 קריאה #{o['order_id']}\n💵 מחיר: {o['price']} ש\"ח\n📝 טקסט: {o['text']}"
+        eta_txt = "⏱️ נדרש ETA" if o.get('requires_eta') else ""
+        txt = f"🎫 **קריאה #{o['order_id']}** {eta_txt}\n💵 מחיר: {o['price']} ש\"ח\n📝 טקסט: {o['text']}"
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="❌ מחק קריאה (נלקחה מחוץ לבוט)", callback_data=f"delorder_{o['order_id']}")]
         ])
@@ -2009,26 +3035,69 @@ async def delete_open_order(call: CallbackQuery):
     await call.message.edit_text(f"✅ קריאה #{order_id} נסגרה/נמחקה מהמערכת.")
     await call.answer()
     
-# ----------------- קבלת קריאה, ETA ומיזוג -----------------
+# ----------------- סעיף 5: Bidding חכם, ETA ואישור שיחה (Deep Link) -----------------
 @router.callback_query(F.data.startswith("take_"))
 async def take_order(call: CallbackQuery, state: FSMContext):
     order_id = call.data.split("_")[1]
     
     driver = await get_user(call.from_user.id)
+    if not driver:
+        return await call.answer("⚠️ יש להירשם תחילה למערכת באמצעות /start", show_alert=True)
     if driver['status'] != 'free':
         return await call.answer("⚠️ אתה בסטטוס תפוס! העבר ל'פנוי' בתפריט הראשי קודם.", show_alert=True)
+    if driver['debt_balance'] > 500.0:
+        return await call.answer("🚫 חשבונך מוקפא עקב חובות (מעל 500 ש\"ח)! הסדר חובות תחילה.", show_alert=True)
+
+    if USE_POSTGRES:
+        def _get_o():
+            with get_pg_cursor() as cur:
+                cur.execute('SELECT * FROM deliveries_orders WHERE order_id = %s', (order_id,))
+                return cur.fetchone()
+        order = await run_in_thread(_get_o)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            order = await (await db.execute('SELECT * FROM deliveries_orders WHERE order_id = ?', (order_id,))).fetchone()
+
+    if not order or order['status'] != 'open':
+        return await call.answer("❌ איחרת! הקריאה כבר נתפסה או בוטלה.", show_alert=True)
         
-    await state.update_data(take_order_id=order_id)
+    await state.update_data(take_order_id=order_id, order_requires_eta=order.get('requires_eta', 0))
     await state.set_state(OrderFlow.waiting_driver_eta)
-    await call.message.answer(f"🎫 בקשה לקריאה #{order_id}\n⏱️ **כמה זמן עד להגעה למוצא?** (במספר דקות):", reply_markup=cancel_kb())
+    
+    eta_kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="5 דקות"), KeyboardButton(text="10 דקות"), KeyboardButton(text="15 דקות")],
+            [KeyboardButton(text="20 דקות"), KeyboardButton(text="30 דקות"), KeyboardButton(text="מיידי (0-3 דק')")],
+            [KeyboardButton(text="❌ ביטול וחזרה")]
+        ],
+        resize_keyboard=True
+    )
+    
+    requires_eta = order.get('requires_eta', 0)
+    prompt_txt = "⏱️ **הסדרן דרש זמן הגעה מדויק (ETA)!**\nתוך כמה דקות תוכל להתייצב במוצא?" if requires_eta else "⏱️ תוך כמה זמן תוכל להגיע למוצא? (בחר כפתור או הקלד מספר דקות):"
+    
+    await call.message.answer(
+        f"🎫 **בקשה לקריאה #{order_id}**\n{prompt_txt}",
+        reply_markup=safe_reply_markup(call.message.chat.type, eta_kb)
+    )
     await call.answer()
 
 @router.message(OrderFlow.waiting_driver_eta)
 async def process_eta(message: Message, state: FSMContext):
+    if message.text == "❌ ביטול וחזרה":
+        return await cmd_start(message, state)
+        
     data = await state.get_data()
-    order_id = data['take_order_id']
+    order_id = data.get('take_order_id')
     driver = await get_user(message.from_user.id)
     
+    if not order_id:
+        await state.clear()
+        return await cmd_start(message, state)
+
+    eta_str = message.text.replace("דקות", "").replace("דק'", "").replace("דק", "").strip()
+
     if USE_POSTGRES:
         def _get_order():
             with get_pg_cursor() as cur:
@@ -2042,21 +3111,96 @@ async def process_eta(message: Message, state: FSMContext):
         
     if not order or order['status'] != 'open':
         await state.clear()
-        return await message.answer("❌ איחרת! הקריאה כבר נתפסה או בוטלה.", reply_markup=get_main_kb(driver['role'], driver['status']))
+        return await message.answer("❌ איחרת! הקריאה כבר נתפסה או בוטלה.", reply_markup=get_main_kb(driver['role'], driver['status'], message.chat.type))
         
-    msg_to_dispatcher = f"🔔 **נהג מבקש את קריאה #{order_id}**\n👤 נהג: {driver['full_name']} | ⭐ {driver['rating']}\n⏱️ זמן הגעה: {message.text} דקות\n🚗 רכב: {driver['car_brand']} {driver['car_model']} ({driver['car_seats']} מקומות)"
+    driver_uname = driver['telegram_username'] or message.from_user.username or ""
+    driver_mention = f"@{driver_uname}" if driver_uname else f"ID: {driver['user_id']}"
+    
+    msg_to_dispatcher = (
+        f"🔔 **נהג מציע לקחת את קריאה #{order_id}**\n\n"
+        f"👤 נהג: {driver['full_name']} ({driver_mention})\n"
+        f"📱 טלפון: {driver['phone']}\n"
+        f"⏱️ **זמן הגעה (ETA): {eta_str}**\n"
+        f"🚗 רכב: {driver['car_brand']} {driver['car_model']} ({driver['car_year']}) | 💺 {driver['car_seats']} מקומות\n"
+        f"⭐ דירוג: {driver['rating']}/5.0 ({driver['total_trips']} נסיעות)"
+    )
+    
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ אשר נהג (גבה עמלה)", callback_data=f"approve_{order_id}_{driver['user_id']}")],
+        [InlineKeyboardButton(text="📞 אשר שיחה (צ'אט ישיר)", callback_data=f"call_{order_id}_{driver['user_id']}")],
+        [InlineKeyboardButton(text="✅ סגור נסיעה (גבה עמלה)", callback_data=f"approve_{order_id}_{driver['user_id']}")],
         [InlineKeyboardButton(text="❌ דחה מתמודד", callback_data=f"deny_{order_id}_{driver['user_id']}")]
     ])
     
     try:
         await bot.send_message(order['publisher_id'], msg_to_dispatcher, reply_markup=kb)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.error(f"Error notifying dispatcher: {e}")
         
     await state.clear()
-    await message.answer("⏳ הבקשה נשלחה בהצלחה לסדרן. המתנה לאישור...", reply_markup=get_main_kb(driver['role'], driver['status']))
+    await message.answer(
+        f"⏳ **הצעתך לקריאה #{order_id} שוגרה לסדרן (זמן הגעה: {eta_str})!**\n"
+        f"כאשר הסדרן יאשר שיחה או יסגור את הנסיעה, תקבל הודעה ישירה מיד.",
+        reply_markup=get_main_kb(driver['role'], driver['status'], message.chat.type)
+    )
+
+# ----------------- סעיף 5: אישור שיחה (Deep Link) -----------------
+@router.callback_query(F.data.startswith("call_"))
+async def call_driver_dispatcher(call: CallbackQuery):
+    """
+    אישור שיחה: לחיצה עליו לא סוגרת נסיעה!
+    היא שולחת לסדרן ולנהג קישור ישיר לצ'אט פרטי ביניהם לתאום פרטים.
+    """
+    _, order_id, driver_id_str = call.data.split("_")
+    driver_id = int(driver_id_str)
+    dispatcher_id = call.from_user.id
+    
+    driver = await get_user(driver_id)
+    dispatcher = await get_user(dispatcher_id)
+    
+    if not driver:
+        return await call.answer("משתמש לא נמצא", show_alert=True)
+        
+    driver_username = driver.get('telegram_username') or ""
+    disp_username = (dispatcher.get('telegram_username') if dispatcher else "") or call.from_user.username or ""
+    
+    # יצירת deep links מאובטחים
+    driver_link = f"https://t.me/{driver_username}" if driver_username else f"tg://user?id={driver_id}"
+    disp_link = f"https://t.me/{disp_username}" if disp_username else f"tg://user?id={dispatcher_id}"
+    
+    disp_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 פתח שיחה ישירה עם הנהג", url=driver_link)],
+        [InlineKeyboardButton(text="✅ סגור נסיעה עכשיו (גבה עמלה)", callback_data=f"approve_{order_id}_{driver_id}")],
+        [InlineKeyboardButton(text="❌ דחה מתמודד", callback_data=f"deny_{order_id}_{driver_id}")]
+    ])
+    
+    await call.message.edit_text(
+        f"📞 **אושר קישור לשיחה ישירה לקריאה #{order_id}!**\n\n"
+        f"👤 נהג: {driver['full_name']} (@{driver_username})\n"
+        f"📱 טלפון: {driver['phone']}\n"
+        f"🚗 רכב: {driver['car_brand']} {driver['car_model']}\n\n"
+        f"לחץ למטה לפתיחת הצ'אט בטלגרם לתאום סופי.\n"
+        f"⚠️ **שים לב:** לחיצה זו טרם סגרה את הנסיעה. לאחר שסיכמתם ביניכם, לחץ 'סגור נסיעה עכשיו' כדי לקבע את הנסיעה ולחייב עמלה.",
+        reply_markup=disp_kb
+    )
+    
+    driver_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 פתח שיחה ישירה עם הסדרן", url=disp_link)]
+    ])
+    
+    disp_name = (dispatcher.get('full_name') if dispatcher else "") or call.from_user.full_name
+    try:
+        await bot.send_message(
+            driver_id,
+            f"🎉 **הסדרן {disp_name} אישר שיחה ישירה לקריאה #{order_id}!**\n\n"
+            f"לחץ למטה לפתיחת הצ'אט הפרטי מול הסדרן לתיאום סופי:\n"
+            f"לאחר הסיכום, הסדרן יסגור את הנסיעה ותקבל אישור רשמי.",
+            reply_markup=driver_kb
+        )
+    except Exception as e:
+        logging.error(f"Error sending link to driver: {e}")
+        
+    await call.answer("🔗 נוצרו קישורים ישירים לשיחה!")
+
 
 # ----------------- סדרן מאשר/דוחה, חיוב עמלה ודירוג -----------------
 @router.callback_query(F.data.startswith("deny_"))

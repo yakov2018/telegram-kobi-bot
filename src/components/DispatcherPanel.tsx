@@ -77,7 +77,8 @@ export const DispatcherPanel: React.FC = () => {
     if (!rawText.trim()) return;
 
     if (detectedPrice <= 0) {
-      alert('⚠️ המערכת לא זיהתה מחיר. נא לכלול מחיר בספרות (למשל: 100 ש"ח)');
+      setFeedbackMsg('⚠️ המערכת לא זיהתה מחיר. נא לכלול מחיר בספרות (למשל: 100 ש"ח)');
+      setTimeout(() => setFeedbackMsg(null), 4000);
       return;
     }
 

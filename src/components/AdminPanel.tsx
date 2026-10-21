@@ -58,7 +58,8 @@ export const AdminPanel: React.FC = () => {
     if (!stationName.trim()) return;
     const comm = parseFloat(stationComm);
     if (isNaN(comm) || comm < 0) {
-      alert('נא להזין אחוז עמלה תקין');
+      setStationSuccess('⚠️ נא להזין אחוז עמלה תקין');
+      setTimeout(() => setStationSuccess(null), 3000);
       return;
     }
     const newSt = createStation(stationName.trim(), comm);
