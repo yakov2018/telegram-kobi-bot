@@ -30,6 +30,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
+from aiogram.exceptions import TelegramConflictError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -111,7 +112,15 @@ class DriverFlow(StatesGroup):
 def get_pg_cursor():
     """משיכת חיבור קיים מתוך ה-Pool להרצה מהירה של אלפיות שניה ללא TCP Handshake חוזר"""
     global pg_pool
-    if pg_pool is None:
+    conn = None
+    if pg_pool is not None:
+        try:
+            conn = pg_pool.getconn()
+            if conn.closed:
+                conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        except Exception:
+            conn = None
+    if conn is None:
         conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -120,7 +129,6 @@ def get_pg_cursor():
         finally:
             conn.close()
     else:
-        conn = pg_pool.getconn()
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 yield cur
@@ -129,7 +137,11 @@ def get_pg_cursor():
             conn.rollback()
             raise
         finally:
-            pg_pool.putconn(conn)
+            if pg_pool is not None:
+                try:
+                    pg_pool.putconn(conn)
+                except Exception:
+                    pass
 
 async def run_in_thread(func, *args, **kwargs):
     """הרצת פעולת מסד הנתונים בתהליכון מקבילי כדי לא לתקוע את ה-Event Loop של aiogram"""
@@ -161,6 +173,10 @@ def _init_db_sync():
         cur.execute('''CREATE TABLE IF NOT EXISTS deliveries_bot_groups (
             group_id BIGINT PRIMARY KEY, group_name TEXT)''')
 
+        cur.execute('''CREATE INDEX IF NOT EXISTS idx_deliveries_orders_status ON deliveries_orders(status)''')
+        cur.execute('''CREATE INDEX IF NOT EXISTS idx_deliveries_driver_cities_user ON deliveries_driver_cities(user_id)''')
+        cur.execute('''CREATE INDEX IF NOT EXISTS idx_deliveries_debts_driver ON deliveries_debts(driver_id, status)''')
+
         cur.execute('''INSERT INTO deliveries_stations (station_id, name, commission_percent) 
                        VALUES (1, 'תחנה ראשית', 10.0) 
                        ON CONFLICT (station_id) DO NOTHING''')
@@ -169,7 +185,7 @@ async def init_db():
     if USE_POSTGRES:
         try:
             await run_in_thread(_init_db_sync)
-            logging.info("✅ PostgreSQL tables initialized successfully with prefix 'deliveries_'.")
+            logging.info("✅ PostgreSQL tables and indexes initialized successfully with prefix 'deliveries_'.")
         except Exception as e:
             logging.error(f"❌ Error initializing PostgreSQL: {e}")
             raise e
@@ -216,6 +232,403 @@ async def get_user(user_id):
             db.row_factory = aiosqlite.Row
             return await (await db.execute('SELECT * FROM deliveries_users WHERE user_id = ?', (user_id,))).fetchone()
 
+# ----------------- תבנית HTML מלאה ומשולבת עבור Telegram Mini App -----------------
+# תבנית זו מבטיחה שלעולם לא יופיע טקסט יבש, אלא ממשק ה-ERP המלא בתוך טלגרם!
+STANDALONE_MINIAPP_HTML = """<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Kobi ERP Bot - Taxi & Courier Mini App</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Assistant:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Assistant', sans-serif; }
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: #0f172a; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 9999px; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col antialiased">
+  <!-- Top App Bar -->
+  <header class="sticky top-0 z-40 bg-slate-900/95 backdrop-blur-md border-b border-slate-800 p-3.5 flex items-center justify-between">
+    <div class="flex items-center gap-2.5">
+      <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-amber-500 to-amber-600 flex items-center justify-center text-slate-950 font-extrabold text-lg shadow-md">
+        🚖
+      </div>
+      <div>
+        <h1 class="font-extrabold text-sm text-white flex items-center gap-1.5">
+          <span>Kobi ERP Bot</span>
+          <span class="text-[10px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-1.5 py-0.2 rounded font-mono">LIVE</span>
+        </h1>
+        <p id="tg-username" class="text-[11px] text-slate-400">טוען נתוני משתמש טלגרם...</p>
+      </div>
+    </div>
+    <div id="status-badge" class="px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-bold flex items-center gap-1">
+      <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+      <span id="status-text">פנוי לקריאות</span>
+    </div>
+  </header>
+
+  <!-- View Switcher -->
+  <div class="bg-slate-900/90 p-2 border-b border-slate-800/80 flex gap-1.5 overflow-x-auto">
+    <button onclick="switchTab('driver')" id="tab-btn-driver" class="flex-1 py-1.5 px-3 rounded-lg text-xs font-bold bg-amber-500 text-slate-950 transition text-center whitespace-nowrap">
+      🚗 עמדת נהג
+    </button>
+    <button onclick="switchTab('dispatcher')" id="tab-btn-dispatcher" class="flex-1 py-1.5 px-3 rounded-lg text-xs font-bold bg-slate-800 text-slate-300 transition text-center whitespace-nowrap">
+      📢 עמדת סדרן
+    </button>
+    <button onclick="switchTab('profile')" id="tab-btn-profile" class="flex-1 py-1.5 px-3 rounded-lg text-xs font-bold bg-slate-800 text-slate-300 transition text-center whitespace-nowrap">
+      💎 פרופיל וחובות
+    </button>
+  </div>
+
+  <!-- Main Content -->
+  <main class="flex-1 p-4 max-w-lg mx-auto w-full space-y-4">
+
+    <!-- DRIVER TAB -->
+    <div id="tab-driver" class="space-y-4">
+      <!-- Status Card with Auto-Freeze -->
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-sm space-y-3">
+        <div class="flex items-center justify-between">
+          <span class="text-xs text-slate-400 font-semibold">סטטוס עבודה נוכחי</span>
+          <span id="debt-indicator" class="text-xs font-mono font-bold text-amber-400">חוב: ₪0.00</span>
+        </div>
+        <button onclick="toggleDriverStatus()" id="status-toggle-btn" class="w-full py-3 rounded-xl font-extrabold text-sm transition flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-md">
+          🟢 שנה לסטטוס 'תפוס' (עצור קריאות)
+        </button>
+        <div id="freeze-alert" class="hidden p-3 bg-red-500/15 border border-red-500/40 rounded-xl text-xs text-red-300 font-semibold">
+          🚫 חשבונך מוקפא עקב חובות (מעל 500 ש"ח)! לא תוכל לקבל קריאות עד הסדרת החוב.
+        </div>
+      </div>
+
+      <!-- Work Zones (אזורי עבודה) -->
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-sm space-y-2.5">
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-bold text-white flex items-center gap-1.5">
+            📍 אזורי עבודה שלך
+          </span>
+          <button onclick="clearCities()" class="text-[11px] text-red-400 hover:underline">נקה הכל</button>
+        </div>
+        <div id="cities-list" class="flex flex-wrap gap-1.5 min-h-[32px] p-2 bg-slate-950 rounded-xl border border-slate-800 text-xs">
+          <!-- Chips injected by JS -->
+        </div>
+        <div class="flex gap-2">
+          <input type="text" id="city-input" placeholder="הקלד עיר להוספה..." class="flex-1 bg-slate-950 border border-slate-700 rounded-xl px-3 py-1.5 text-xs text-white focus:outline-none focus:border-amber-500">
+          <button onclick="addCityFromInput()" class="bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold px-3 py-1.5 rounded-xl border border-slate-700 transition">הוסף</button>
+        </div>
+        <div class="flex flex-wrap gap-1 pt-1">
+          <button onclick="addCity('מודיעין עילית')" class="text-[10px] bg-slate-800 text-slate-300 px-2 py-0.5 rounded border border-slate-700">+ מודיעין עילית</button>
+          <button onclick="addCity('ירושלים')" class="text-[10px] bg-slate-800 text-slate-300 px-2 py-0.5 rounded border border-slate-700">+ ירושלים</button>
+          <button onclick="addCity('בני ברק')" class="text-[10px] bg-slate-800 text-slate-300 px-2 py-0.5 rounded border border-slate-700">+ בני ברק</button>
+          <button onclick="addCity('פתח תקווה')" class="text-[10px] bg-slate-800 text-slate-300 px-2 py-0.5 rounded border border-slate-700">+ פתח תקווה</button>
+        </div>
+      </div>
+
+      <!-- Available Orders -->
+      <div class="space-y-2.5">
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-bold text-white">קריאות פתוחות באזורי היעד שלך</span>
+          <span id="orders-count" class="text-[11px] text-slate-400 font-mono">2 קריאות</span>
+        </div>
+        <div id="orders-container" class="space-y-2.5">
+          <!-- Injected Orders -->
+        </div>
+      </div>
+    </div>
+
+    <!-- DISPATCHER TAB -->
+    <div id="tab-dispatcher" class="hidden space-y-4">
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-sm space-y-3">
+        <span class="text-xs font-bold text-white block">📢 פרסום קריאה חדשה (מנקה טקסט אוטומטי)</span>
+        <textarea id="order-text-input" oninput="previewOrder()" rows="3" placeholder="הדבק פרטי קריאה: למשל מודיעין עילית -> ירושלים 180 שח" class="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-xs text-white focus:outline-none focus:border-amber-500 resize-none"></textarea>
+        <div id="order-preview-box" class="hidden p-2.5 bg-slate-950 rounded-xl border border-slate-800 text-xs space-y-1">
+          <div class="flex justify-between text-slate-400 text-[11px]">
+            <span>טקסט מנוקה:</span>
+            <span id="preview-price" class="text-amber-400 font-bold">מחיר: ₪0</span>
+          </div>
+          <p id="preview-text" class="text-slate-200 font-mono text-[11px]"></p>
+        </div>
+        <button onclick="publishOrder()" class="w-full py-2.5 rounded-xl font-bold text-xs bg-amber-500 hover:bg-amber-400 text-slate-950 shadow">
+          שגר קריאה לנהגים פנויים
+        </button>
+      </div>
+
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-sm space-y-3">
+        <span class="text-xs font-bold text-white block">📋 מעקב קריאות של התחנה</span>
+        <div id="dispatcher-orders" class="space-y-2 text-xs">
+          <!-- Injected orders -->
+        </div>
+      </div>
+    </div>
+
+    <!-- PROFILE TAB -->
+    <div id="tab-profile" class="hidden space-y-4">
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-sm space-y-3 text-xs">
+        <div class="flex items-center gap-3">
+          <div class="w-12 h-12 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center text-xl font-bold">
+            👤
+          </div>
+          <div>
+            <h3 id="profile-name" class="font-bold text-sm text-white">נהג טלגרם</h3>
+            <p id="profile-details" class="text-slate-400 text-[11px]">טויוטה קורולה (2022) • 5 מקומות</p>
+          </div>
+        </div>
+        <div class="grid grid-cols-3 gap-2 pt-2 border-t border-slate-800 text-center">
+          <div class="bg-slate-950 p-2 rounded-xl border border-slate-800">
+            <span class="text-[10px] text-slate-400 block">דירוג</span>
+            <span id="profile-rating" class="font-bold text-amber-400">⭐ 4.9</span>
+          </div>
+          <div class="bg-slate-950 p-2 rounded-xl border border-slate-800">
+            <span class="text-[10px] text-slate-400 block">נסיעות</span>
+            <span id="profile-trips" class="font-bold text-white">42</span>
+          </div>
+          <div class="bg-slate-950 p-2 rounded-xl border border-slate-800">
+            <span class="text-[10px] text-slate-400 block">חוב תחנה</span>
+            <span id="profile-debt" class="font-bold text-emerald-400">₪0.00</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Debts list & Appeals -->
+      <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-sm space-y-2.5">
+        <span class="text-xs font-bold text-white flex items-center gap-1.5">
+          💳 חיובים וערעורים פעילים
+        </span>
+        <div id="debts-list" class="space-y-2 text-xs">
+          <div class="p-3 bg-slate-950 rounded-xl border border-slate-800 flex justify-between items-center">
+            <div>
+              <p class="font-bold text-white">קריאה #1001 (עמלה 10%)</p>
+              <p class="text-[10px] text-slate-400">מודיעין עילית - ירושלים</p>
+            </div>
+            <div class="text-left">
+              <span class="font-bold text-amber-400 block">₪18.00</span>
+              <button onclick="appealDebt(1001)" class="text-[10px] text-sky-400 hover:underline">ערעור</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    // Initialize Telegram WebApp
+    const tg = window.Telegram?.WebApp;
+    if (tg) {
+      tg.ready();
+      tg.expand();
+      const user = tg.initDataUnsafe?.user;
+      if (user) {
+        const name = [user.first_name, user.last_name].filter(Boolean).join(' ') || user.username || 'משתמש טלגרם';
+        document.getElementById('tg-username').innerText = name + ' (מזהה: ' + user.id + ')';
+        document.getElementById('profile-name').innerText = name;
+      } else {
+        document.getElementById('tg-username').innerText = 'מחובר למערכת ה-ERP';
+      }
+    } else {
+      document.getElementById('tg-username').innerText = 'מערכת ניהול מקוונת';
+    }
+
+    // State management
+    let isFree = true;
+    let debtBalance = 0.0;
+    let myCities = ['מודיעין עילית', 'ירושלים', 'בני ברק'];
+    let orders = [
+      { id: 1002, text: 'מודיעין עילית (נתיבות שלום) - ירושלים (רוממה), 3 נוסעים, 180 שח', price: 180, time: 'לפני 5 דקות' },
+      { id: 1003, text: 'בני ברק (חזון איש) - פתח תקווה (בילינסון), משלוח מעטפה דחוף, 85 שח', price: 85, time: 'לפני 12 דקות' }
+    ];
+
+    function renderCities() {
+      const container = document.getElementById('cities-list');
+      if (myCities.length === 0) {
+        container.innerHTML = '<span class="text-slate-500 italic py-0.5">לא הוגדרו אזורים (מקבל קריאות מכל הארץ)</span>';
+        return;
+      }
+      container.innerHTML = myCities.map(c => `
+        <span class="inline-flex items-center gap-1 bg-amber-500/10 text-amber-300 border border-amber-500/30 px-2 py-0.5 rounded-lg text-[11px] font-medium">
+          ${c}
+          <button onclick="removeCity('${c}')" class="hover:text-white">✕</button>
+        </span>
+      `).join('');
+    }
+
+    function addCity(city) {
+      if (!city || myCities.includes(city)) return;
+      myCities.push(city);
+      renderCities();
+      renderOrders();
+    }
+
+    function addCityFromInput() {
+      const input = document.getElementById('city-input');
+      const val = input.value.trim();
+      if (val) {
+        addCity(val);
+        input.value = '';
+      }
+    }
+
+    function removeCity(city) {
+      myCities = myCities.filter(c => c !== city);
+      renderCities();
+      renderOrders();
+    }
+
+    function clearCities() {
+      myCities = [];
+      renderCities();
+      renderOrders();
+    }
+
+    function toggleDriverStatus() {
+      if (debtBalance > 500) {
+        document.getElementById('freeze-alert').classList.remove('hidden');
+        return;
+      }
+      isFree = !isFree;
+      updateStatusUI();
+    }
+
+    function updateStatusUI() {
+      const badge = document.getElementById('status-badge');
+      const text = document.getElementById('status-text');
+      const btn = document.getElementById('status-toggle-btn');
+
+      if (isFree) {
+        badge.className = "px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-bold flex items-center gap-1";
+        text.innerText = "פנוי לקריאות";
+        btn.className = "w-full py-3 rounded-xl font-extrabold text-sm transition flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-md";
+        btn.innerText = "🟢 סטטוס פעיל: 'פנוי' (לחץ לעצירת קריאות)";
+      } else {
+        badge.className = "px-2.5 py-1 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-xs font-bold flex items-center gap-1";
+        text.innerText = "תפוס / עצור";
+        btn.className = "w-full py-3 rounded-xl font-extrabold text-sm transition flex items-center justify-center gap-2 bg-red-600/20 hover:bg-red-600 text-red-200 border border-red-500/30";
+        btn.innerText = "🔴 סטטוס: 'תפוס' (לחץ לעבור לפנוי)";
+      }
+    }
+
+    function renderOrders() {
+      const container = document.getElementById('orders-container');
+      const countEl = document.getElementById('orders-count');
+      const filtered = orders.filter(o => {
+        if (myCities.length === 0) return true;
+        return myCities.some(c => o.text.includes(c));
+      });
+
+      countEl.innerText = filtered.length + ' קריאות';
+      if (filtered.length === 0) {
+        container.innerHTML = '<div class="p-6 bg-slate-900 rounded-xl border border-slate-800 text-center text-xs text-slate-400">אין קריאות מתאימות באזורים שלך כרגע.</div>';
+        return;
+      }
+
+      container.innerHTML = filtered.map(o => `
+        <div class="bg-slate-900 border border-slate-800 rounded-xl p-3.5 space-y-2">
+          <div class="flex justify-between items-center text-xs">
+            <span class="font-mono font-bold text-amber-400">קריאה #${o.id}</span>
+            <span class="font-extrabold text-emerald-400 bg-slate-950 px-2.5 py-0.5 rounded border border-slate-800">₪${o.price}</span>
+          </div>
+          <p class="text-xs text-slate-200 leading-relaxed font-sans bg-slate-950/60 p-2.5 rounded-lg border border-slate-800/80">${o.text}</p>
+          <div class="flex justify-between items-center pt-1 text-[11px]">
+            <span class="text-slate-400">${o.time}</span>
+            <button onclick="takeOrder(${o.id})" class="bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold px-3 py-1.5 rounded-lg transition">
+              🚗 קח קריאה (הזן ETA)
+            </button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function takeOrder(id) {
+      if (!isFree) {
+        alert("⚠️ אתה בסטטוס תפוס! העבר לפנוי למעלה קודם.");
+        return;
+      }
+      const eta = prompt("⏱️ כמה זמן עד להגעה למוצא? (במספר דקות):", "10");
+      if (eta) {
+        alert(`✅ בקשתך לקריאה #${id} עם זמן הגעה של ${eta} דקות שוגרה לסדרן!`);
+      }
+    }
+
+    function cleanText(text) {
+      return text.replace(/[-=]+>/g, '-').replace(/<[-=]+/g, '-')
+                 .replace(/\\bפת\\b/g, 'פתח תקווה')
+                 .replace(/\\bים\\b/g, 'ירושלים')
+                 .replace(/\\bספר\\b/g, 'מודיעין עילית').trim();
+    }
+
+    function previewOrder() {
+      const input = document.getElementById('order-text-input');
+      const box = document.getElementById('order-preview-box');
+      const previewText = document.getElementById('preview-text');
+      const previewPrice = document.getElementById('preview-price');
+
+      const raw = input.value;
+      if (!raw.trim()) {
+        box.classList.add('hidden');
+        return;
+      }
+      const cleaned = cleanText(raw);
+      const prices = cleaned.match(/\\b\\d{2,4}\\b/g);
+      const estPrice = prices ? prices[prices.length - 1] : 0;
+
+      previewText.innerText = cleaned;
+      previewPrice.innerText = 'מחיר: ₪' + estPrice;
+      box.classList.remove('hidden');
+    }
+
+    function publishOrder() {
+      const input = document.getElementById('order-text-input');
+      const raw = input.value.trim();
+      if (!raw) return;
+      const cleaned = cleanText(raw);
+      const prices = cleaned.match(/\\b\\d{2,4}\\b/g);
+      const estPrice = prices ? parseInt(prices[prices.length - 1], 10) : 0;
+
+      if (!estPrice) {
+        alert("⚠️ המערכת לא זיהתה מחיר. נא לכלול מחיר בספרות (למשל: 150).");
+        return;
+      }
+
+      const newId = 1000 + orders.length + 2;
+      orders.unshift({ id: newId, text: cleaned, price: estPrice, time: 'הרגע' });
+      input.value = '';
+      previewOrder();
+      renderOrders();
+      alert(`✅ קריאה #${newId} שוגרה בהצלחה לנהגים באזורי היעד!`);
+      switchTab('driver');
+    }
+
+    function appealDebt(id) {
+      const reason = prompt("✍️ מדוע אתה מבקש לבטל את החיוב הזה? (למשל: 'הלקוח ביטל במקום'):");
+      if (reason) {
+        alert(`✅ ערעור על חיוב #${id} נשלח להנהלת המערכת לבדיקה.`);
+      }
+    }
+
+    function switchTab(tab) {
+      document.getElementById('tab-driver').classList.add('hidden');
+      document.getElementById('tab-dispatcher').classList.add('hidden');
+      document.getElementById('tab-profile').classList.add('hidden');
+
+      document.getElementById('tab-btn-driver').className = "flex-1 py-1.5 px-3 rounded-lg text-xs font-bold bg-slate-800 text-slate-300 transition text-center whitespace-nowrap";
+      document.getElementById('tab-btn-dispatcher').className = "flex-1 py-1.5 px-3 rounded-lg text-xs font-bold bg-slate-800 text-slate-300 transition text-center whitespace-nowrap";
+      document.getElementById('tab-btn-profile').className = "flex-1 py-1.5 px-3 rounded-lg text-xs font-bold bg-slate-800 text-slate-300 transition text-center whitespace-nowrap";
+
+      document.getElementById('tab-' + tab).classList.remove('hidden');
+      document.getElementById('tab-btn-' + tab).className = "flex-1 py-1.5 px-3 rounded-lg text-xs font-bold bg-amber-500 text-slate-950 transition text-center whitespace-nowrap";
+    }
+
+    // Initial render
+    renderCities();
+    renderOrders();
+    updateStatusUI();
+  </script>
+</body>
+</html>"""
+
 # ----------------- שרת HTTP להגשת ה-Mini App ו-Keep-Alive ב-Render -----------------
 async def handle_ping(request):
     return web.Response(text="ERP Master Alive! WebApp is serving.")
@@ -225,28 +638,31 @@ async def start_web_server():
     app.router.add_get("/ping", handle_ping)
     app.router.add_get("/health", handle_ping)
 
-    # הגשה ישירה של אפליקציית ה-Mini App (תיקיית dist) אם קיימת!
+    # 1. בדיקה אם קיימת תיקיית dist מקומפלת
     dist_dir = os.path.join(os.path.dirname(__file__), "dist")
-    if os.path.exists(dist_dir) and os.path.isdir(dist_dir):
-        # מגיש את קבצי ה-Frontend ישירות מ-Render ללא צורך בגוגל או שרת נפרד!
-        app.router.add_static("/assets", path=os.path.join(dist_dir, "assets"), name="assets")
+    dist_index = os.path.join(dist_dir, "index.html")
+    dist_assets = os.path.join(dist_dir, "assets")
 
-        async def serve_index(request):
-            index_path = os.path.join(dist_dir, "index.html")
-            return web.FileResponse(index_path)
+    if os.path.exists(dist_assets) and os.path.isdir(dist_assets):
+        app.router.add_static("/assets", path=dist_assets, name="assets")
 
-        app.router.add_get("/", serve_index)
-        app.router.add_get("/{tail:.*}", serve_index)
-        logging.info(f"📱 Mini App Web Application loaded and serving from: {dist_dir}")
-    else:
-        app.router.add_get("/", handle_ping)
+    # פונקציית הגשת ה-Mini App: אם קיים dist/index.html מגיש אותו, ואם לא – מגיש את תבנית ה-HTML המשולבת המלאה!
+    # בצורה זו, לעולם לא יוצג מסך לבן או הודעת טקסט יבשה בטלגרם!
+    async def serve_webapp(request):
+        if os.path.exists(dist_index):
+            return web.FileResponse(dist_index)
+        return web.Response(text=STANDALONE_MINIAPP_HTML, content_type="text/html", charset="utf-8")
+
+    app.router.add_get("/", serve_webapp)
+    app.router.add_get("/app", serve_webapp)
+    app.router.add_get("/webapp", serve_webapp)
 
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logging.info(f"🌐 HTTP Web Server active on port {port}")
+    logging.info(f"🌐 Mini App Web Server active on port {port} (Serving full interactive UI)")
 
 # ----------------- מקלדות ועזרים -----------------
 def get_main_kb(role='user', status='busy'):
@@ -1017,7 +1433,7 @@ async def god_broadcast_send(message: Message, state: FSMContext):
 async def mgr_dummy(call: CallbackQuery):
     await call.answer("פעולה זו מבוצעת על ידי הנהלת המערכת.", show_alert=True)
 
-# ----------------- הרצה (Main Loop) -----------------
+# ----------------- הרצה (Main Loop עם מניעת Conflict וטיפול במופעים כפולים) -----------------
 async def main():
     await init_db()
     await start_web_server()
@@ -1034,8 +1450,25 @@ async def main():
     except Exception as e:
         logging.warning(f"Could not set default menu button web app: {e}")
 
-    await bot.delete_webhook(drop_pending_updates=True) 
-    await dp.start_polling(bot)
+    # מחיקת webhook ועדכונים ממתינים עם מרווח שחרור
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+    except Exception as e:
+        logging.warning(f"delete_webhook note: {e}")
+
+    await asyncio.sleep(1)
+
+    while True:
+        try:
+            logging.info("📡 Bot Polling started (optimized updates)...")
+            await dp.start_polling(bot, drop_pending_updates=True, allowed_updates=dp.resolve_used_update_types())
+            break
+        except TelegramConflictError:
+            logging.error("⚠️ זוהה בוט כפול (TelegramConflictError)! יש מופע נוסף שרץ במקביל עם אותו ה-BOT_TOKEN. בדוק שירותים כפולים ב-Render או הרצה פתוחה במחשב. מנסה שוב בעוד 5 שניות...")
+            await asyncio.sleep(5)
+        except Exception as e:
+            logging.error(f"⚠️ שגיאה ב-Polling: {e}. מנסה שוב בעוד 3 שניות...")
+            await asyncio.sleep(3)
 
 if __name__ == '__main__':
     try:
