@@ -3,6 +3,10 @@ import asyncio
 import logging
 import sys
 import re
+import json
+import hmac
+import hashlib
+from urllib.parse import parse_qsl, unquote
 from datetime import datetime
 from contextlib import contextmanager
 from aiohttp import web
@@ -147,67 +151,239 @@ async def run_in_thread(func, *args, **kwargs):
     """הרצת פעולת מסד הנתונים בתהליכון מקבילי כדי לא לתקוע את ה-Event Loop של aiogram"""
     return await asyncio.to_thread(func, *args, **kwargs)
 
+def validate_telegram_init_data(init_data: str, bot_token: str = BOT_TOKEN) -> dict | None:
+    """
+    אימות קריפטוגרפי מחמיר של מחרוזת Telegram.WebApp.initData באמצעות HMAC-SHA256
+    לפי מפרט הטלגרם הרשמי. מונע כל ניסיון התחזות ומאמת את מזהה המשתמש.
+    """
+    if not init_data or not bot_token:
+        return None
+    try:
+        parsed_data = dict(parse_qsl(init_data, keep_blank_values=True))
+        received_hash = parsed_data.pop("hash", None)
+        if not received_hash:
+            return None
+        
+        # מחרוזת בדיקה מסודרת אלפביתית לפי מפתחות בפורמט key=value
+        data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(parsed_data.items()))
+        
+        # חישוב ה-Secret Key מתוך מחרוזת ה-WebAppData וטוקן הבוט
+        secret_key = hmac.new(b"WebAppData", bot_token.encode("utf-8"), hashlib.sha256).digest()
+        calculated_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+        
+        if hmac.compare_digest(calculated_hash, received_hash):
+            user_raw = parsed_data.get("user")
+            user_data = json.loads(user_raw) if user_raw else {}
+            user_data["auth_date"] = parsed_data.get("auth_date")
+            return user_data
+    except Exception as e:
+        logging.error(f"❌ שגיאה באימות קריפטוגרפי של Telegram initData: {e}")
+    return None
+
 def _init_db_sync():
     with get_pg_cursor() as cur:
-        cur.execute('''CREATE TABLE IF NOT EXISTS deliveries_users (
-            user_id BIGINT PRIMARY KEY, full_name TEXT, phone TEXT, birth_year INTEGER, 
-            car_brand TEXT, car_model TEXT, car_year INTEGER, car_seats INTEGER, 
-            status TEXT DEFAULT 'busy', role TEXT DEFAULT 'user', station_id INTEGER DEFAULT 0, 
-            rating REAL DEFAULT 5.0, total_trips INTEGER DEFAULT 0, is_blocked INTEGER DEFAULT 0, 
-            debt_balance REAL DEFAULT 0.0, sub_expiry TEXT)''')
-
+        # 1. טבלת תחנות מורחבת
         cur.execute('''CREATE TABLE IF NOT EXISTS deliveries_stations (
-            station_id SERIAL PRIMARY KEY, name TEXT, commission_percent REAL DEFAULT 10.0)''')
+            station_id SERIAL PRIMARY KEY, 
+            name TEXT NOT NULL, 
+            commission_percent REAL DEFAULT 10.0,
+            is_active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
 
+        # 2. טבלת משתמשים מורחבת (כולל Onboarding, מנויים, דירוג וחובות)
+        cur.execute('''CREATE TABLE IF NOT EXISTS deliveries_users (
+            user_id BIGINT PRIMARY KEY, 
+            telegram_username TEXT,
+            full_name TEXT NOT NULL, 
+            phone TEXT, 
+            is_phone_verified BOOLEAN DEFAULT FALSE,
+            birth_year INTEGER, 
+            terms_accepted_at TIMESTAMP,
+            role TEXT DEFAULT 'user', 
+            station_id INTEGER DEFAULT 1, 
+            status TEXT DEFAULT 'busy', 
+            is_blocked BOOLEAN DEFAULT FALSE, 
+            block_reason TEXT,
+            car_brand TEXT, 
+            car_model TEXT, 
+            car_year INTEGER, 
+            car_seats INTEGER DEFAULT 4, 
+            subscription_plan TEXT DEFAULT 'free',
+            sub_start_date TIMESTAMP,
+            sub_expiry_date TIMESTAMP,
+            daily_trips_count INTEGER DEFAULT 0,
+            last_trip_date DATE,
+            rating REAL DEFAULT 5.0, 
+            total_trips INTEGER DEFAULT 0, 
+            debt_balance REAL DEFAULT 0.0, 
+            sub_expiry TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+        # הגירה בטוחה (Safe ALTER TABLE) למקרה שהטבלה כבר הייתה קיימת
+        user_columns_to_add = [
+            ("telegram_username", "TEXT"),
+            ("is_phone_verified", "BOOLEAN DEFAULT FALSE"),
+            ("terms_accepted_at", "TIMESTAMP"),
+            ("subscription_plan", "TEXT DEFAULT 'free'"),
+            ("sub_start_date", "TIMESTAMP"),
+            ("sub_expiry_date", "TIMESTAMP"),
+            ("daily_trips_count", "INTEGER DEFAULT 0"),
+            ("last_trip_date", "DATE"),
+            ("block_reason", "TEXT"),
+            ("created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        ]
+        for col_name, col_type in user_columns_to_add:
+            try:
+                cur.execute(f"ALTER TABLE deliveries_users ADD COLUMN IF NOT EXISTS {col_name} {col_type}")
+            except Exception: pass
+
+        # 3. טבלת קריאות מורחבת
         cur.execute('''CREATE TABLE IF NOT EXISTS deliveries_orders (
-            order_id SERIAL PRIMARY KEY, text TEXT, price REAL,
-            publisher_id BIGINT, station_id INTEGER, driver_id BIGINT, status TEXT DEFAULT 'open', created_at TEXT)''')
+            order_id SERIAL PRIMARY KEY, 
+            text TEXT, 
+            price REAL,
+            publisher_id BIGINT, 
+            station_id INTEGER, 
+            driver_id BIGINT, 
+            origin_city TEXT,
+            dest_city TEXT,
+            commission_amount REAL DEFAULT 0.0,
+            pickup_lat DOUBLE PRECISION,
+            pickup_lon DOUBLE PRECISION,
+            status TEXT DEFAULT 'open', 
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            taken_at TIMESTAMP,
+            completed_at TIMESTAMP)''')
 
+        order_columns_to_add = [
+            ("origin_city", "TEXT"),
+            ("dest_city", "TEXT"),
+            ("commission_amount", "REAL DEFAULT 0.0"),
+            ("pickup_lat", "DOUBLE PRECISION"),
+            ("pickup_lon", "DOUBLE PRECISION"),
+            ("taken_at", "TIMESTAMP"),
+            ("completed_at", "TIMESTAMP")
+        ]
+        for col_name, col_type in order_columns_to_add:
+            try:
+                cur.execute(f"ALTER TABLE deliveries_orders ADD COLUMN IF NOT EXISTS {col_name} {col_type}")
+            except Exception: pass
+
+        # 4. טבלת חובות ועמלות
         cur.execute('''CREATE TABLE IF NOT EXISTS deliveries_debts (
-            debt_id SERIAL PRIMARY KEY, order_id INTEGER, driver_id BIGINT,
-            station_id INTEGER, amount REAL, status TEXT DEFAULT 'unpaid', reason TEXT)''')
+            debt_id SERIAL PRIMARY KEY, 
+            order_id INTEGER, 
+            driver_id BIGINT,
+            station_id INTEGER, 
+            amount REAL, 
+            status TEXT DEFAULT 'unpaid', 
+            reason TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            resolved_at TIMESTAMP)''')
 
+        # 5. טבלת הצעות מחיר ו-ETA של נהגים
+        cur.execute('''CREATE TABLE IF NOT EXISTS deliveries_order_bids (
+            bid_id SERIAL PRIMARY KEY,
+            order_id INTEGER REFERENCES deliveries_orders(order_id) ON DELETE CASCADE,
+            driver_id BIGINT REFERENCES deliveries_users(user_id),
+            eta_minutes INTEGER NOT NULL,
+            status TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+        # 6. טבלת מילון קיצורי ערים (NLP Aliases)
+        cur.execute('''CREATE TABLE IF NOT EXISTS deliveries_city_aliases (
+            alias TEXT PRIMARY KEY,
+            standard_city TEXT NOT NULL)''')
+
+        # 7. טבלת הגדרות מערכת גלובליות
+        cur.execute('''CREATE TABLE IF NOT EXISTS deliveries_system_settings (
+            setting_key TEXT PRIMARY KEY,
+            setting_value TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+        # 8. טבלת ערי נהג
         cur.execute('''CREATE TABLE IF NOT EXISTS deliveries_driver_cities (
             user_id BIGINT, city_name TEXT, PRIMARY KEY(user_id, city_name))''')
 
+        # 9. טבלת קבוצות מאושרות
         cur.execute('''CREATE TABLE IF NOT EXISTS deliveries_bot_groups (
             group_id BIGINT PRIMARY KEY, group_name TEXT)''')
 
+        # אינדקסים מהירים לביצועים מירביים
         cur.execute('''CREATE INDEX IF NOT EXISTS idx_deliveries_orders_status ON deliveries_orders(status)''')
         cur.execute('''CREATE INDEX IF NOT EXISTS idx_deliveries_driver_cities_user ON deliveries_driver_cities(user_id)''')
         cur.execute('''CREATE INDEX IF NOT EXISTS idx_deliveries_debts_driver ON deliveries_debts(driver_id, status)''')
+        cur.execute('''CREATE INDEX IF NOT EXISTS idx_deliveries_users_role ON deliveries_users(role)''')
 
+        # תחנת ברירת מחדל
         cur.execute('''INSERT INTO deliveries_stations (station_id, name, commission_percent) 
                        VALUES (1, 'תחנה ראשית', 10.0) 
                        ON CONFLICT (station_id) DO NOTHING''')
+
+        # ביצור הרשאות מנהלי מערכת קבועים (552821474 ו-8644923212)
+        for admin_id in ADMIN_IDS:
+            cur.execute('''INSERT INTO deliveries_users (user_id, full_name, phone, birth_year, role, status, is_blocked)
+                           VALUES (%s, 'מנהל ראשי', '0500000000', 1990, 'admin', 'free', FALSE)
+                           ON CONFLICT (user_id) DO UPDATE SET role = 'admin', is_blocked = FALSE''', (admin_id,))
+
+        # הזנת מילון קיצורי ערים נפוצים
+        city_seeds = [
+            ('ים', 'ירושלים'), ('י-ם', 'ירושלים'), ('עיר הקודש', 'ירושלים'),
+            ('בב', 'בני ברק'), ('ב"ב', 'בני ברק'),
+            ('פת', 'פתח תקווה'), ('פ"ת', 'פתח תקווה'),
+            ('תא', 'תל אביב'), ('ת"א', 'תל אביב'),
+            ('קס', 'מודיעין עילית'), ('ק"ס', 'מודיעין עילית'), ('ספר', 'מודיעין עילית'),
+            ('אשד', 'אשדוד'), ('אשדו', 'אשדוד'),
+            ('חולון', 'חולון'), ('בת ים', 'בת ים'),
+            ('ראשלצ', 'ראשון לציון'), ('ראשל"צ', 'ראשון לציון')
+        ]
+        for alias, std in city_seeds:
+            cur.execute("INSERT INTO deliveries_city_aliases (alias, standard_city) VALUES (%s, %s) ON CONFLICT (alias) DO NOTHING", (alias, std))
 
 async def init_db():
     if USE_POSTGRES:
         try:
             await run_in_thread(_init_db_sync)
-            logging.info("✅ PostgreSQL tables and indexes initialized successfully with prefix 'deliveries_'.")
+            logging.info("✅ PostgreSQL Phase 1 tables, aliases and indexes initialized successfully with prefix 'deliveries_'.")
         except Exception as e:
             logging.error(f"❌ Error initializing PostgreSQL: {e}")
             raise e
     else:
         async with aiosqlite.connect(SQLITE_DB_FILE) as db:
             await db.execute('''CREATE TABLE IF NOT EXISTS deliveries_users (
-                user_id INTEGER PRIMARY KEY, full_name TEXT, phone TEXT, birth_year INTEGER, 
-                car_brand TEXT, car_model TEXT, car_year INTEGER, car_seats INTEGER, 
-                status TEXT DEFAULT 'busy', role TEXT DEFAULT 'user', station_id INTEGER DEFAULT 0, 
+                user_id INTEGER PRIMARY KEY, telegram_username TEXT, full_name TEXT, phone TEXT, 
+                is_phone_verified BOOLEAN DEFAULT 0, birth_year INTEGER, terms_accepted_at TEXT,
+                car_brand TEXT, car_model TEXT, car_year INTEGER, car_seats INTEGER DEFAULT 4, 
+                status TEXT DEFAULT 'busy', role TEXT DEFAULT 'user', station_id INTEGER DEFAULT 1, 
+                subscription_plan TEXT DEFAULT 'free', sub_start_date TEXT, sub_expiry_date TEXT,
+                daily_trips_count INTEGER DEFAULT 0, last_trip_date TEXT,
                 rating REAL DEFAULT 5.0, total_trips INTEGER DEFAULT 0, is_blocked INTEGER DEFAULT 0, 
-                debt_balance REAL DEFAULT 0.0, sub_expiry TEXT)''')
+                block_reason TEXT, debt_balance REAL DEFAULT 0.0, sub_expiry TEXT, created_at TEXT)''')
             
             await db.execute('''CREATE TABLE IF NOT EXISTS deliveries_stations (
-                station_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, commission_percent REAL DEFAULT 10.0)''')
+                station_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, commission_percent REAL DEFAULT 10.0,
+                is_active INTEGER DEFAULT 1, created_at TEXT)''')
             
             await db.execute('''CREATE TABLE IF NOT EXISTS deliveries_orders (
                 order_id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT, price REAL,
-                publisher_id INTEGER, station_id INTEGER, driver_id INTEGER, status TEXT DEFAULT 'open', created_at TEXT)''')
+                publisher_id INTEGER, station_id INTEGER, driver_id INTEGER, 
+                origin_city TEXT, dest_city TEXT, commission_amount REAL DEFAULT 0.0,
+                pickup_lat REAL, pickup_lon REAL, status TEXT DEFAULT 'open', created_at TEXT,
+                taken_at TEXT, completed_at TEXT)''')
             
             await db.execute('''CREATE TABLE IF NOT EXISTS deliveries_debts (
                 debt_id INTEGER PRIMARY KEY AUTOINCREMENT, order_id INTEGER, driver_id INTEGER,
-                station_id INTEGER, amount REAL, status TEXT DEFAULT 'unpaid', reason TEXT)''')
+                station_id INTEGER, amount REAL, status TEXT DEFAULT 'unpaid', reason TEXT, created_at TEXT, resolved_at TEXT)''')
+
+            await db.execute('''CREATE TABLE IF NOT EXISTS deliveries_order_bids (
+                bid_id INTEGER PRIMARY KEY AUTOINCREMENT, order_id INTEGER, driver_id INTEGER, eta_minutes INTEGER,
+                status TEXT DEFAULT 'pending', created_at TEXT)''')
+
+            await db.execute('''CREATE TABLE IF NOT EXISTS deliveries_city_aliases (
+                alias TEXT PRIMARY KEY, standard_city TEXT)''')
+
+            await db.execute('''CREATE TABLE IF NOT EXISTS deliveries_system_settings (
+                setting_key TEXT PRIMARY KEY, setting_value TEXT, updated_at TEXT)''')
 
             await db.execute('''CREATE TABLE IF NOT EXISTS deliveries_driver_cities (
                 user_id INTEGER, city_name TEXT, PRIMARY KEY(user_id, city_name))''')
@@ -216,8 +392,25 @@ async def init_db():
                 group_id INTEGER PRIMARY KEY, group_name TEXT)''')
                 
             await db.execute('INSERT OR IGNORE INTO deliveries_stations (station_id, name, commission_percent) VALUES (1, "תחנה ראשית", 10.0)')
+
+            for admin_id in ADMIN_IDS:
+                await db.execute('''INSERT INTO deliveries_users (user_id, full_name, phone, birth_year, role, status)
+                                   VALUES (?, 'מנהל ראשי', '0500000000', 1990, 'admin', 'free')
+                                   ON CONFLICT(user_id) DO UPDATE SET role = 'admin', is_blocked = 0''', (admin_id,))
+
+            city_seeds = [
+                ('ים', 'ירושלים'), ('י-ם', 'ירושלים'), ('עיר הקודש', 'ירושלים'),
+                ('בב', 'בני ברק'), ('ב"ב', 'בני ברק'),
+                ('פת', 'פתח תקווה'), ('פ"ת', 'פתח תקווה'),
+                ('תא', 'תל אביב'), ('ת"א', 'תל אביב'),
+                ('קס', 'מודיעין עילית'), ('ק"ס', 'מודיעין עילית'), ('ספר', 'מודיעין עילית'),
+                ('אשד', 'אשדוד'), ('אשדו', 'אשדוד')
+            ]
+            for alias, std in city_seeds:
+                await db.execute("INSERT OR IGNORE INTO deliveries_city_aliases (alias, standard_city) VALUES (?, ?)", (alias, std))
+
             await db.commit()
-            logging.info("✅ SQLite tables initialized successfully with prefix 'deliveries_'.")
+            logging.info("✅ SQLite Phase 1 tables and aliases initialized successfully.")
 
 def _get_user_sync(user_id):
     with get_pg_cursor() as cur:
@@ -629,16 +822,195 @@ STANDALONE_MINIAPP_HTML = """<!doctype html>
 </body>
 </html>"""
 
-# ----------------- שרת HTTP להגשת ה-Mini App ו-Keep-Alive ב-Render -----------------
+# ----------------- שרת HTTP, נתיבי REST API ו-Telegram Mini App -----------------
+def cors_json_response(data, status=200):
+    return web.json_response(data, status=status, headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS, PUT, DELETE",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Telegram-Init-Data, Accept"
+    })
+
+async def handle_options(request):
+    return web.Response(text="", status=204, headers={
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS, PUT, DELETE",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Telegram-Init-Data, Accept"
+    })
+
 async def handle_ping(request):
     return web.Response(text="ERP Master Alive! WebApp is serving.")
 
+async def handle_api_auth(request):
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+
+    init_data = data.get("initData") or request.headers.get("X-Telegram-Init-Data", "")
+    user_payload = validate_telegram_init_data(init_data)
+
+    # במצב בדיקה מקומי או הדמיית פיתוח: אם נשלח dev_user_id של מנהל מערכת
+    if not user_payload:
+        dev_user_id = data.get("dev_user_id") or request.query.get("user_id")
+        if dev_user_id and int(dev_user_id) in ADMIN_IDS:
+            user_payload = {"id": int(dev_user_id), "first_name": "מנהל ראשי (God Mode)"}
+        else:
+            return cors_json_response({"ok": False, "error": "אימות Telegram WebApp נכשל. פתח מתוך הבוט."}, status=401)
+
+    user_id = int(user_payload.get("id"))
+    full_name = user_payload.get("first_name", "")
+    if user_payload.get("last_name"):
+        full_name += " " + user_payload.get("last_name")
+    if not full_name:
+        full_name = user_payload.get("username", f"משתמש {user_id}")
+
+    username = user_payload.get("username", "")
+
+    user = await get_user(user_id)
+    is_admin = (user_id in ADMIN_IDS)
+
+    if not user:
+        default_role = 'admin' if is_admin else 'user'
+        if USE_POSTGRES:
+            def _create_u():
+                with get_pg_cursor() as cur:
+                    cur.execute('''INSERT INTO deliveries_users (user_id, full_name, telegram_username, role, status)
+                                   VALUES (%s, %s, %s, %s, 'busy')
+                                   ON CONFLICT (user_id) DO UPDATE SET full_name = EXCLUDED.full_name''',
+                                (user_id, full_name, username, default_role))
+            await run_in_thread(_create_u)
+        else:
+            async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+                await db.execute('''INSERT INTO deliveries_users (user_id, full_name, telegram_username, role, status)
+                                   VALUES (?, ?, ?, ?, 'busy')
+                                   ON CONFLICT (user_id) DO UPDATE SET full_name = excluded.full_name''',
+                                (user_id, full_name, username, default_role))
+                await db.commit()
+        user = await get_user(user_id)
+    elif is_admin and (user['role'] if isinstance(user, dict) else user[9]) != 'admin':
+        if USE_POSTGRES:
+            def _fix_adm():
+                with get_pg_cursor() as cur:
+                    cur.execute("UPDATE deliveries_users SET role = 'admin', is_blocked = FALSE WHERE user_id = %s", (user_id,))
+            await run_in_thread(_fix_adm)
+        else:
+            async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+                await db.execute("UPDATE deliveries_users SET role = 'admin', is_blocked = 0 WHERE user_id = ?", (user_id,))
+                await db.commit()
+        user = await get_user(user_id)
+
+    user_dict = dict(user) if hasattr(user, 'keys') else {
+        "user_id": user[0], "full_name": user[1], "phone": user[2],
+        "role": user[9], "status": user[8], "station_id": user[10],
+        "rating": float(user[11]), "total_trips": user[12],
+        "is_blocked": bool(user[13]), "debt_balance": float(user[14])
+    }
+
+    # טעינת תחנות
+    if USE_POSTGRES:
+        def _get_st():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT station_id, name, commission_percent FROM deliveries_stations ORDER BY station_id ASC")
+                return cur.fetchall()
+        stations_raw = await run_in_thread(_get_st)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            stations_raw = await (await db.execute("SELECT station_id, name, commission_percent FROM deliveries_stations ORDER BY station_id ASC")).fetchall()
+
+    stations = [dict(s) for s in stations_raw]
+    cities = await get_driver_cities(user_id)
+
+    return cors_json_response({
+        "ok": True,
+        "user": user_dict,
+        "stations": stations,
+        "cities": cities
+    })
+
+async def handle_api_orders(request):
+    """החזרת רשימת קריאות פתוחות עבור ה-Mini App"""
+    if USE_POSTGRES:
+        def _get_orders():
+            with get_pg_cursor() as cur:
+                cur.execute('''SELECT order_id, text, price, publisher_id, station_id, driver_id, status, created_at, origin_city, dest_city
+                               FROM deliveries_orders
+                               WHERE status = 'open'
+                               ORDER BY order_id DESC LIMIT 50''')
+                return cur.fetchall()
+        orders_raw = await run_in_thread(_get_orders)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            orders_raw = await (await db.execute('''SELECT order_id, text, price, publisher_id, station_id, driver_id, status, created_at, origin_city, dest_city
+                                                   FROM deliveries_orders
+                                                   WHERE status = 'open'
+                                                   ORDER BY order_id DESC LIMIT 50''')).fetchall()
+    orders = [dict(o) for o in orders_raw]
+    return cors_json_response({"ok": True, "orders": orders})
+
+async def handle_api_driver_status(request):
+    """עדכון סטטוס נהג (פנוי / תפוס) ישירות מתוך ה-Mini App עם בדיקת חובות"""
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+
+    user_id = data.get("user_id")
+    new_status = data.get("status")  # 'free' or 'busy'
+    if not user_id or new_status not in ['free', 'busy']:
+        return cors_json_response({"ok": False, "error": "פרמטרים שגויים"}, status=400)
+
+    user = await get_user(int(user_id))
+    if not user:
+        return cors_json_response({"ok": False, "error": "משתמש לא נמצא"}, status=404)
+
+    # בדיקת חוב פעיל - מניעת מעבר לפנוי עם חוב
+    debt = user['debt_balance'] if isinstance(user, dict) else user[14]
+    if new_status == 'free' and float(debt or 0) > 0:
+        return cors_json_response({"ok": False, "error": f"יש לך חוב פתוח של ₪{debt:.2f}. עליך להסדיר או לערער."}, status=403)
+
+    if USE_POSTGRES:
+        def _update_st():
+            with get_pg_cursor() as cur:
+                cur.execute("UPDATE deliveries_users SET status = %s WHERE user_id = %s", (new_status, int(user_id)))
+        await run_in_thread(_update_st)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            await db.execute("UPDATE deliveries_users SET status = ? WHERE user_id = ?", (new_status, int(user_id)))
+            await db.commit()
+
+    return cors_json_response({"ok": True, "new_status": new_status})
+
+async def handle_api_stations(request):
+    """החזרת רשימת התחנות והעמלות"""
+    if USE_POSTGRES:
+        def _get_st():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT station_id, name, commission_percent, is_active FROM deliveries_stations ORDER BY station_id ASC")
+                return cur.fetchall()
+        rows = await run_in_thread(_get_st)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            rows = await (await db.execute("SELECT station_id, name, commission_percent, is_active FROM deliveries_stations ORDER BY station_id ASC")).fetchall()
+    return cors_json_response({"ok": True, "stations": [dict(r) for r in rows]})
+
 async def start_web_server():
     app = web.Application()
+    
+    # בדיקת חיות ו-Keep Alive
     app.router.add_get("/ping", handle_ping)
     app.router.add_get("/health", handle_ping)
 
-    # 1. בדיקה אם קיימת תיקיית dist מקומפלת
+    # REST API עבור Telegram Mini App
+    app.router.add_route("OPTIONS", "/api/{tail:.*}", handle_options)
+    app.router.add_post("/api/auth", handle_api_auth)
+    app.router.add_get("/api/orders", handle_api_orders)
+    app.router.add_post("/api/driver/status", handle_api_driver_status)
+    app.router.add_get("/api/stations", handle_api_stations)
+
+    # 1. בדיקה אם קיימת תיקיית dist מקומפלת (React SPA)
     dist_dir = os.path.join(os.path.dirname(__file__), "dist")
     dist_index = os.path.join(dist_dir, "index.html")
     dist_assets = os.path.join(dist_dir, "assets")
@@ -647,7 +1019,6 @@ async def start_web_server():
         app.router.add_static("/assets", path=dist_assets, name="assets")
 
     # פונקציית הגשת ה-Mini App: אם קיים dist/index.html מגיש אותו, ואם לא – מגיש את תבנית ה-HTML המשולבת המלאה!
-    # בצורה זו, לעולם לא יוצג מסך לבן או הודעת טקסט יבשה בטלגרם!
     async def serve_webapp(request):
         if os.path.exists(dist_index):
             return web.FileResponse(dist_index)
@@ -662,7 +1033,7 @@ async def start_web_server():
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    logging.info(f"🌐 Mini App Web Server active on port {port} (Serving full interactive UI)")
+    logging.info(f"🌐 Mini App & REST API Web Server active on port {port} (Ready for Telegram initData sync)")
 
 # ----------------- מקלדות ועזרים -----------------
 def get_main_kb(role='user', status='busy'):

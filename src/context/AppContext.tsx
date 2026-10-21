@@ -141,7 +141,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [isTelegramWebApp, setIsTelegramWebApp] = useState<boolean>(false);
 
-  // Auto-detect Telegram WebApp environment
+  // Auto-detect Telegram WebApp environment & Authenticate via REST API
   useEffect(() => {
     const tg = (window as any).Telegram?.WebApp;
     if (tg && tg.initData) {
@@ -151,10 +151,63 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setIsTelegramWebApp(true);
 
         const tgUser = tg.initDataUnsafe?.user;
-        if (tgUser && tgUser.id) {
-          const userNumId = Number(tgUser.id);
+        const userNumId = tgUser?.id ? Number(tgUser.id) : null;
+
+        // שליחת initData לאימות קריפטוגרפי וסנכרון מלא מול PostgreSQL
+        fetch('/api/auth', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ initData: tg.initData }),
+        })
+          .then((res) => res.json())
+          .then((data) => {
+            if (data.ok && data.user) {
+              const serverUser: User = {
+                user_id: Number(data.user.user_id),
+                full_name: data.user.full_name,
+                phone: data.user.phone || '0500000000',
+                birth_year: data.user.birth_year || 1995,
+                car_brand: data.user.car_brand || 'טויוטה',
+                car_model: data.user.car_model || 'קורולה',
+                car_year: data.user.car_year || 2022,
+                car_seats: data.user.car_seats || 5,
+                status: data.user.status || 'free',
+                role: data.user.role || 'user',
+                station_id: data.user.station_id || 1,
+                rating: Number(data.user.rating || 5.0),
+                total_trips: Number(data.user.total_trips || 0),
+                is_blocked: data.user.is_blocked ? 1 : 0,
+                debt_balance: Number(data.user.debt_balance || 0.0),
+              };
+
+              setUsers((prev) => {
+                const idx = prev.findIndex((u) => u.user_id === serverUser.user_id);
+                if (idx >= 0) {
+                  const updated = [...prev];
+                  updated[idx] = serverUser;
+                  return updated;
+                }
+                return [...prev, serverUser];
+              });
+              setCurrentUserId(serverUser.user_id);
+
+              if (data.stations && Array.isArray(data.stations) && data.stations.length > 0) {
+                setStations(
+                  data.stations.map((s: any) => ({
+                    station_id: Number(s.station_id),
+                    name: s.name,
+                    commission_percent: Number(s.commission_percent),
+                  }))
+                );
+              }
+            }
+          })
+          .catch((err) => {
+            console.warn('API /api/auth sync note:', err);
+          });
+
+        if (userNumId) {
           const fullName = [tgUser.first_name, tgUser.last_name].filter(Boolean).join(' ') || tgUser.username || `נהג טלגרם ${userNumId}`;
-          
           setUsers((prev) => {
             const exists = prev.find((u) => u.user_id === userNumId);
             if (!exists) {
