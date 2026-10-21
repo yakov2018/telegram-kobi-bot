@@ -6,6 +6,7 @@ import { DriverPanel } from './components/DriverPanel';
 import { AdminPanel } from './components/AdminPanel';
 import { TelegramSimulator } from './components/TelegramSimulator';
 import { RegistrationModal } from './components/RegistrationModal';
+import { MiniAppGuideModal } from './components/MiniAppGuideModal';
 import { ROLE_NAMES } from './types';
 import {
   Radio,
@@ -25,6 +26,7 @@ export const AppContent: React.FC = () => {
   const [viewMode, setViewMode] = useState<'erp' | 'driver' | 'telegram'>('erp');
   const [erpSubTab, setErpSubTab] = useState<'dispatcher' | 'admin' | 'driver'>('dispatcher');
   const [isRegisterOpen, setIsRegisterOpen] = useState(false);
+  const [isGuideOpen, setIsGuideOpen] = useState(false);
 
   const openOrdersCount = orders.filter((o) => o.status === 'open').length;
   const activeDriversCount = users.filter(
@@ -39,6 +41,7 @@ export const AppContent: React.FC = () => {
         viewMode={viewMode}
         setViewMode={setViewMode}
         onOpenRegister={() => setIsRegisterOpen(true)}
+        onOpenGuide={() => setIsGuideOpen(true)}
       />
 
       {/* Main Viewport */}
@@ -166,6 +169,9 @@ export const AppContent: React.FC = () => {
 
       {/* Driver Registration Modal */}
       <RegistrationModal isOpen={isRegisterOpen} onClose={() => setIsRegisterOpen(false)} />
+
+      {/* Mini App & BotFather Guide Modal */}
+      <MiniAppGuideModal isOpen={isGuideOpen} onClose={() => setIsGuideOpen(false)} />
 
       {/* System Footer */}
       <footer className="border-t border-slate-800/80 bg-slate-900/50 py-4 mt-12 text-center text-xs text-slate-500">

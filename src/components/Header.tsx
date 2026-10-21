@@ -19,10 +19,16 @@ interface HeaderProps {
   viewMode: 'erp' | 'driver' | 'telegram';
   setViewMode: (mode: 'erp' | 'driver' | 'telegram') => void;
   onOpenRegister: () => void;
+  onOpenGuide: () => void;
 }
 
-export const Header: React.FC<HeaderProps> = ({ viewMode, setViewMode, onOpenRegister }) => {
-  const { currentUser, users, stations, switchUser, resetToInitialData } = useApp();
+export const Header: React.FC<HeaderProps> = ({
+  viewMode,
+  setViewMode,
+  onOpenRegister,
+  onOpenGuide,
+}) => {
+  const { currentUser, users, stations, switchUser, resetToInitialData, isTelegramWebApp } = useApp();
 
   const currentStation = stations.find((s) => s.station_id === currentUser.station_id);
 
@@ -139,6 +145,23 @@ export const Header: React.FC<HeaderProps> = ({ viewMode, setViewMode, onOpenReg
               {getRoleIcon(currentUser.role)}
               <span className="truncate max-w-[120px]">{currentUser.full_name}</span>
             </div>
+
+            {/* Telegram WebApp indicator if opened inside Telegram */}
+            {isTelegramWebApp && (
+              <span className="hidden sm:inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-sky-500/10 border border-sky-500/30 text-sky-300 text-[11px] font-bold">
+                📱 טלגרם Mini App
+              </span>
+            )}
+
+            {/* BotFather Guide & Link Button */}
+            <button
+              onClick={onOpenGuide}
+              className="px-2.5 py-1.5 rounded-lg bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white border border-blue-500/30 text-xs font-bold transition flex items-center gap-1.5 shadow-sm"
+              title="קבל את הקישור ל-BotFather בטלגרם"
+            >
+              <Smartphone className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">חיבור ל-BotFather</span>
+            </button>
 
             {/* Quick Actions */}
             <button

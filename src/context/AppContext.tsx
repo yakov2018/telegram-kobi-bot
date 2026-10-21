@@ -55,6 +55,7 @@ interface AppContextType {
   updateUserRoleAndStation: (targetId: number, newRole: Role | 'blocked', stationId: number) => void;
   sendBroadcast: (text: string) => number;
   resetToInitialData: () => void;
+  isTelegramWebApp: boolean;
 }
 
 const AppContext = createContext<AppContextType | null>(null);
@@ -137,6 +138,54 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     localStorage.setItem(STORAGE_PREFIX + 'broadcasts', JSON.stringify(broadcasts));
   }, [broadcasts]);
+
+  const [isTelegramWebApp, setIsTelegramWebApp] = useState<boolean>(false);
+
+  // Auto-detect Telegram WebApp environment
+  useEffect(() => {
+    const tg = (window as any).Telegram?.WebApp;
+    if (tg && tg.initData) {
+      try {
+        tg.ready();
+        tg.expand();
+        setIsTelegramWebApp(true);
+
+        const tgUser = tg.initDataUnsafe?.user;
+        if (tgUser && tgUser.id) {
+          const userNumId = Number(tgUser.id);
+          const fullName = [tgUser.first_name, tgUser.last_name].filter(Boolean).join(' ') || tgUser.username || `נהג טלגרם ${userNumId}`;
+          
+          setUsers((prev) => {
+            const exists = prev.find((u) => u.user_id === userNumId);
+            if (!exists) {
+              const newTgDriver: User = {
+                user_id: userNumId,
+                full_name: fullName,
+                phone: '0500000000',
+                birth_year: 1995,
+                car_brand: 'טויוטה',
+                car_model: 'קורולה',
+                car_year: 2022,
+                car_seats: 5,
+                status: 'free',
+                role: 'user',
+                station_id: 1,
+                rating: 5.0,
+                total_trips: 0,
+                is_blocked: 0,
+                debt_balance: 0.0,
+              };
+              return [...prev, newTgDriver];
+            }
+            return prev;
+          });
+          setCurrentUserId(userNumId);
+        }
+      } catch (err) {
+        console.warn('Telegram WebApp init note:', err);
+      }
+    }
+  }, []);
 
   // Current active user
   const currentUser = users.find((u) => u.user_id === currentUserId) || users[0];
@@ -561,6 +610,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateUserRoleAndStation,
         sendBroadcast,
         resetToInitialData,
+        isTelegramWebApp,
       }}
     >
       {children}
