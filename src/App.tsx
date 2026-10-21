@@ -22,10 +22,11 @@ import {
   CheckCircle,
 } from 'lucide-react';
 
+import { StationManagerDashboard } from './components/StationManagerDashboard';
+
 export const AppContent: React.FC = () => {
   const { currentUser, isAuthLoading, orders, users, debts, stations } = useApp();
-  const [viewMode, setViewMode] = useState<'erp' | 'driver' | 'telegram'>('erp');
-  const [dispatcherSubTab, setDispatcherSubTab] = useState<'dispatcher' | 'driver'>('dispatcher');
+  const [viewMode, setViewMode] = useState<'erp' | 'driver' | 'telegram'>('driver');
   const [isRegisterOpen, setIsRegisterOpen] = useState(false);
   const [isGuideOpen, setIsGuideOpen] = useState(false);
 
@@ -47,13 +48,32 @@ export const AppContent: React.FC = () => {
     );
   }
 
-  // סעיף 1: מנהל מערכת (admin) - מקבל את לוח הבקרה הייעודי AdminDashboard
+  // סעיף 1: מנהל מערכת (admin - אני) - גישת God Mode מלאה!
   if (currentUser.role === 'admin') {
     return <AdminDashboard />;
   }
 
-  // סעיף 1: משתמש רגיל / נהג / שליח (user) - אך ורק ממשק נהג! ללא שום גישה למסכי ניהול או סדרן!
-  if (currentUser.role === 'user') {
+  // סעיף 1: מנהל תחנה (station_manager) - פאנל ניהול ב-Mini App אך ורק לנתוני ה-station_id שלו!
+  if (currentUser.role === 'station_manager') {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
+        <Header
+          viewMode="erp"
+          setViewMode={() => {}}
+          onOpenRegister={() => setIsRegisterOpen(true)}
+          onOpenGuide={() => setIsGuideOpen(true)}
+        />
+        <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
+          <StationManagerDashboard />
+        </main>
+        <RegistrationModal isOpen={isRegisterOpen} onClose={() => setIsRegisterOpen(false)} />
+        <MiniAppGuideModal isOpen={isGuideOpen} onClose={() => setIsGuideOpen(false)} />
+      </div>
+    );
+  }
+
+  // סעיף 1: סדרן (dispatcher) - מנהל את הקריאות שלו בלבד מתוך תפריט הכפתורים בבוט. אין לו גישה לפאנל הניהול ב-Mini App!
+  if (currentUser.role === 'dispatcher') {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
         <Header
@@ -62,7 +82,16 @@ export const AppContent: React.FC = () => {
           onOpenRegister={() => setIsRegisterOpen(true)}
           onOpenGuide={() => setIsGuideOpen(true)}
         />
-        <main className="flex-1 max-w-5xl w-full mx-auto px-4 sm:px-6 py-6">
+        <main className="flex-1 max-w-5xl w-full mx-auto px-4 sm:px-6 py-6 space-y-4">
+          <div className="bg-blue-500/10 border border-blue-500/30 rounded-2xl p-4 flex items-center justify-between text-xs text-blue-200">
+            <div className="flex items-center gap-2">
+              <span className="text-xl">📻</span>
+              <div>
+                <p className="font-bold text-white">שלום סדרן תחנה #{currentUser.station_id || 1} ({currentUser.full_name})</p>
+                <p className="text-slate-300">פרסום וניהול הקריאות מתבצע ישירות מכפתורי הצ'אט בבוט טלגרם. כאן מוצג ממשק הנהיגה האישי שלך.</p>
+              </div>
+            </div>
+          </div>
           <DriverPanel />
         </main>
         <RegistrationModal isOpen={isRegisterOpen} onClose={() => setIsRegisterOpen(false)} />
@@ -71,11 +100,23 @@ export const AppContent: React.FC = () => {
     );
   }
 
-  const openOrdersCount = orders.filter((o) => o.status === 'open').length;
-  const activeDriversCount = users.filter(
-    (u) => u.status === 'free' && !u.is_blocked
-  ).length;
-  const totalCompletedTrips = users.reduce((acc, u) => acc + u.total_trips, 0);
+  // סעיף 1: נהג רגיל (user) - הרשאות בסיס לקבלת קריאות בלבד. אין לו גישה לשום פאנל ניהול!
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
+      <Header
+        viewMode="driver"
+        setViewMode={() => {}}
+        onOpenRegister={() => setIsRegisterOpen(true)}
+        onOpenGuide={() => setIsGuideOpen(true)}
+      />
+      <main className="flex-1 max-w-5xl w-full mx-auto px-4 sm:px-6 py-6">
+        <DriverPanel />
+      </main>
+      <RegistrationModal isOpen={isRegisterOpen} onClose={() => setIsRegisterOpen(false)} />
+      <MiniAppGuideModal isOpen={isGuideOpen} onClose={() => setIsGuideOpen(false)} />
+    </div>
+  );
+};
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">

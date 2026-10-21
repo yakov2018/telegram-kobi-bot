@@ -171,11 +171,16 @@ class Reg(StatesGroup):
 
 class OrderFlow(StatesGroup):
     waiting_publish_text = State()
-    waiting_publish_dest = State()
-    waiting_driver_eta = State()
+    waiting_price_choice = State()
+    waiting_edit_text = State()
+    waiting_manual_driver = State()
+
+class DriverBidFlow(StatesGroup):
+    waiting_eta = State()
 
 class DebtFlow(StatesGroup):
     waiting_dispute_reason = State()
+    waiting_appeal_reason = State()
 
 class AdminFlow(StatesGroup):
     waiting_station_name = State()
@@ -348,7 +353,12 @@ def _init_db_sync():
             ("pickup_lon", "DOUBLE PRECISION"),
             ("taken_at", "TIMESTAMP"),
             ("completed_at", "TIMESTAMP"),
-            ("requires_eta", "INTEGER DEFAULT 0")
+            ("requires_eta", "INTEGER DEFAULT 0"),
+            ("client_phone", "TEXT"),
+            ("eta_text", "TEXT"),
+            ("assigned_driver_id", "BIGINT"),
+            ("raw_text", "TEXT"),
+            ("signature", "TEXT")
         ]
         for col_name, col_type in order_columns_to_add:
             try:
@@ -367,13 +377,15 @@ def _init_db_sync():
             appeal_status TEXT DEFAULT 'none',
             appeal_reason TEXT,
             transaction_type TEXT DEFAULT 'commission',
+            is_locked INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             resolved_at TIMESTAMP)''')
 
         debt_columns_to_add = [
             ("appeal_status", "TEXT DEFAULT 'none'"),
             ("appeal_reason", "TEXT"),
-            ("transaction_type", "TEXT DEFAULT 'commission'")
+            ("transaction_type", "TEXT DEFAULT 'commission'"),
+            ("is_locked", "INTEGER DEFAULT 0")
         ]
         for col_name, col_type in debt_columns_to_add:
             try:
@@ -484,16 +496,17 @@ async def init_db():
                 origin_city TEXT, dest_city TEXT, commission_amount REAL DEFAULT 0.0,
                 pickup_lat REAL, pickup_lon REAL, status TEXT DEFAULT 'open', created_at TEXT,
                 taken_at TEXT, completed_at TEXT, requires_eta INTEGER DEFAULT 0)''')
-            try:
-                await db.execute("ALTER TABLE deliveries_orders ADD COLUMN requires_eta INTEGER DEFAULT 0")
-            except Exception: pass
+            for col, ctype in [("requires_eta", "INTEGER DEFAULT 0"), ("client_phone", "TEXT"), ("eta_text", "TEXT"), ("assigned_driver_id", "INTEGER"), ("raw_text", "TEXT"), ("signature", "TEXT")]:
+                try:
+                    await db.execute(f"ALTER TABLE deliveries_orders ADD COLUMN {col} {ctype}")
+                except Exception: pass
             
             await db.execute('''CREATE TABLE IF NOT EXISTS deliveries_debts (
                 debt_id INTEGER PRIMARY KEY AUTOINCREMENT, order_id INTEGER, driver_id INTEGER,
                 station_id INTEGER, amount REAL, status TEXT DEFAULT 'unpaid', reason TEXT, 
                 appeal_status TEXT DEFAULT 'none', appeal_reason TEXT, transaction_type TEXT DEFAULT 'commission',
-                created_at TEXT, resolved_at TEXT)''')
-            for col, ctype in [("appeal_status", "TEXT DEFAULT 'none'"), ("appeal_reason", "TEXT"), ("transaction_type", "TEXT DEFAULT 'commission'")]:
+                is_locked INTEGER DEFAULT 0, created_at TEXT, resolved_at TEXT)''')
+            for col, ctype in [("appeal_status", "TEXT DEFAULT 'none'"), ("appeal_reason", "TEXT"), ("transaction_type", "TEXT DEFAULT 'commission'"), ("is_locked", "INTEGER DEFAULT 0")]:
                 try:
                     await db.execute(f"ALTER TABLE deliveries_debts ADD COLUMN {col} {ctype}")
                 except Exception: pass
@@ -2508,6 +2521,65 @@ async def handle_api_debts_credit(request):
 
     return cors_json_response({"ok": True})
 
+async def handle_api_debts_resolve_appeal(request):
+    """טיפול בערעור מתוך פאנל ניהול תחנה ב-Mini App: אישור (זיכוי 🍏) או דחייה ❌"""
+    try: data = await request.json()
+    except Exception: data = {}
+    debt_id = data.get("debt_id")
+    approve = data.get("approved", True)
+    if not debt_id:
+        return cors_json_response({"ok": False, "error": "debt_id חובה"}, status=400)
+    debt_id = int(debt_id)
+
+    debt = None
+    if USE_POSTGRES:
+        def _get_d():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT * FROM deliveries_debts WHERE debt_id = %s", (debt_id,))
+                return cur.fetchone()
+        debt = await run_in_thread(_get_d)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            debt = await (await db.execute("SELECT * FROM deliveries_debts WHERE debt_id = ?", (debt_id,))).fetchone()
+
+    if not debt:
+        return cors_json_response({"ok": False, "error": "חיוב לא נמצא"}, status=404)
+
+    debt_dict = dict(debt)
+    driver_id = debt_dict['driver_id']
+    amount = float(debt_dict['amount'] or 0)
+    order_id = debt_dict.get('order_id') or 0
+
+    if USE_POSTGRES:
+        def _resolve_pg():
+            with get_pg_cursor() as cur:
+                if approve:
+                    cur.execute("UPDATE deliveries_debts SET status = 'cancelled', appeal_status = 'approved', resolved_at = CURRENT_TIMESTAMP WHERE debt_id = %s", (debt_id,))
+                    cur.execute("UPDATE deliveries_users SET debt_balance = GREATEST(0, debt_balance - %s) WHERE user_id = %s", (amount, driver_id))
+                else:
+                    cur.execute("UPDATE deliveries_debts SET appeal_status = 'rejected', resolved_at = CURRENT_TIMESTAMP WHERE debt_id = %s", (debt_id,))
+        await run_in_thread(_resolve_pg)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            if approve:
+                await db.execute("UPDATE deliveries_debts SET status = 'cancelled', appeal_status = 'approved', resolved_at = ? WHERE debt_id = ?", (datetime.now().isoformat(), debt_id))
+                await db.execute("UPDATE deliveries_users SET debt_balance = MAX(0, debt_balance - ?) WHERE user_id = ?", (amount, driver_id))
+            else:
+                await db.execute("UPDATE deliveries_debts SET appeal_status = 'rejected', resolved_at = ? WHERE debt_id = ?", (datetime.now().isoformat(), debt_id))
+            await db.commit()
+
+    # הודעה ישירה לנהג בטלגרם
+    try:
+        if approve:
+            await bot.send_message(driver_id, f"🍏 **הערעור התקבל בהצלחה!**\nהחיוב על סך ₪{amount:.2f} עבור קריאה #{order_id} בוטל וזוכה במלואו (🍏)! יתרת החוב שלך בתחנה עודכנה.")
+        else:
+            await bot.send_message(driver_id, f"❌ **הבקשה לביטול חיוב נדחתה.**\nהחיוב על סך ₪{amount:.2f} עבור קריאה #{order_id} נותר בעינו ויש להסדירו מול התחנה.")
+    except Exception as e:
+        logging.warning(f"Could not notify driver on appeal resolve: {e}")
+
+    return cors_json_response({"ok": True})
+
 async def handle_api_debts_update(request):
     """CRUD: עריכת פרטי חיוב קיים (סכום, סיבה, תחנה, סטטוס) ועדכון debt_balance בהתאם להפרש"""
     try: data = await request.json()
@@ -2739,6 +2811,7 @@ async def start_web_server():
     app.router.add_post("/api/debts/credit", handle_api_debts_credit)
     app.router.add_post("/api/debts/update", handle_api_debts_update)
     app.router.add_post("/api/debts/delete", handle_api_debts_delete)
+    app.router.add_post("/api/debts/resolve_appeal", handle_api_debts_resolve_appeal)
     app.router.add_get("/api/settings", handle_api_settings_get)
     app.router.add_post("/api/settings", handle_api_settings_post)
     app.router.add_post("/api/broadcast", handle_api_broadcast)
@@ -2808,36 +2881,104 @@ def cancel_kb(chat_type='private'):
         return ReplyKeyboardRemove()
     return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="❌ ביטול וחזרה")]], resize_keyboard=True)
 
-# ----------------- סעיף 4: מנוע NLP לסדרנים ופענוח קריאות חכם -----------------
-def parse_dispatcher_order(raw_text: str) -> dict:
+# ----------------- סעיף 2: מנוע NLP לסדרנים, פענוח קריאות חכם וחתימת תחנה -----------------
+def extract_order_phone(text: str) -> str:
+    """
+    זיהוי מספר טלפון לקוח ב-Regex קפדני:
+    - טלפון ישראלי מלא (05X, 02, 03, 04, 08, 09, 07X, או קידומת +972)
+    - מספרי פנים כגון '0' או '1' בלבד (שלוחה/קוד פנים)
+    - מתעלם לחלוטין מסתם 2-3 ספרות רצופות (כמו 20, 50, 100, 150)
+    """
+    if not text:
+        return ""
+        
+    # 1. טלפון ישראלי מלא
+    full_pattern = r'(?:\+?972[- ]?0?|0)(?:5[0-9]|[23489]|7[2-9])[- ]?\d{3}[- ]?\d{4}\b'
+    m_full = re.search(full_pattern, text)
+    if m_full:
+        return re.sub(r'[^\d+]', '', m_full.group(0))
+
+    # 2. שלוחה/פנים '0' או '1' מפורש לפי תיוג
+    lbl_pattern = r'(?:טלפון|טל|פלאפון|נייד|שלוחה|קוד)[:\s]*([01])\b'
+    m_lbl = re.search(lbl_pattern, text)
+    if m_lbl:
+        return m_lbl.group(1)
+
+    # 3. ספרה 0 או 1 מבודדת לחלוטין (Isolated token) שאינה חלק ממחיר
+    iso_pattern = r'(?:^|\s)([01])(?:\s|$)'
+    m_iso = re.search(iso_pattern, text)
+    if m_iso:
+        sub_before = text[:m_iso.start(1)]
+        if not re.search(r'[₪ש]\s*$', sub_before):
+            return m_iso.group(1)
+
+    return ""
+
+def build_order_signature(station_name: str = "תחנה ראשית", publisher_name: str = "") -> str:
+    """
+    הטמעת חתימה בסוף ההודעה: שם התחנה ושם המפרסם (ללא ה-@username שלו, רק שם פרטי/מלא)
+    """
+    clean_pub = re.sub(r'@[A-Za-z0-9_]+', '', publisher_name or "").strip()
+    if not clean_pub:
+        clean_pub = "סדרן המערכת"
+    clean_st = station_name or "תחנה ראשית"
+    return f"\n\n🏢 תחנה: {clean_st} | 👤 סדרן: {clean_pub}"
+
+def parse_dispatcher_order(raw_text: str, station_name: str = "תחנה ראשית", publisher_name: str = "") -> dict:
     """
     מנוע NLP ו-Regex חכם לפיענוח קריאות סדרנים:
-    א. ערים: זיהוי ונירמול 3-4 ערים/קיצורים (ים, בב, פת, תא, קס, אשד וכו'), כולל אותיות יחס (לבב, מים).
-    ב. מחיר (Regex): זיהוי גמיש של הסכום (150, 150ש, 150 ש, 150 שח, 150 ש\"ח, 150₪, ₪150).
-    ג. דרישת 'זמן': המילה 'זמן' (או דקות/תוך/דחוף/eta) תסמן בקריאה חובה לקבל ETA מהנהג.
+    1. עיר מוצא ועיר יעד (לפי מאגר הקיצורים והערים הפופולריות).
+    2. מחיר + זיהוי התנגשות מחירים (Price Collision) אם קיימות מספר אפשרויות.
+    3. מילת המפתח 'זמן'/'זמנים'/דקות (requires_eta=True).
+    4. מספר טלפון לקוח (ישראלי מלא או 0/1 בלבד, תוך התעלמות מ-2-3 ספרות רצופות).
+    5. הטמעת חתימה בסוף הקריאה (ללא @username).
     """
     text = (raw_text or "").strip()
     
     # 1. זיהוי דרישת 'זמן' / ETA
-    time_keywords = ['זמן', 'דקות', 'דק', 'תוך', 'דחוף', 'eta', 'מיידי', 'עכשיו']
+    time_keywords = ['זמן', 'זמנים', 'דקות', 'דק\'', 'דק', 'תוך', 'דחוף', 'eta', 'מיידי', 'עכשיו']
     requires_eta = False
     for kw in time_keywords:
         if re.search(r'(?:^|\s|[^\w])' + re.escape(kw) + r'(?:$|\s|[^\w])', text, re.IGNORECASE):
             requires_eta = True
             break
 
-    # 2. זיהוי מחיר ב-Regex גמיש
-    price_pattern = r'(?:₪\s*(\d{2,4})|(\d{2,4})\s*(?:₪|ש"ח|שח|שקלים|שקל|ש|\b))'
-    matches = re.findall(price_pattern, text)
-    est_price = 0.0
-    if matches:
-        for m in reversed(matches):
-            p_str = m[0] or m[1]
-            if p_str and 20 <= float(p_str) <= 5000:
-                est_price = float(p_str)
-                break
+    # 2. זיהוי טלפון לקוח
+    client_phone = extract_order_phone(text)
 
-    # 3. מילון קיצורים ונירמול שמות ערים (NLP)
+    # 3. זיהוי מחירים ובדיקת התנגשות (Price Collision)
+    # א. מחירים עם סימן מטבע מפורש
+    explicit_price_pattern = r'(?:₪\s*(\d{2,4})|(\d{2,4})\s*(?:₪|ש"ח|שח|שקלים|שקל|ש\b))'
+    explicit_matches = re.findall(explicit_price_pattern, text)
+    candidate_prices = []
+    for em in explicit_matches:
+        p_val = em[0] or em[1]
+        if p_val and 20 <= float(p_val) <= 5000:
+            candidate_prices.append(float(p_val))
+
+    # ב. אם לא נמצאו מפורשים, חילוץ מספרים עצמאיים בטווח מחירי מוניות (20-5000)
+    # תוך סינון שנים (1950-2030) ומספר הטלפון שנלכד
+    if not candidate_prices:
+        number_tokens = re.findall(r'\b\d{2,4}\b', text)
+        for token in number_tokens:
+            num = float(token)
+            if 20 <= num <= 5000:
+                if 1950 <= num <= 2030:
+                    continue
+                if client_phone and token in client_phone:
+                    continue
+                candidate_prices.append(num)
+
+    # הסרת כפילויות תוך שימור סדר
+    unique_prices = []
+    for p in candidate_prices:
+        if p not in unique_prices:
+            unique_prices.append(p)
+
+    has_price_collision = len(unique_prices) > 1
+    selected_price = unique_prices[0] if unique_prices else 0.0
+
+    # 4. מילון קיצורים ונירמול שמות ערים (NLP)
     alias_dict = {
         'ים': 'ירושלים', 'י-ם': 'ירושלים', 'עיר הקודש': 'ירושלים',
         'בב': 'בני ברק', 'ב"ב': 'בני ברק',
@@ -2846,7 +2987,8 @@ def parse_dispatcher_order(raw_text: str) -> dict:
         'קס': 'מודיעין עילית', 'ק"ס': 'מודיעין עילית', 'ספר': 'מודיעין עילית',
         'אשד': 'אשדוד', 'אשדו': 'אשדוד',
         'בש': 'באר שבע', 'ב"ש': 'בית שמש',
-        'חי': 'חיפה', 'נת': 'נתניה', 'הרצ': 'הרצליה'
+        'חי': 'חיפה', 'נת': 'נתניה', 'הרצ': 'הרצליה',
+        'ראשלצ': 'ראשון לציון', 'ראשל"צ': 'ראשון לציון', 'חולון': 'חולון', 'בת ים': 'בת ים'
     }
 
     words = text.split()
@@ -2887,17 +3029,27 @@ def parse_dispatcher_order(raw_text: str) -> dict:
     origin_city = found_cities[0] if len(found_cities) > 0 else ""
     dest_city = found_cities[1] if len(found_cities) > 1 else ""
 
+    # 5. הטמעת חתימה נקייה
+    signature = build_order_signature(station_name, publisher_name)
+    cleaned_with_sig = f"{cleaned_text.strip()}{signature}"
+
     return {
-        "cleaned_text": cleaned_text.strip(),
-        "price": est_price,
+        "cleaned_text": cleaned_with_sig,
+        "raw_text": text,
+        "base_text": cleaned_text.strip(),
+        "price": selected_price,
+        "price_candidates": unique_prices,
+        "has_price_collision": has_price_collision,
         "requires_eta": requires_eta,
+        "client_phone": client_phone,
         "found_cities": found_cities,
         "origin_city": origin_city,
-        "dest_city": dest_city
+        "dest_city": dest_city,
+        "signature": signature
     }
 
-def clean_order_text(text):
-    return parse_dispatcher_order(text)["cleaned_text"]
+def clean_order_text(text: str, station_name: str = "תחנה ראשית", publisher_name: str = "") -> str:
+    return parse_dispatcher_order(text, station_name, publisher_name)["cleaned_text"]
 
 
 # ----------------- תפריט ראשי, ביטול והרשמה (שלב ב' - Onboarding FSM) -----------------
@@ -3440,134 +3592,1101 @@ async def toggle_status(message: Message):
     msg = "🟢 אתה כעת פנוי (קריאות באזורים שלך יקפצו)!" if new_status == 'free' else "🔴 עצרת קריאות."
     await message.answer(msg, reply_markup=get_main_kb(user['role'], new_status))
 
-# ----------------- פרסום קריאה (סדרן) -----------------
+# ----------------- זרימת פרסום קריאה (Preview & Publish Flow) - עמודים 2 ו-3 -----------------
+def make_order_preview_kb(draft_id: str) -> InlineKeyboardMarkup:
+    """7 כפתורי פעולה לתצוגה מקדימה לפי סעיף 3 המדויק"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ ערוך הודעה", callback_data=f"pubopt_edit_{draft_id}")],
+        [InlineKeyboardButton(text="📢 פרסם לכולם", callback_data=f"pubopt_all_{draft_id}")],
+        [InlineKeyboardButton(text="📍🌐 פרסם לפנויים באזור + קבוצות", callback_data=f"pubopt_area_groups_{draft_id}")],
+        [InlineKeyboardButton(text="👥 פרסם רק בקבוצות", callback_data=f"pubopt_groups_{draft_id}")],
+        [InlineKeyboardButton(text="🚗 פרסם רק לפנויים באזור", callback_data=f"pubopt_area_{draft_id}")],
+        [InlineKeyboardButton(text="🤝 סגירה ידנית על נהג", callback_data=f"pubopt_manual_{draft_id}")],
+        [InlineKeyboardButton(text="❌ ביטול ומחיקה", callback_data=f"pubopt_cancel_{draft_id}")]
+    ])
+
+# זיכרון טיוטות זמני לפי מזהה מפרסם
+ORDER_DRAFTS = {}
+
 @router.message(F.text == "📢 פרסם קריאה")
 async def cmd_publish(message: Message, state: FSMContext):
     user = await get_user(message.from_user.id)
-    if user['role'] not in ['admin', 'station_manager', 'dispatcher']: 
-        return await message.answer("❌ אין לך הרשאת סדרן להפעיל פונקציה זו.")
+    if not user or user['role'] not in ['admin', 'station_manager', 'dispatcher']: 
+        return await message.answer("❌ אין לך הרשאת סדרן או מנהל לפרסום קריאות.")
     await state.set_state(OrderFlow.waiting_publish_text)
-    await message.answer("📝 **הדבק פרטי קריאה:**\n(המערכת תנקה חצים אוטומטית. חובה לרשום מחיר).", reply_markup=cancel_kb())
+    await message.answer(
+        "📝 **הדבק את פרטי הקריאה לפרסום:**\n\n"
+        "💡 המערכת מזהה אוטומטית:\n"
+        "• ערי מוצא ויעד (כולל קיצורים: ים, בב, פת, תא, קס, אשד וכו')\n"
+        "• מחיר (במקרה של מספר מחירים יוקפץ בורר לבחירה)\n"
+        "• דרישת זמן הגעה (מילים: 'זמן', 'דקות', 'דחוף')\n"
+        "• טלפון לקוח (ישראלי מלא או שלוחה 0/1)\n"
+        "• חתימת התחנה והסדרן תוטמע אוטומטית בסיום ההודעה.",
+        reply_markup=cancel_kb(message.chat.type)
+    )
 
 @router.message(OrderFlow.waiting_publish_text)
 async def process_publish_text(message: Message, state: FSMContext):
     if message.text == "❌ ביטול וחזרה":
         return await cmd_start(message, state)
 
-    parsed = parse_dispatcher_order(message.text)
-    cleaned_text = parsed['cleaned_text']
-    est_price = parsed['price']
-    requires_eta = 1 if parsed['requires_eta'] else 0
-    found_cities = parsed['found_cities']
+    user = await get_user(message.from_user.id)
+    station_name = "תחנה ראשית"
+    if USE_POSTGRES:
+        def _get_st():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT name FROM deliveries_stations WHERE station_id = %s", (user.get('station_id', 1),))
+                row = cur.fetchone()
+                return row['name'] if row else "תחנה ראשית"
+        station_name = await run_in_thread(_get_st)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            row = await (await db.execute("SELECT name FROM deliveries_stations WHERE station_id = ?", (user.get('station_id', 1),))).fetchone()
+            if row:
+                station_name = row[0]
 
-    if est_price == 0:
+    parsed = parse_dispatcher_order(message.text, station_name, user['full_name'])
+    candidate_prices = parsed.get('price_candidates', [])
+
+    if not candidate_prices and parsed['price'] <= 0:
         return await message.answer(
-            "⚠️ **המערכת לא זיהתה מחיר תקין.**\n"
-            "נא לכלול מחיר בספרות (למשל: 150, 150ש, 150 שח, 150₪).\n"
+            "⚠️ **המערכת לא זיהתה מחיר תקין בטקסט.**\n"
+            "נא לכלול סכום בשקלים (לדוגמה: 150, 150 ש\"ח, ₪150).\n"
             "הקלד שוב את פרטי הקריאה:",
             reply_markup=cancel_kb(message.chat.type)
         )
 
-    cities_note = f"\n📍 ערים שזוהו: {', '.join(found_cities)}" if found_cities else ""
-    eta_note = "\n⏱️ **דרישת זמן (ETA): כן (הנהג יידרש להצהיר על זמן הגעה)**" if requires_eta else ""
+    draft_id = f"{message.from_user.id}_{int(datetime.now().timestamp())}"
+    draft_data = {
+        "draft_id": draft_id,
+        "publisher_id": message.from_user.id,
+        "publisher_name": user['full_name'],
+        "station_id": user.get('station_id', 1),
+        "station_name": station_name,
+        "raw_text": message.text,
+        "base_text": parsed['base_text'],
+        "cleaned_text": parsed['cleaned_text'],
+        "signature": parsed['signature'],
+        "origin_city": parsed['origin_city'],
+        "dest_city": parsed['dest_city'],
+        "client_phone": parsed['client_phone'],
+        "requires_eta": 1 if parsed['requires_eta'] else 0,
+        "price": parsed['price'],
+        "price_candidates": candidate_prices
+    }
+    ORDER_DRAFTS[draft_id] = draft_data
+    await state.update_data(current_draft_id=draft_id)
 
-    await state.update_data(
-        order_text=cleaned_text,
-        est_price=est_price,
-        requires_eta=requires_eta,
-        found_cities=found_cities,
-        origin_city=parsed['origin_city'],
-        dest_city=parsed['dest_city']
-    )
-    await state.set_state(OrderFlow.waiting_publish_dest)
-    kb = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="לנהגים בפרטי"), KeyboardButton(text="לקבוצות (חיצוני)")],
-            [KeyboardButton(text="❌ ביטול וחזרה")]
-        ],
-        resize_keyboard=True
-    )
-    await message.answer(
-        f"✅ **הקריאה פוענחה בהצלחה!**\n\n"
-        f"📝 טקסט מנוקה: {cleaned_text}\n"
-        f"💵 מחיר: {est_price} ש\"ח{cities_note}{eta_note}\n\n"
-        f"לאן תרצה לשגר את הקריאה?",
-        reply_markup=safe_reply_markup(message.chat.type, kb)
+    # התנגשות מחירים (Price Collision)
+    if parsed.get('has_price_collision') and len(candidate_prices) > 1:
+        await state.set_state(OrderFlow.waiting_price_choice)
+        price_btns = [
+            [InlineKeyboardButton(text=f"💰 ₪{int(p) if p.is_integer() else p}", callback_data=f"chooseprice_{draft_id}_{int(p) if p.is_integer() else p}")]
+            for p in candidate_prices
+        ]
+        price_btns.append([InlineKeyboardButton(text="❌ ביטול קריאה", callback_data=f"pubopt_cancel_{draft_id}")])
+        return await message.answer(
+            "🤔 **זוהו מספר אפשרויות מחיר בטקסט הקריאה.**\n"
+            "באיזה מחיר לבחור עבור פרסום הנסיעה?",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=price_btns)
+        )
+
+    # מעבר ישיר לתצוגה מקדימה
+    await show_order_preview(message, draft_data, is_callback=False)
+
+@router.callback_query(F.data.startswith("chooseprice_"))
+async def handle_price_choice(call: CallbackQuery, state: FSMContext):
+    parts = call.data.split("_")
+    draft_id = parts[1]
+    chosen_price = float(parts[2])
+
+    draft = ORDER_DRAFTS.get(draft_id)
+    if not draft:
+        return await call.answer("טיוטת הקריאה פגה, נא להזין מחדש.", show_alert=True)
+
+    draft['price'] = chosen_price
+    ORDER_DRAFTS[draft_id] = draft
+
+    await call.answer(f"נבחר מחיר: ₪{chosen_price}")
+    await show_order_preview(call.message, draft, is_callback=True)
+
+async def show_order_preview(target_msg: Message, draft: dict, is_callback: bool = False):
+    """הצגת תצוגה מקדימה עשירה עם 7 הכפתורים"""
+    eta_text = "כן (הנהג יידרש לציין זמן הגעה)" if draft['requires_eta'] else "לא"
+    phone_line = f"📱 **טלפון לקוח:** {draft['client_phone']}\n" if draft['client_phone'] else ""
+    route_line = f"📍 **מסלול משוער:** {draft['origin_city'] or 'לא זוהה'} ➔ {draft['dest_city'] or 'לא זוהה'}\n"
+
+    preview_text = (
+        f"📋 **תצוגה מקדימה של הקריאה:**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{draft['cleaned_text']}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💵 **מחיר שנבחר:** ₪{draft['price']}\n"
+        f"{route_line}"
+        f"{phone_line}"
+        f"⏱️ **דרישת זמן (ETA):** {eta_text}\n\n"
+        f"בחר לאן לשגר את הקריאה או פעולה רצויה:"
     )
 
-@router.message(OrderFlow.waiting_publish_dest)
-async def process_publish_dest(message: Message, state: FSMContext):
+    kb = make_order_preview_kb(draft['draft_id'])
+    if is_callback:
+        await target_msg.edit_text(preview_text, reply_markup=kb)
+    else:
+        await target_msg.answer(preview_text, reply_markup=kb)
+
+# 1. ערוך הודעה
+@router.callback_query(F.data.startswith("pubopt_edit_"))
+async def handle_pubopt_edit(call: CallbackQuery, state: FSMContext):
+    draft_id = call.data.replace("pubopt_edit_", "")
+    await state.set_state(OrderFlow.waiting_publish_text)
+    await call.message.edit_text("✏️ **הקלד את נוסח הקריאה המעודכן במלואו:**")
+    await call.answer()
+
+# 7. ביטול ומחיקה
+@router.callback_query(F.data.startswith("pubopt_cancel_"))
+async def handle_pubopt_cancel(call: CallbackQuery, state: FSMContext):
+    draft_id = call.data.replace("pubopt_cancel_", "")
+    ORDER_DRAFTS.pop(draft_id, None)
+    await state.clear()
+    await call.message.edit_text("❌ יצירת הקריאה בוטלה ונמחקה.")
+    await call.answer()
+
+# 6. סגירה ידנית על נהג (ללא פרסום)
+@router.callback_query(F.data.startswith("pubopt_manual_"))
+async def handle_pubopt_manual(call: CallbackQuery, state: FSMContext):
+    draft_id = call.data.replace("pubopt_manual_", "")
+    draft = ORDER_DRAFTS.get(draft_id)
+    if not draft:
+        return await call.answer("טיוטה פגה", show_alert=True)
+    await state.update_data(manual_draft_id=draft_id)
+    await state.set_state(OrderFlow.waiting_manual_driver)
+    await call.message.answer(
+        "🤝 **סגירה ידנית על נהג (ללא פרסום):**\n\n"
+        "הקלד את מזהה הנהג (User ID), מספר טלפון, או @username:",
+        reply_markup=cancel_kb()
+    )
+    await call.answer()
+
+@router.message(OrderFlow.waiting_manual_driver)
+async def process_manual_driver_input(message: Message, state: FSMContext):
     if message.text == "❌ ביטול וחזרה":
         return await cmd_start(message, state)
-        
+
     data = await state.get_data()
-    user = await get_user(message.from_user.id)
-    order_text = data['order_text']
-    requires_eta = data.get('requires_eta', 0)
-    origin_city = data.get('origin_city', '')
-    dest_city = data.get('dest_city', '')
-    
+    draft_id = data.get('manual_draft_id')
+    draft = ORDER_DRAFTS.get(draft_id)
+    if not draft:
+        await state.clear()
+        return await message.answer("טיוטת הקריאה פגה.", reply_markup=get_main_kb())
+
+    query = message.text.strip().replace("@", "")
+    target_driver = None
+
     if USE_POSTGRES:
-        def _create_order():
+        def _find_driver():
             with get_pg_cursor() as cur:
-                cur.execute('''INSERT INTO deliveries_orders 
-                               (text, price, publisher_id, station_id, created_at, requires_eta, origin_city, dest_city) 
-                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING order_id''', 
-                            (order_text, data['est_price'], user['user_id'], user['station_id'], datetime.now().isoformat(), requires_eta, origin_city, dest_city))
-                return cur.fetchone()['order_id']
-        order_id = await run_in_thread(_create_order)
+                cur.execute("""SELECT * FROM deliveries_users 
+                               WHERE telegram_username = %s 
+                                  OR phone = %s 
+                                  OR CAST(user_id AS TEXT) = %s 
+                               LIMIT 1""", (query, query, query))
+                return cur.fetchone()
+        target_driver = await run_in_thread(_find_driver)
     else:
         async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-            cursor = await db.execute('''INSERT INTO deliveries_orders 
-                                         (text, price, publisher_id, station_id, created_at, requires_eta, origin_city, dest_city) 
-                                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', 
-                                      (order_text, data['est_price'], user['user_id'], user['station_id'], datetime.now().isoformat(), requires_eta, origin_city, dest_city))
-            order_id = cursor.lastrowid
+            db.row_factory = aiosqlite.Row
+            target_driver = await (await db.execute("""SELECT * FROM deliveries_users 
+                                                       WHERE telegram_username = ? 
+                                                          OR phone = ? 
+                                                          OR CAST(user_id AS TEXT) = ? 
+                                                       LIMIT 1""", (query, query, query))).fetchone()
+
+    if not target_driver:
+        return await message.answer(
+            f"❌ לא נמצא נהג התואם ל-'{query}'.\n"
+            "נסה שוב עם מספר טלפון, מזהה מספרי או @username, או לחץ ביטול:",
+            reply_markup=cancel_kb(message.chat.type)
+        )
+
+    driver_id = target_driver['user_id']
+    driver_name = target_driver['full_name']
+
+    # יצירת קריאה סגורה במסד הנתונים
+    order_id = await create_db_order(
+        text=draft['cleaned_text'],
+        price=draft['price'],
+        publisher_id=draft['publisher_id'],
+        station_id=draft['station_id'],
+        requires_eta=draft['requires_eta'],
+        origin_city=draft['origin_city'],
+        dest_city=draft['dest_city'],
+        client_phone=draft['client_phone'],
+        raw_text=draft['raw_text'],
+        status='closed',
+        driver_id=driver_id
+    )
+
+    # ביצוע חיוב עמלה
+    debt_amount, station_name, new_debt_id = await charge_driver_order(order_id, driver_id, draft['station_id'], draft['price'])
+
+    # שליחת הודעת 🍓 לנהג
+    disp = await get_user(draft['publisher_id'])
+    disp_uname = (disp.get('telegram_username') if disp else "") or message.from_user.username or ""
+    await send_private_debt_notice(
+        driver_id=driver_id,
+        order_id=order_id,
+        order_text=draft['cleaned_text'],
+        order_price=draft['price'],
+        debt_amount=debt_amount,
+        station_name=station_name,
+        dispatcher_name=draft['publisher_name'],
+        dispatcher_username=disp_uname,
+        debt_id=new_debt_id
+    )
+
+    ORDER_DRAFTS.pop(draft_id, None)
+    await state.clear()
+
+    rate_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⭐ 1", callback_data=f"rate_{driver_id}_1"), 
+         InlineKeyboardButton(text="⭐⭐ 2", callback_data=f"rate_{driver_id}_2"), 
+         InlineKeyboardButton(text="⭐⭐⭐ 3", callback_data=f"rate_{driver_id}_3")],
+        [InlineKeyboardButton(text="⭐⭐⭐⭐ 4", callback_data=f"rate_{driver_id}_4"), 
+         InlineKeyboardButton(text="⭐⭐⭐⭐⭐ 5", callback_data=f"rate_{driver_id}_5")]
+    ])
+
+    await message.answer(
+        f"🤝 **הנסיעה נסגרה ידנית בהצלחה!**\n\n"
+        f"🎫 קריאה #{order_id} שויכה לנהג: **{driver_name}**\n"
+        f"🍓 נרשמה עמלת תחנה: ₪{debt_amount:.2f}\n"
+        f"הודעת חיוב בפרטי נשלחה לנהג כעת.\n\n"
+        f"דרג את הנהג:",
+        reply_markup=rate_kb
+    )
+
+# פונקציית עזר ליצירת קריאה ב-DB
+async def create_db_order(text, price, publisher_id, station_id, requires_eta, origin_city, dest_city, client_phone, raw_text, status='open', driver_id=None):
+    now_iso = datetime.now().isoformat()
+    if USE_POSTGRES:
+        def _insert():
+            with get_pg_cursor() as cur:
+                cur.execute("""INSERT INTO deliveries_orders 
+                               (text, price, publisher_id, station_id, requires_eta, origin_city, dest_city, 
+                                client_phone, raw_text, status, driver_id, created_at)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                               RETURNING order_id""",
+                            (text, price, publisher_id, station_id, requires_eta, origin_city, dest_city, 
+                             client_phone, raw_text, status, driver_id, now_iso))
+                return cur.fetchone()['order_id']
+        return await run_in_thread(_insert)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            cursor = await db.execute("""INSERT INTO deliveries_orders 
+                                         (text, price, publisher_id, station_id, requires_eta, origin_city, dest_city, 
+                                          client_phone, raw_text, status, driver_id, created_at)
+                                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                      (text, price, publisher_id, station_id, requires_eta, origin_city, dest_city, 
+                                       client_phone, raw_text, status, driver_id, now_iso))
             await db.commit()
-        
-    eta_badge = " [⏱️ נדרש ETA]" if requires_eta else ""
-    order_msg = f"🎫 **קריאה #{order_id}**{eta_badge}\n🏢 תחנה: {user['station_id']} | סדרן: {user['full_name']}\n\n{order_text}\n\n💵 סכום: {data['est_price']} ש\"ח"
-    
-    if message.text == "לנהגים בפרטי":
-        sent = 0
-        matched_driver_ids = await find_matching_drivers(order_text, order_text, origin_city, dest_city)
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚗 קח קריאה", callback_data=f"take_{order_id}")]])
-        for uid in matched_driver_ids:
-            try:
-                await bot.send_message(uid, order_msg, reply_markup=kb)
-                sent += 1
-            except Exception:
-                pass
-        await message.answer(f"✅ שוגר ל-{sent} נהגים בפרטי (סונן לפי אזורי העבודה שלהם).", reply_markup=get_main_kb(user['role'], user['status'], message.chat.type))
-    
-    elif message.text == "לקבוצות (חיצוני)":
-        sent = 0
+            return cursor.lastrowid
+
+# 2, 3, 4, 5: ערוצי שידור
+@router.callback_query(F.data.startswith("pubopt_all_"))
+@router.callback_query(F.data.startswith("pubopt_area_groups_"))
+@router.callback_query(F.data.startswith("pubopt_groups_"))
+@router.callback_query(F.data.startswith("pubopt_area_"))
+async def handle_publish_channels(call: CallbackQuery, state: FSMContext):
+    data_parts = call.data.split("_")
+    action = data_parts[1]
+    if action == "area" and len(data_parts) > 2 and data_parts[2] == "groups":
+        mode = "area_groups"
+        draft_id = "_".join(data_parts[3:])
+    else:
+        mode = action
+        draft_id = "_".join(data_parts[2:])
+
+    draft = ORDER_DRAFTS.get(draft_id)
+    if not draft:
+        return await call.answer("טיוטת הקריאה פגה.", show_alert=True)
+
+    order_id = await create_db_order(
+        text=draft['cleaned_text'],
+        price=draft['price'],
+        publisher_id=draft['publisher_id'],
+        station_id=draft['station_id'],
+        requires_eta=draft['requires_eta'],
+        origin_city=draft['origin_city'],
+        dest_city=draft['dest_city'],
+        client_phone=draft['client_phone'],
+        raw_text=draft['raw_text']
+    )
+
+    # הכנת כפתורי נהג לקריאה מפורסמת
+    disp = await get_user(draft['publisher_id'])
+    disp_uname = (disp.get('telegram_username') if disp else "") or call.from_user.username or ""
+    disp_url = f"https://t.me/{disp_uname}" if disp_uname else f"tg://user?id={draft['publisher_id']}"
+
+    driver_card_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🚗 בקשת הנסיעה", callback_data=f"bid_{order_id}"),
+            InlineKeyboardButton(text="💬 לשאלות בפרטי", url=disp_url)
+        ]
+    ])
+
+    eta_badge = " [⏱️ נדרש ETA]" if draft['requires_eta'] else ""
+    broadcast_msg = (
+        f"🎫 **קריאה חדשה #{order_id}**{eta_badge}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{draft['cleaned_text']}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💵 **מחיר:** ₪{draft['price']}"
+    )
+
+    sent_drivers = 0
+    sent_groups = 0
+
+    # קבוצות
+    if mode in ['all', 'area_groups', 'groups']:
+        groups = []
         if USE_POSTGRES:
             def _get_groups():
                 with get_pg_cursor() as cur:
                     cur.execute("SELECT group_id FROM deliveries_bot_groups")
                     return cur.fetchall()
             groups = await run_in_thread(_get_groups)
-            for g in groups:
-                try:
-                    await bot.send_message(g['group_id'], order_msg)
-                    sent += 1
-                except Exception:
-                    pass
         else:
             async with aiosqlite.connect(SQLITE_DB_FILE) as db:
                 groups = await (await db.execute("SELECT group_id FROM deliveries_bot_groups")).fetchall()
-            for g in groups:
-                try:
-                    await bot.send_message(g[0], order_msg)
-                    sent += 1
-                except Exception:
-                    pass
-        await message.answer(f"✅ שוגר ל-{sent} קבוצות מוגדרות במערכת.", reply_markup=get_main_kb(user['role'], user['status'], message.chat.type))
-    
+        for g in groups:
+            gid = g['group_id'] if isinstance(g, dict) else g[0]
+            try:
+                await bot.send_message(gid, broadcast_msg, reply_markup=driver_card_kb)
+                sent_groups += 1
+            except Exception:
+                pass
+
+    # נהגים בפרטי
+    if mode in ['all', 'area_groups', 'area']:
+        if mode == 'all':
+            # כל הנהגים הפנויים
+            uids = []
+            if USE_POSTGRES:
+                def _get_all_free():
+                    with get_pg_cursor() as cur:
+                        cur.execute("SELECT user_id FROM deliveries_users WHERE status = 'free' AND (is_blocked IS NULL OR is_blocked = 0) AND debt_balance <= 500")
+                        return [r['user_id'] for r in cur.fetchall()]
+                uids = await run_in_thread(_get_all_free)
+            else:
+                async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+                    rows = await (await db.execute("SELECT user_id FROM deliveries_users WHERE status = 'free' AND (is_blocked IS NULL OR is_blocked = 0) AND debt_balance <= 500")).fetchall()
+                    uids = [r[0] for r in rows]
+        else:
+            # לפי אזור וערי עבודה
+            uids = await find_matching_drivers(draft['cleaned_text'], draft['raw_text'], draft['origin_city'], draft['dest_city'])
+
+        for uid in uids:
+            try:
+                await bot.send_message(uid, broadcast_msg, reply_markup=driver_card_kb)
+                sent_drivers += 1
+            except Exception:
+                pass
+
+    ORDER_DRAFTS.pop(draft_id, None)
     await state.clear()
 
-# ----------------- קריאות זמינות לנהג (לפי ערי העבודה המוגדרות) -----------------
+    summary_targets = []
+    if sent_drivers > 0:
+        summary_targets.append(f"🚗 {sent_drivers} נהגים פנויים")
+    if sent_groups > 0:
+        summary_targets.append(f"👥 {sent_groups} קבוצות")
+    targets_str = " + ".join(summary_targets) if summary_targets else "המערכת"
+
+    await call.message.edit_text(
+        f"🚀 **קריאה #{order_id} שוגרה בהצלחה!**\n\n"
+        f"🎯 נשלחה אל: {targets_str}\n"
+        f"כשנהגים יגישו הצעה, תקבל כרטיסייה מלאה עם זמני הגעה והצעות מחיר."
+    )
+    await call.answer()
+
+# ----------------- צד הנהג: הגשת בקשה והצעות (Bidding) - עמוד 4 -----------------
+@router.callback_query(F.data.startswith("bid_"))
+async def handle_driver_bid_click(call: CallbackQuery, state: FSMContext):
+    order_id = int(call.data.replace("bid_", ""))
+
+    # בדיקת סטטוס קריאה
+    order = await get_db_order(order_id)
+    if not order:
+        return await call.answer("קריאה לא נמצאה.", show_alert=True)
+    if order['status'] in ['assigned', 'closed']:
+        return await call.answer("❌ הנסיעה נמכרה!", show_alert=True)
+    if order['status'] == 'cancelled':
+        return await call.answer("❌ הנסיעה בוטלה!", show_alert=True)
+
+    driver = await get_user(call.from_user.id)
+    if not driver:
+        return await call.answer("⚠️ יש להירשם תחילה באמצעות /start", show_alert=True)
+    if driver['is_blocked']:
+        return await call.answer("🚫 חשבונך חסום במערכת.", show_alert=True)
+    if driver['debt_balance'] > 500.0:
+        return await call.answer("🚫 חשבונך מוקפא עקב חובות (מעל 500 ש\"ח)! הסדר חוב תחילה.", show_alert=True)
+
+    # בדיקת דרישת זמן
+    if order.get('requires_eta'):
+        await state.update_data(bid_order_id=order_id)
+        await state.set_state(DriverBidFlow.waiting_eta)
+        await call.message.answer(
+            f"⏱️ **הסדרן דרש זמן הגעה (ETA) לקריאה #{order_id}!**\n\n"
+            f"תוך כמה זמן תוכל להגיע למוצא?\n"
+            f"(הקלד טקסט חופשי, לדוגמה: '10 דקות', 'מיידי 3 דק', 'רבע שעה'):",
+            reply_markup=cancel_kb(call.message.chat.type)
+        )
+        return await call.answer()
+
+    # אם לא נדרש זמן הגעה מדויק
+    await submit_driver_bid_to_dispatcher(call.message, driver, order, eta_text="מיידי / לא צוין")
+    await call.answer("הצעתך נשלחה בהצלחה!")
+
+@router.message(DriverBidFlow.waiting_eta)
+async def process_driver_eta_input(message: Message, state: FSMContext):
+    if message.text == "❌ ביטול וחזרה":
+        return await cmd_start(message, state)
+
+    data = await state.get_data()
+    order_id = data.get('bid_order_id')
+    if not order_id:
+        await state.clear()
+        return await cmd_start(message, state)
+
+    order = await get_db_order(order_id)
+    driver = await get_user(message.from_user.id)
+    if not order or order['status'] in ['assigned', 'closed']:
+        await state.clear()
+        return await message.answer("❌ הנסיעה נמכרה!", reply_markup=get_main_kb(driver['role'], driver['status'], message.chat.type))
+    if order['status'] == 'cancelled':
+        await state.clear()
+        return await message.answer("❌ הנסיעה בוטלה!", reply_markup=get_main_kb(driver['role'], driver['status'], message.chat.type))
+
+    eta_text = message.text.strip()
+    await state.clear()
+    await submit_driver_bid_to_dispatcher(message, driver, order, eta_text=eta_text)
+
+async def submit_driver_bid_to_dispatcher(target_msg: Message, driver: dict, order: dict, eta_text: str):
+    order_id = order['order_id']
+    driver_id = driver['user_id']
+
+    # רישום הצעה בטבלה
+    if USE_POSTGRES:
+        def _reg_bid():
+            with get_pg_cursor() as cur:
+                cur.execute("""INSERT INTO deliveries_order_bids (order_id, driver_id, eta_minutes, status)
+                               VALUES (%s, %s, 0, 'pending')""", (order_id, driver_id))
+        await run_in_thread(_reg_bid)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            await db.execute("""INSERT INTO deliveries_order_bids (order_id, driver_id, eta_minutes, status)
+                                 VALUES (?, ?, 0, 'pending')""", (order_id, driver_id))
+            await db.commit()
+
+    driver_uname = driver.get('telegram_username') or ""
+    driver_mention = f"@{driver_uname}" if driver_uname else f"ID: {driver_id}"
+
+    proposal_card = (
+        f"🔔 **בקשת נהג חדשה לקריאה #{order_id}**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📋 **פרטי הנסיעה:**\n"
+        f"{order['text']}\n"
+        f"💵 **מחיר:** ₪{order['price']}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 **כרטיסיית נהג מלאה:**\n"
+        f"• **שם:** {driver['full_name']}\n"
+        f"• **טלגרם:** {driver_mention}\n"
+        f"• **טלפון:** {driver['phone']}\n"
+        f"• **רכב:** {driver.get('car_brand', 'לא צוין')} {driver.get('car_model', '')} ({driver.get('car_year', '')}) | 💺 {driver.get('car_seats', 4)} מקומות\n"
+        f"• **דירוג:** ⭐ {driver['rating']}/5.0 ({driver['total_trips']} נסיעות)\n"
+        f"• **יתרת חוב בתחנה:** ₪{driver['debt_balance']:.2f}\n"
+        f"⏱️ **זמן הגעה שהוצהר: {eta_text}**"
+    )
+
+    action_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🟢 אישור הנסיעה לנהג", callback_data=f"assign_{order_id}_{driver_id}")],
+        [InlineKeyboardButton(text="🍓 סגירה/חיוב הנסיעה", callback_data=f"charge_{order_id}_{driver_id}")],
+        [InlineKeyboardButton(text="🔄 פרסם שוב", callback_data=f"repub_{order_id}")],
+        [InlineKeyboardButton(text="🚫 ביטול הנסיעה", callback_data=f"cancelord_{order_id}")]
+    ])
+
+    try:
+        await bot.send_message(order['publisher_id'], proposal_card, reply_markup=action_kb)
+    except Exception as e:
+        logging.error(f"Error sending bid card to dispatcher: {e}")
+
+    await target_msg.answer(
+        f"⏳ **הצעתך לקריאה #{order_id} שוגרה לסדרן (זמן הגעה: {eta_text})!**\n"
+        f"ברגע שהסדרן יאשר, תקבל הודעה ישירה מיד.",
+        reply_markup=get_main_kb(driver['role'], driver['status'], target_msg.chat.type)
+    )
+
+# פונקציית עזר לשליפת קריאה
+async def get_db_order(order_id: int):
+    if USE_POSTGRES:
+        def _get():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT * FROM deliveries_orders WHERE order_id = %s", (order_id,))
+                return cur.fetchone()
+        row = await run_in_thread(_get)
+        return dict(row) if row else None
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            row = await (await db.execute("SELECT * FROM deliveries_orders WHERE order_id = ?", (order_id,))).fetchone()
+            return dict(row) if row else None
+
+# ----------------- צד הסדרן: טיפול בבקשות נהגים - עמוד 5 -----------------
+# 1. אישור הנסיעה לנהג (שיוך ללא חיוב עמלה עדיין)
+@router.callback_query(F.data.startswith("assign_"))
+async def handle_assign_driver(call: CallbackQuery):
+    _, order_id_str, driver_id_str = call.data.split("_")
+    order_id = int(order_id_str)
+    driver_id = int(driver_id_str)
+
+    order = await get_db_order(order_id)
+    if not order or order['status'] in ['closed', 'cancelled']:
+        return await call.answer("הקריאה כבר נסגרה או בוטלה.", show_alert=True)
+
+    driver = await get_user(driver_id)
+    dispatcher = await get_user(call.from_user.id)
+
+    # עדכון סטטוס ל-assigned
+    if USE_POSTGRES:
+        def _set_assigned():
+            with get_pg_cursor() as cur:
+                cur.execute("UPDATE deliveries_orders SET status = 'assigned', assigned_driver_id = %s WHERE order_id = %s", (driver_id, order_id))
+        await run_in_thread(_set_assigned)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            await db.execute("UPDATE deliveries_orders SET status = 'assigned', assigned_driver_id = ? WHERE order_id = ?", (driver_id, order_id))
+            await db.commit()
+
+    # הודעה לנהג עם קישור ישיר לסדרן
+    disp_uname = (dispatcher.get('telegram_username') if dispatcher else "") or call.from_user.username or ""
+    disp_url = f"https://t.me/{disp_uname}" if disp_uname else f"tg://user?id={call.from_user.id}"
+    driver_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💬 פתח שיחה עם הסדרן", url=disp_url)]
+    ])
+
+    try:
+        await bot.send_message(
+            driver_id,
+            f"🎉 **הסדרן אישר אותך לקריאה #{order_id}!**\n\n"
+            f"הנסיעה שוריינה עבורך (טרם חויבת בעמלה).\n"
+            f"צור קשר עם הסדרן לתחילת הביצוע:",
+            reply_markup=driver_kb
+        )
+    except Exception as e:
+        logging.warning(f"Could not notify assigned driver: {e}")
+
+    # עדכון הודעת הסדרן עם כפתורי סגירה/פרסום שוב/ביטול
+    sub_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🍓 סגירה/חיוב הנסיעה", callback_data=f"charge_{order_id}_{driver_id}")],
+        [InlineKeyboardButton(text="🔄 פרסם שוב", callback_data=f"repub_{order_id}")],
+        [InlineKeyboardButton(text="🚫 ביטול הנסיעה", callback_data=f"cancelord_{order_id}")]
+    ])
+
+    await call.message.edit_text(
+        f"🟢 **הנסיעה שוייכה לנהג {driver['full_name']}!**\n\n"
+        f"הנסיעה שוריינה עבורו מבלי לחייב עמלה כעת.\n"
+        f"כל נהג אחר שילחץ על הקריאה יקבל מעתה: 'הנסיעה נמכרה'.\n\n"
+        f"כאשר תרצה לגבות עמלה ולנעול סופית, לחץ 'סגירה/חיוב':",
+        reply_markup=sub_kb
+    )
+    await call.answer("הנסיעה שויכה לנהג בהצלחה!")
+
+# 2. סגירה/חיוב הנסיעה (גביית עמלה, 🍓, נעילת קריאה)
+@router.callback_query(F.data.startswith("charge_"))
+async def handle_charge_order(call: CallbackQuery):
+    _, order_id_str, driver_id_str = call.data.split("_")
+    order_id = int(order_id_str)
+    driver_id = int(driver_id_str)
+
+    order = await get_db_order(order_id)
+    if not order or order['status'] == 'closed':
+        return await call.answer("הקריאה כבר נסגרה וחויבה.", show_alert=True)
+
+    driver = await get_user(driver_id)
+    dispatcher = await get_user(call.from_user.id)
+
+    # עדכון סטטוס ל-closed
+    if USE_POSTGRES:
+        def _set_closed():
+            with get_pg_cursor() as cur:
+                cur.execute("UPDATE deliveries_orders SET status = 'closed', driver_id = %s, completed_at = CURRENT_TIMESTAMP WHERE order_id = %s", (driver_id, order_id))
+        await run_in_thread(_set_closed)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            await db.execute("UPDATE deliveries_orders SET status = 'closed', driver_id = ?, completed_at = ? WHERE order_id = ?", (driver_id, datetime.now().isoformat(), order_id))
+            await db.commit()
+
+    debt_amount, station_name, new_debt_id = await charge_driver_order(order_id, driver_id, order['station_id'], order['price'])
+
+    disp_uname = (dispatcher.get('telegram_username') if dispatcher else "") or call.from_user.username or ""
+    await send_private_debt_notice(
+        driver_id=driver_id,
+        order_id=order_id,
+        order_text=order['text'],
+        order_price=order['price'],
+        debt_amount=debt_amount,
+        station_name=station_name,
+        dispatcher_name=dispatcher['full_name'] if dispatcher else "סדרן התחנה",
+        dispatcher_username=disp_uname,
+        debt_id=new_debt_id
+    )
+
+    rate_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⭐ 1", callback_data=f"rate_{driver_id}_1"), 
+         InlineKeyboardButton(text="⭐⭐ 2", callback_data=f"rate_{driver_id}_2"), 
+         InlineKeyboardButton(text="⭐⭐⭐ 3", callback_data=f"rate_{driver_id}_3")],
+        [InlineKeyboardButton(text="⭐⭐⭐⭐ 4", callback_data=f"rate_{driver_id}_4"), 
+         InlineKeyboardButton(text="⭐⭐⭐⭐⭐ 5", callback_data=f"rate_{driver_id}_5")]
+    ])
+
+    await call.message.edit_text(
+        f"🍓 **קריאה #{order_id} נסגרה וחויבה בהצלחה!**\n\n"
+        f"👤 נהג: {driver['full_name']}\n"
+        f"💰 סכום נסיעה: ₪{order['price']}\n"
+        f"🍓 עמלה שנרשמה: ₪{debt_amount:.2f} בתחנה {station_name}\n"
+        f"הודעת 🍓 נשלחה לנהג בפרטי עם אפשרות אישור/ערעור.\n\n"
+        f"איך הנהג/הרכב? דרג כעת:",
+        reply_markup=rate_kb
+    )
+    await call.answer("הנסיעה נסגרה וחויבה בהצלחה!")
+
+# 3. פרסם שוב (פתיחה מחדש של זרימת הפרסום עם 7 הכפתורים)
+@router.callback_query(F.data.startswith("repub_"))
+async def handle_republish_order(call: CallbackQuery, state: FSMContext):
+    order_id = int(call.data.replace("repub_", ""))
+    order = await get_db_order(order_id)
+    if not order:
+        return await call.answer("קריאה לא נמצאה.", show_alert=True)
+
+    # איפוס סטטוס ל-open
+    if USE_POSTGRES:
+        def _reopen():
+            with get_pg_cursor() as cur:
+                cur.execute("UPDATE deliveries_orders SET status = 'open', assigned_driver_id = NULL WHERE order_id = %s", (order_id,))
+        await run_in_thread(_reopen)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            await db.execute("UPDATE deliveries_orders SET status = 'open', assigned_driver_id = NULL WHERE order_id = ?", (order_id,))
+            await db.commit()
+
+    user = await get_user(call.from_user.id)
+    draft_id = f"{call.from_user.id}_{int(datetime.now().timestamp())}"
+    draft_data = {
+        "draft_id": draft_id,
+        "publisher_id": call.from_user.id,
+        "publisher_name": user['full_name'],
+        "station_id": order['station_id'],
+        "cleaned_text": order['text'],
+        "origin_city": order.get('origin_city', ''),
+        "dest_city": order.get('dest_city', ''),
+        "client_phone": order.get('client_phone', ''),
+        "requires_eta": order.get('requires_eta', 0),
+        "price": order['price'],
+        "raw_text": order['text']
+    }
+    ORDER_DRAFTS[draft_id] = draft_data
+    await state.update_data(current_draft_id=draft_id)
+
+    await call.answer("פתיחת זרימת פרסום מחדש...")
+    await show_order_preview(call.message, draft_data, is_callback=True)
+
+# 4. ביטול הנסיעה
+@router.callback_query(F.data.startswith("cancelord_"))
+async def handle_cancel_order(call: CallbackQuery):
+    order_id = int(call.data.replace("cancelord_", ""))
+    if USE_POSTGRES:
+        def _cancel():
+            with get_pg_cursor() as cur:
+                cur.execute("UPDATE deliveries_orders SET status = 'cancelled' WHERE order_id = %s", (order_id,))
+        await run_in_thread(_cancel)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            await db.execute("UPDATE deliveries_orders SET status = 'cancelled' WHERE order_id = ?", (order_id,))
+            await db.commit()
+
+    await call.message.edit_text(f"🚫 **קריאה #{order_id} בוטלה לחלוטין!**\nהקריאה נרשמה בסטטיסטיקות התחנה כ'בוטלה'. נהגים שלוחצים יקבלו 'הנסיעה בוטלה'.")
+    await call.answer("הנסיעה בוטלה.")
+
+# פונקציית עזר לחיוב עמלה
+async def charge_driver_order(order_id: int, driver_id: int, station_id: int, price: float):
+    station_name = "תחנה ראשית"
+    commission_rate = 10.0
+
+    if USE_POSTGRES:
+        def _calc():
+            nonlocal station_name, commission_rate
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT name, commission_percent FROM deliveries_stations WHERE station_id = %s", (station_id,))
+                st = cur.fetchone()
+                if st:
+                    station_name = st['name']
+                    commission_rate = st['commission_percent']
+                debt_amount = price * (commission_rate / 100)
+                cur.execute("""INSERT INTO deliveries_debts (order_id, driver_id, station_id, amount, status, reason, appeal_status, transaction_type)
+                               VALUES (%s, %s, %s, %s, 'unpaid', %s, 'none', 'commission')
+                               RETURNING debt_id""",
+                            (order_id, driver_id, station_id, debt_amount, f"עמלה {commission_rate}%"))
+                d_row = cur.fetchone()
+                debt_id = d_row['debt_id'] if d_row else 0
+                cur.execute("UPDATE deliveries_users SET debt_balance = debt_balance + %s, total_trips = total_trips + 1 WHERE user_id = %s", (debt_amount, driver_id))
+                return debt_amount, station_name, debt_id
+        return await run_in_thread(_calc)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            st = await (await db.execute("SELECT name, commission_percent FROM deliveries_stations WHERE station_id = ?", (station_id,))).fetchone()
+            if st:
+                station_name = st[0]
+                commission_rate = st[1]
+            debt_amount = price * (commission_rate / 100)
+            c = await db.execute("""INSERT INTO deliveries_debts (order_id, driver_id, station_id, amount, status, reason, appeal_status, transaction_type)
+                                     VALUES (?, ?, ?, ?, 'unpaid', ?, 'none', 'commission')""",
+                                 (order_id, driver_id, station_id, debt_amount, f"עמלה {commission_rate}%"))
+            debt_id = c.lastrowid
+            await db.execute("UPDATE deliveries_users SET debt_balance = debt_balance + ?, total_trips = total_trips + 1 WHERE user_id = ?", (debt_amount, driver_id))
+            await db.commit()
+            return debt_amount, station_name, debt_id
+
+# פונקציית עזר לשליחת הודעת 🍓 בפרטי לנהג עם כפתורי אישור וערעור
+async def send_private_debt_notice(driver_id, order_id, order_text, order_price, debt_amount, station_name, dispatcher_name, dispatcher_username, debt_id):
+    disp_mention = f"@{dispatcher_username}" if dispatcher_username else "סדרן התחנה"
+    txt = (
+        f"🍓 **הודעת חיוב עמלה חדשה!**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏢 **תחנה:** {station_name}\n"
+        f"🎫 **קריאה:** #{order_id}\n"
+        f"💰 **סכום הנסיעה:** ₪{order_price}\n"
+        f"🍓 **עמלה לתשלום:** ₪{debt_amount:.2f}\n"
+        f"👤 **מפרסם הקריאה:** {dispatcher_name} ({disp_mention})\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📋 **פירוט הנסיעה:**\n"
+        f"{order_text}\n\n"
+        f"באפשרותך לאשר את החיוב או להגיש בקשה לביטול (ערעור):"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ אישור חיוב", callback_data=f"ackdebt_{debt_id}")],
+        [InlineKeyboardButton(text="⚖️ בקשה לביטול חיוב", callback_data=f"appeal_{debt_id}")]
+    ])
+
+    try:
+        await bot.send_message(driver_id, txt, reply_markup=kb)
+    except Exception as e:
+        logging.warning(f"Could not send 🍓 debt notice to driver {driver_id}: {e}")
+
+# ----------------- מערכת החיובים, זיכויים וערעורים - עמוד 6 -----------------
+# 1. אישור חיוב (נועל את הקבלה ומונע ערעור עתידי)
+@router.callback_query(F.data.startswith("ackdebt_"))
+async def handle_ack_debt(call: CallbackQuery):
+    debt_id = int(call.data.replace("ackdebt_", ""))
+    if USE_POSTGRES:
+        def _lock():
+            with get_pg_cursor() as cur:
+                cur.execute("UPDATE deliveries_debts SET is_locked = 1 WHERE debt_id = %s RETURNING amount", (debt_id,))
+                row = cur.fetchone()
+                return row['amount'] if row else 0
+        amt = await run_in_thread(_lock)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            row = await (await db.execute("SELECT amount FROM deliveries_debts WHERE debt_id = ?", (debt_id,))).fetchone()
+            amt = row[0] if row else 0
+            await db.execute("UPDATE deliveries_debts SET is_locked = 1 WHERE debt_id = ?", (debt_id,))
+            await db.commit()
+
+    await call.message.edit_text(
+        f"✅ **אישור חיוב נרשם בהצלחה!**\n\n"
+        f"אישרת את החיוב על סך ₪{amt:.2f}.\n"
+        f"הקבלה ננעלה במערכת ולא ניתן לערער עליה בעתיד."
+    )
+    await call.answer("החיוב אושר וננעל בהצלחה.")
+
+# 2. בקשה לביטול חיוב (מפעיל FSM, מבקש סיבה ושולח למפרסם הקריאה)
+@router.callback_query(F.data.startswith("appeal_"))
+async def handle_appeal_start(call: CallbackQuery, state: FSMContext):
+    debt_id = int(call.data.replace("appeal_", ""))
+
+    debt = None
+    if USE_POSTGRES:
+        def _get():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT * FROM deliveries_debts WHERE debt_id = %s", (debt_id,))
+                return cur.fetchone()
+        debt = await run_in_thread(_get)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            debt = await (await db.execute("SELECT * FROM deliveries_debts WHERE debt_id = ?", (debt_id,))).fetchone()
+
+    if not debt:
+        return await call.answer("חיוב לא נמצא.", show_alert=True)
+    if debt.get('is_locked'):
+        return await call.answer("🚫 חיוב זה כבר אושר וננעל, לא ניתן להגיש ערעור.", show_alert=True)
+    if debt.get('appeal_status') not in ['none', None]:
+        return await call.answer("⚠️ כבר הוגשה בקשת ביטול עבור חיוב זה.", show_alert=True)
+
+    await state.update_data(appeal_debt_id=debt_id)
+    await state.set_state(DebtFlow.waiting_appeal_reason)
+    await call.message.answer(
+        f"✍️ **בקשה לביטול חיוב (ערעור) #{debt_id}:**\n\n"
+        f"אנא הקלד את הסיבה לבקשת הביטול (למשל: 'הלקוח ביטל במקום', 'הנסיעה לא יצאה לפועל'):",
+        reply_markup=cancel_kb(call.message.chat.type)
+    )
+    await call.answer()
+
+@router.message(DebtFlow.waiting_appeal_reason)
+async def process_appeal_reason_input(message: Message, state: FSMContext):
+    if message.text == "❌ ביטול וחזרה":
+        return await cmd_start(message, state)
+
+    data = await state.get_data()
+    debt_id = data.get('appeal_debt_id')
+    if not debt_id:
+        await state.clear()
+        return await cmd_start(message, state)
+
+    reason = message.text.strip()
+    driver = await get_user(message.from_user.id)
+
+    # עדכון סטטוס ערעור ב-DB
+    if USE_POSTGRES:
+        def _set_pend():
+            with get_pg_cursor() as cur:
+                cur.execute("UPDATE deliveries_debts SET appeal_status = 'pending', appeal_reason = %s WHERE debt_id = %s RETURNING order_id, amount, station_id", (reason, debt_id))
+                return cur.fetchone()
+        debt_row = await run_in_thread(_set_pend)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            debt_row = await (await db.execute("SELECT order_id, amount, station_id FROM deliveries_debts WHERE debt_id = ?", (debt_id,))).fetchone()
+            await db.execute("UPDATE deliveries_debts SET appeal_status = 'pending', appeal_reason = ? WHERE debt_id = ?", (reason, debt_id))
+            await db.commit()
+
+    order_id = debt_row['order_id'] if debt_row else 0
+    amount = float(debt_row['amount'] or 0) if debt_row else 0.0
+
+    # איתור המפרסם של הקריאה
+    order = await get_db_order(order_id)
+    publisher_id = order.get('publisher_id') if order else None
+
+    driver_uname = driver.get('telegram_username') or ""
+    driver_mention = f"@{driver_uname}" if driver_uname else f"ID: {driver['user_id']}"
+
+    appeal_card = (
+        f"⚖️ **בקשה חדשה לביטול חיוב #{debt_id}**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎫 **קריאה:** #{order_id}\n"
+        f"🍓 **סכום החיוב:** ₪{amount:.2f}\n"
+        f"👤 **נהג מבקש:** {driver['full_name']} ({driver_mention} | טל: {driver['phone']})\n"
+        f"📝 **סיבת הבקשה שהוקלדה:**\n"
+        f"\"{reason}\"\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"האם לאשר את ביטול החיוב (זיכוי 🍏) או לסרב?"
+    )
+
+    action_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🍏 אשר ביטול חיוב", callback_data=f"appr_cancel_debt_{debt_id}"),
+            InlineKeyboardButton(text="❌ סרב", callback_data=f"deny_cancel_debt_{debt_id}")
+        ]
+    ])
+
+    # שליחה למפרסם הקריאה, ואם אין - למנהלי המערכת
+    recipients = [publisher_id] if publisher_id else ADMIN_IDS
+    for r_id in recipients:
+        if r_id:
+            try:
+                await bot.send_message(r_id, appeal_card, reply_markup=action_kb)
+            except Exception:
+                pass
+
+    await state.clear()
+    await message.answer(
+        f"✅ **בקשת הביטול נשלחה לסדרן לבדיקה.**\n"
+        f"תקבל הודעה ישירה מיד כשתתקבל החלטה.",
+        reply_markup=get_main_kb(driver['role'], driver['status'], message.chat.type)
+    )
+
+# אשר ביטול חיוב (מזכה את הנהג ב-🍏 ומוחק את העמלה)
+@router.callback_query(F.data.startswith("appr_cancel_debt_"))
+async def handle_approve_cancel_debt(call: CallbackQuery):
+    debt_id = int(call.data.replace("appr_cancel_debt_", ""))
+
+    if USE_POSTGRES:
+        def _approve_cancel():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT * FROM deliveries_debts WHERE debt_id = %s", (debt_id,))
+                d = cur.fetchone()
+                if not d or d['status'] == 'cancelled':
+                    return None, 0, 0
+                cur.execute("UPDATE deliveries_debts SET status = 'cancelled', appeal_status = 'approved', resolved_at = CURRENT_TIMESTAMP WHERE debt_id = %s", (debt_id,))
+                cur.execute("UPDATE deliveries_users SET debt_balance = GREATEST(0, debt_balance - %s) WHERE user_id = %s", (d['amount'], d['driver_id']))
+                return d['driver_id'], d['amount'], d['order_id']
+        driver_id, amount, order_id = await run_in_thread(_approve_cancel)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            d = await (await db.execute("SELECT * FROM deliveries_debts WHERE debt_id = ?", (debt_id,))).fetchone()
+            if not d or d['status'] == 'cancelled':
+                driver_id, amount, order_id = None, 0, 0
+            else:
+                driver_id = d['driver_id']
+                amount = d['amount']
+                order_id = d['order_id']
+                await db.execute("UPDATE deliveries_debts SET status = 'cancelled', appeal_status = 'approved', resolved_at = ? WHERE debt_id = ?", (datetime.now().isoformat(), debt_id))
+                await db.execute("UPDATE deliveries_users SET debt_balance = MAX(0, debt_balance - ?) WHERE user_id = ?", (amount, driver_id))
+                await db.commit()
+
+    if not driver_id:
+        return await call.answer("החיוב כבר בוטל או טופל.", show_alert=True)
+
+    try:
+        await bot.send_message(
+            driver_id,
+            f"🍏 **הערעור התקבל בהצלחה!**\n\n"
+            f"החיוב על סך ₪{amount:.2f} עבור קריאה #{order_id} בוטל וזוכה במלואו (🍏)!\n"
+            f"מאזן החוב שלך בתחנה עודכן כעת."
+        )
+    except Exception as e:
+        logging.warning(f"Could not notify driver of credit: {e}")
+
+    await call.message.edit_text(
+        f"🍏 **אישרת את ביטול החיוב #{debt_id}!**\n\n"
+        f"הנהג זוכה ב-₪{amount:.2f} והעמלה נמחקה מהמאזן שלו."
+    )
+    await call.answer("ביטול החיוב אושר והנהג זוכה!")
+
+# סרב לביטול חיוב
+@router.callback_query(F.data.startswith("deny_cancel_debt_"))
+async def handle_deny_cancel_debt(call: CallbackQuery):
+    debt_id = int(call.data.replace("deny_cancel_debt_", ""))
+
+    if USE_POSTGRES:
+        def _deny_cancel():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT * FROM deliveries_debts WHERE debt_id = %s", (debt_id,))
+                d = cur.fetchone()
+                if not d:
+                    return None, 0, 0
+                cur.execute("UPDATE deliveries_debts SET appeal_status = 'rejected', resolved_at = CURRENT_TIMESTAMP WHERE debt_id = %s", (debt_id,))
+                return d['driver_id'], d['amount'], d['order_id']
+        driver_id, amount, order_id = await run_in_thread(_deny_cancel)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            d = await (await db.execute("SELECT * FROM deliveries_debts WHERE debt_id = ?", (debt_id,))).fetchone()
+            if not d:
+                driver_id, amount, order_id = None, 0, 0
+            else:
+                driver_id = d['driver_id']
+                amount = d['amount']
+                order_id = d['order_id']
+                await db.execute("UPDATE deliveries_debts SET appeal_status = 'rejected', resolved_at = ? WHERE debt_id = ?", (datetime.now().isoformat(), debt_id))
+                await db.commit()
+
+    if not driver_id:
+        return await call.answer("חיוב לא נמצא.", show_alert=True)
+
+    try:
+        await bot.send_message(
+            driver_id,
+            f"❌ **הבקשה לביטול חיוב נדחתה.**\n\n"
+            f"החיוב על סך ₪{amount:.2f} עבור קריאה #{order_id} נותר בעינו ויש להסדירו מול התחנה."
+        )
+    except Exception as e:
+        logging.warning(f"Could not notify driver of debt denial: {e}")
+
+    await call.message.edit_text(
+        f"❌ **דחית את בקשת הביטול על חיוב #{debt_id}.**\n\n"
+        f"החיוב על סך ₪{amount:.2f} נותר פעיל במאזן הנהג."
+    )
+    await call.answer("הבקשה נדחתה.")
+
+# דירוג נהג
+@router.callback_query(F.data.startswith("rate_"))
+async def rate_driver(call: CallbackQuery):
+    _, driver_id_str, stars_str = call.data.split("_")
+    driver_id = int(driver_id_str)
+    stars = int(stars_str)
+
+    if USE_POSTGRES:
+        def _rate_sync():
+            with get_pg_cursor() as cur:
+                cur.execute('SELECT rating, total_trips FROM deliveries_users WHERE user_id = %s', (driver_id,))
+                d = cur.fetchone()
+                if d:
+                    current_trips = max(d['total_trips'], 1)
+                    new_rating = round(((d['rating'] * (current_trips - 1)) + stars) / current_trips, 1)
+                    cur.execute('UPDATE deliveries_users SET rating = %s WHERE user_id = %s', (new_rating, driver_id))
+        await run_in_thread(_rate_sync)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            d = await (await db.execute('SELECT rating, total_trips FROM deliveries_users WHERE user_id = ?', (driver_id,))).fetchone()
+            if d:
+                current_trips = max(d['total_trips'], 1)
+                new_rating = round(((d['rating'] * (current_trips - 1)) + stars) / current_trips, 1)
+                await db.execute('UPDATE deliveries_users SET rating = ? WHERE user_id = ?', (new_rating, driver_id))
+                await db.commit()
+
+    await call.message.edit_text(f"⭐ **דירגת את הנהג ב-{stars} כוכבים.** תודה!")
+    await call.answer("הדירוג נשמר בהצלחה.")
+
+# תפריט חיובים וערעורים לנהג
+@router.message(F.text == "💳 חיובים וערעורים")
+async def show_debts(message: Message):
+    if USE_POSTGRES:
+        def _get_debts():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT * FROM deliveries_debts WHERE driver_id = %s AND status = 'unpaid' ORDER BY debt_id DESC LIMIT 15", (message.from_user.id,))
+                return cur.fetchall()
+        debts = await run_in_thread(_get_debts)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            debts = await (await db.execute("SELECT * FROM deliveries_debts WHERE driver_id = ? AND status = 'unpaid' ORDER BY debt_id DESC LIMIT 15", (message.from_user.id,))).fetchall()
+
+    if not debts:
+        return await message.answer("✅ **אין לך חובות פתוחים במערכת.** כל הכבוד!")
+
+    await message.answer(f"💳 **רשימת החיובים הפתוחים שלך ({len(debts)}):**")
+    for d in debts:
+        d_dict = dict(d)
+        is_locked = bool(d_dict.get('is_locked'))
+        appeal_status = d_dict.get('appeal_status', 'none')
+
+        status_lbl = ""
+        if is_locked:
+            status_lbl = " (🔒 ננעל ואושר)"
+        elif appeal_status == 'pending':
+            status_lbl = " (⏳ ערעור בבדיקה)"
+        elif appeal_status == 'rejected':
+            status_lbl = " (❌ ערעור נדחה)"
+
+        txt = (
+            f"🧾 **חיוב מתחנה #{d_dict['station_id']}**{status_lbl}\n"
+            f"🎫 עבור קריאה #{d_dict.get('order_id') or 'ידני'}\n"
+            f"💰 סכום: ₪{d_dict['amount']:.2f}\n"
+            f"📝 סיבה: {d_dict.get('reason', 'עמלה')}"
+        )
+
+        buttons = []
+        if not is_locked:
+            buttons.append(InlineKeyboardButton(text="✅ אישור חיוב", callback_data=f"ackdebt_{d_dict['debt_id']}"))
+            if appeal_status == 'none':
+                buttons.append(InlineKeyboardButton(text="⚖️ בקשה לביטול", callback_data=f"appeal_{d_dict['debt_id']}"))
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
+        await message.answer(txt, reply_markup=kb)
+
+# קריאות זמינות לנהג (לפי ערי העבודה שלו)
 @router.message(F.text == "🚗 קריאות זמינות")
 async def show_available_orders_for_driver(message: Message):
     user = await get_user(message.from_user.id)
@@ -3610,446 +4729,59 @@ async def show_available_orders_for_driver(message: Message):
     await message.answer(f"🚗 **נמצאו {len(matching_orders)} קריאות זמינות באזורי העבודה שלך:**")
     for o in matching_orders:
         eta_txt = " [⏱️ נדרש ETA]" if o.get('requires_eta') else ""
-        txt = f"🎫 **קריאה #{o['order_id']}**{eta_badge if 'eta_badge' in locals() else eta_txt}\n💵 מחיר: {o['price']} ש\"ח\n📝 {o['text']}"
+        txt = (
+            f"🎫 **קריאה #{o['order_id']}**{eta_txt}\n"
+            f"💵 מחיר: ₪{o['price']}\n"
+            f"📝 {o['text']}"
+        )
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🚗 קח קריאה", callback_data=f"take_{o['order_id']}")]
+            [InlineKeyboardButton(text="🚗 בקשת הנסיעה", callback_data=f"bid_{o['order_id']}")]
         ])
         await message.answer(txt, reply_markup=kb)
 
-# ----------------- ניהול מצב קריאות (לסדרן ולמנהל תחנה בלבד לפי station_id) -----------------
-@router.message(F.text == "📋 מצב קריאות")
+# מצב קריאות (לסדרן ולמנהל תחנה בלבד לפי station_id)
+@router.message(F.text.in_(["📋 מצב קריאות", "📋 קריאות התחנה שלי"]))
 async def show_open_orders(message: Message):
     user = await get_user(message.from_user.id)
-    if user['role'] not in ['admin', 'station_manager', 'dispatcher']: return
+    if not user or user['role'] not in ['admin', 'station_manager', 'dispatcher']: 
+        return
     
     if USE_POSTGRES:
         def _get_orders():
             with get_pg_cursor() as cur:
                 if user['role'] == 'admin':
-                    cur.execute("SELECT * FROM deliveries_orders WHERE status = 'open' ORDER BY order_id DESC LIMIT 25")
+                    cur.execute("SELECT * FROM deliveries_orders WHERE status IN ('open', 'assigned') ORDER BY order_id DESC LIMIT 25")
                 else:
-                    cur.execute("SELECT * FROM deliveries_orders WHERE station_id = %s AND status = 'open' ORDER BY order_id DESC LIMIT 25", (user['station_id'],))
+                    cur.execute("SELECT * FROM deliveries_orders WHERE station_id = %s AND status IN ('open', 'assigned') ORDER BY order_id DESC LIMIT 25", (user['station_id'],))
                 return cur.fetchall()
         orders = await run_in_thread(_get_orders)
     else:
         async with aiosqlite.connect(SQLITE_DB_FILE) as db:
             db.row_factory = aiosqlite.Row
             if user['role'] == 'admin':
-                orders = await (await db.execute("SELECT * FROM deliveries_orders WHERE status = 'open' ORDER BY order_id DESC LIMIT 25")).fetchall()
+                orders = await (await db.execute("SELECT * FROM deliveries_orders WHERE status IN ('open', 'assigned') ORDER BY order_id DESC LIMIT 25")).fetchall()
             else:
-                orders = await (await db.execute("SELECT * FROM deliveries_orders WHERE station_id = ? AND status = 'open' ORDER BY order_id DESC LIMIT 25", (user['station_id'],))).fetchall()
+                orders = await (await db.execute("SELECT * FROM deliveries_orders WHERE station_id = ? AND status IN ('open', 'assigned') ORDER BY order_id DESC LIMIT 25", (user['station_id'],))).fetchall()
         
     if not orders:
         return await message.answer("✅ אין קריאות פתוחות לתחנה שלך כרגע.")
         
     for o in orders:
-        eta_txt = "⏱️ נדרש ETA" if o.get('requires_eta') else ""
-        txt = f"🎫 **קריאה #{o['order_id']}** {eta_txt}\n💵 מחיר: {o['price']} ש\"ח\n📝 טקסט: {o['text']}"
+        o_dict = dict(o)
+        status_heb = "משוריינת לנהג" if o_dict['status'] == 'assigned' else "פתוחה"
+        eta_txt = "⏱️ נדרש ETA" if o_dict.get('requires_eta') else ""
+        txt = (
+            f"🎫 **קריאה #{o_dict['order_id']}** ({status_heb}) {eta_txt}\n"
+            f"💵 מחיר: ₪{o_dict['price']}\n"
+            f"📝 {o_dict['text']}"
+        )
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="❌ מחק קריאה (נלקחה מחוץ לבוט)", callback_data=f"delorder_{o['order_id']}")]
+            [
+                InlineKeyboardButton(text="🔄 פרסם שוב", callback_data=f"repub_{o_dict['order_id']}"),
+                InlineKeyboardButton(text="🚫 ביטול נסיעה", callback_data=f"cancelord_{o_dict['order_id']}")
+            ]
         ])
         await message.answer(txt, reply_markup=kb)
-
-@router.callback_query(F.data.startswith("delorder_"))
-async def delete_open_order(call: CallbackQuery):
-    order_id = call.data.split("_")[1]
-    if USE_POSTGRES:
-        def _delete_order():
-            with get_pg_cursor() as cur:
-                cur.execute("UPDATE deliveries_orders SET status = 'deleted' WHERE order_id = %s", (order_id,))
-        await run_in_thread(_delete_order)
-    else:
-        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-            await db.execute('UPDATE deliveries_orders SET status = "deleted" WHERE order_id = ?', (order_id,))
-            await db.commit()
-    await call.message.edit_text(f"✅ קריאה #{order_id} נסגרה/נמחקה מהמערכת.")
-    await call.answer()
-    
-# ----------------- סעיף 5: Bidding חכם, ETA ואישור שיחה (Deep Link) -----------------
-@router.callback_query(F.data.startswith("take_"))
-async def take_order(call: CallbackQuery, state: FSMContext):
-    order_id = call.data.split("_")[1]
-    
-    driver = await get_user(call.from_user.id)
-    if not driver:
-        return await call.answer("⚠️ יש להירשם תחילה למערכת באמצעות /start", show_alert=True)
-    if driver['status'] != 'free':
-        return await call.answer("⚠️ אתה בסטטוס תפוס! העבר ל'פנוי' בתפריט הראשי קודם.", show_alert=True)
-    if driver['debt_balance'] > 500.0:
-        return await call.answer("🚫 חשבונך מוקפא עקב חובות (מעל 500 ש\"ח)! הסדר חובות תחילה.", show_alert=True)
-
-    if USE_POSTGRES:
-        def _get_o():
-            with get_pg_cursor() as cur:
-                cur.execute('SELECT * FROM deliveries_orders WHERE order_id = %s', (order_id,))
-                return cur.fetchone()
-        order = await run_in_thread(_get_o)
-    else:
-        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-            db.row_factory = aiosqlite.Row
-            order = await (await db.execute('SELECT * FROM deliveries_orders WHERE order_id = ?', (order_id,))).fetchone()
-
-    if not order or order['status'] != 'open':
-        return await call.answer("❌ איחרת! הקריאה כבר נתפסה או בוטלה.", show_alert=True)
-        
-    await state.update_data(take_order_id=order_id, order_requires_eta=order.get('requires_eta', 0))
-    await state.set_state(OrderFlow.waiting_driver_eta)
-    
-    eta_kb = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="5 דקות"), KeyboardButton(text="10 דקות"), KeyboardButton(text="15 דקות")],
-            [KeyboardButton(text="20 דקות"), KeyboardButton(text="30 דקות"), KeyboardButton(text="מיידי (0-3 דק')")],
-            [KeyboardButton(text="❌ ביטול וחזרה")]
-        ],
-        resize_keyboard=True
-    )
-    
-    requires_eta = order.get('requires_eta', 0)
-    prompt_txt = "⏱️ **הסדרן דרש זמן הגעה מדויק (ETA)!**\nתוך כמה דקות תוכל להתייצב במוצא?" if requires_eta else "⏱️ תוך כמה זמן תוכל להגיע למוצא? (בחר כפתור או הקלד מספר דקות):"
-    
-    await call.message.answer(
-        f"🎫 **בקשה לקריאה #{order_id}**\n{prompt_txt}",
-        reply_markup=safe_reply_markup(call.message.chat.type, eta_kb)
-    )
-    await call.answer()
-
-@router.message(OrderFlow.waiting_driver_eta)
-async def process_eta(message: Message, state: FSMContext):
-    if message.text == "❌ ביטול וחזרה":
-        return await cmd_start(message, state)
-        
-    data = await state.get_data()
-    order_id = data.get('take_order_id')
-    driver = await get_user(message.from_user.id)
-    
-    if not order_id:
-        await state.clear()
-        return await cmd_start(message, state)
-
-    eta_str = message.text.replace("דקות", "").replace("דק'", "").replace("דק", "").strip()
-
-    if USE_POSTGRES:
-        def _get_order():
-            with get_pg_cursor() as cur:
-                cur.execute('SELECT * FROM deliveries_orders WHERE order_id = %s', (order_id,))
-                return cur.fetchone()
-        order = await run_in_thread(_get_order)
-    else:
-        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-            db.row_factory = aiosqlite.Row
-            order = await (await db.execute('SELECT * FROM deliveries_orders WHERE order_id = ?', (order_id,))).fetchone()
-        
-    if not order or order['status'] != 'open':
-        await state.clear()
-        return await message.answer("❌ איחרת! הקריאה כבר נתפסה או בוטלה.", reply_markup=get_main_kb(driver['role'], driver['status'], message.chat.type))
-        
-    driver_uname = driver['telegram_username'] or message.from_user.username or ""
-    driver_mention = f"@{driver_uname}" if driver_uname else f"ID: {driver['user_id']}"
-    
-    msg_to_dispatcher = (
-        f"🔔 **נהג מציע לקחת את קריאה #{order_id}**\n\n"
-        f"👤 נהג: {driver['full_name']} ({driver_mention})\n"
-        f"📱 טלפון: {driver['phone']}\n"
-        f"⏱️ **זמן הגעה (ETA): {eta_str}**\n"
-        f"🚗 רכב: {driver['car_brand']} {driver['car_model']} ({driver['car_year']}) | 💺 {driver['car_seats']} מקומות\n"
-        f"⭐ דירוג: {driver['rating']}/5.0 ({driver['total_trips']} נסיעות)"
-    )
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📞 אשר שיחה (צ'אט ישיר)", callback_data=f"call_{order_id}_{driver['user_id']}")],
-        [InlineKeyboardButton(text="✅ סגור נסיעה (גבה עמלה)", callback_data=f"approve_{order_id}_{driver['user_id']}")],
-        [InlineKeyboardButton(text="❌ דחה מתמודד", callback_data=f"deny_{order_id}_{driver['user_id']}")]
-    ])
-    
-    try:
-        await bot.send_message(order['publisher_id'], msg_to_dispatcher, reply_markup=kb)
-    except Exception as e:
-        logging.error(f"Error notifying dispatcher: {e}")
-        
-    await state.clear()
-    await message.answer(
-        f"⏳ **הצעתך לקריאה #{order_id} שוגרה לסדרן (זמן הגעה: {eta_str})!**\n"
-        f"כאשר הסדרן יאשר שיחה או יסגור את הנסיעה, תקבל הודעה ישירה מיד.",
-        reply_markup=get_main_kb(driver['role'], driver['status'], message.chat.type)
-    )
-
-# ----------------- סעיף 5: אישור שיחה (Deep Link) -----------------
-@router.callback_query(F.data.startswith("call_"))
-async def call_driver_dispatcher(call: CallbackQuery):
-    """
-    אישור שיחה: לחיצה עליו לא סוגרת נסיעה!
-    היא שולחת לסדרן ולנהג קישור ישיר לצ'אט פרטי ביניהם לתאום פרטים.
-    """
-    _, order_id, driver_id_str = call.data.split("_")
-    driver_id = int(driver_id_str)
-    dispatcher_id = call.from_user.id
-    
-    driver = await get_user(driver_id)
-    dispatcher = await get_user(dispatcher_id)
-    
-    if not driver:
-        return await call.answer("משתמש לא נמצא", show_alert=True)
-        
-    driver_username = driver.get('telegram_username') or ""
-    disp_username = (dispatcher.get('telegram_username') if dispatcher else "") or call.from_user.username or ""
-    
-    # יצירת deep links מאובטחים
-    driver_link = f"https://t.me/{driver_username}" if driver_username else f"tg://user?id={driver_id}"
-    disp_link = f"https://t.me/{disp_username}" if disp_username else f"tg://user?id={dispatcher_id}"
-    
-    disp_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💬 פתח שיחה ישירה עם הנהג", url=driver_link)],
-        [InlineKeyboardButton(text="✅ סגור נסיעה עכשיו (גבה עמלה)", callback_data=f"approve_{order_id}_{driver_id}")],
-        [InlineKeyboardButton(text="❌ דחה מתמודד", callback_data=f"deny_{order_id}_{driver_id}")]
-    ])
-    
-    await call.message.edit_text(
-        f"📞 **אושר קישור לשיחה ישירה לקריאה #{order_id}!**\n\n"
-        f"👤 נהג: {driver['full_name']} (@{driver_username})\n"
-        f"📱 טלפון: {driver['phone']}\n"
-        f"🚗 רכב: {driver['car_brand']} {driver['car_model']}\n\n"
-        f"לחץ למטה לפתיחת הצ'אט בטלגרם לתאום סופי.\n"
-        f"⚠️ **שים לב:** לחיצה זו טרם סגרה את הנסיעה. לאחר שסיכמתם ביניכם, לחץ 'סגור נסיעה עכשיו' כדי לקבע את הנסיעה ולחייב עמלה.",
-        reply_markup=disp_kb
-    )
-    
-    driver_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💬 פתח שיחה ישירה עם הסדרן", url=disp_link)]
-    ])
-    
-    disp_name = (dispatcher.get('full_name') if dispatcher else "") or call.from_user.full_name
-    try:
-        await bot.send_message(
-            driver_id,
-            f"🎉 **הסדרן {disp_name} אישר שיחה ישירה לקריאה #{order_id}!**\n\n"
-            f"לחץ למטה לפתיחת הצ'אט הפרטי מול הסדרן לתיאום סופי:\n"
-            f"לאחר הסיכום, הסדרן יסגור את הנסיעה ותקבל אישור רשמי.",
-            reply_markup=driver_kb
-        )
-    except Exception as e:
-        logging.error(f"Error sending link to driver: {e}")
-        
-    await call.answer("🔗 נוצרו קישורים ישירים לשיחה!")
-
-
-# ----------------- סדרן מאשר/דוחה, חיוב עמלה ודירוג -----------------
-@router.callback_query(F.data.startswith("deny_"))
-async def deny_driver(call: CallbackQuery):
-    _, order_id, driver_id = call.data.split("_")
-    try:
-        await bot.send_message(driver_id, f"❌ לצערנו הסדרן דחה את בקשתך לקריאה #{order_id}. נסה קריאה אחרת.")
-    except Exception:
-        pass
-    await call.message.edit_text(f"❌ דחית את הנהג לקריאה #{order_id}. ההודעה נשלחה אליו.")
-    await call.answer()
-
-@router.callback_query(F.data.startswith("approve_"))
-async def approve_driver(call: CallbackQuery):
-    _, order_id, driver_id = call.data.split("_")
-    
-    if USE_POSTGRES:
-        def _approve_transaction():
-            with get_pg_cursor() as cur:
-                cur.execute('SELECT * FROM deliveries_orders WHERE order_id = %s', (order_id,))
-                order = cur.fetchone()
-                
-                if not order or order['status'] != 'open':
-                    return None, 0, "", 0
-                    
-                cur.execute('SELECT name, commission_percent FROM deliveries_stations WHERE station_id = %s', (order['station_id'],))
-                station = cur.fetchone()
-                station_name = station['name'] if station else f"תחנה #{order['station_id']}"
-                
-                cur.execute("UPDATE deliveries_orders SET status = 'closed', driver_id = %s WHERE order_id = %s", (driver_id, order_id))
-                
-                commission_rate = station['commission_percent'] if station else 10.0
-                debt_amount = order['price'] * (commission_rate / 100)
-                new_debt_id = 0
-                
-                if debt_amount > 0:
-                    cur.execute('INSERT INTO deliveries_debts (order_id, driver_id, station_id, amount, reason) VALUES (%s, %s, %s, %s, %s) RETURNING debt_id', 
-                                (order_id, driver_id, order['station_id'], debt_amount, f"עמלה {commission_rate}%"))
-                    d_row = cur.fetchone()
-                    new_debt_id = d_row['debt_id'] if d_row else 0
-                    cur.execute('UPDATE deliveries_users SET debt_balance = debt_balance + %s, total_trips = total_trips + 1 WHERE user_id = %s', (debt_amount, driver_id))
-                else:
-                    cur.execute('UPDATE deliveries_users SET total_trips = total_trips + 1 WHERE user_id = %s', (driver_id,))
-                return order, debt_amount, station_name, new_debt_id
-
-        order, debt_amount, station_name, new_debt_id = await run_in_thread(_approve_transaction)
-        if order is None:
-            return await call.answer("⚠️ הקריאה כבר נסגרה!", show_alert=True)
-    else:
-        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-            db.row_factory = aiosqlite.Row
-            order = await (await db.execute('SELECT * FROM deliveries_orders WHERE order_id = ?', (order_id,))).fetchone()
-            
-            if not order or order['status'] != 'open':
-                return await call.answer("⚠️ הקריאה כבר נסגרה!", show_alert=True)
-                
-            station = await (await db.execute('SELECT name, commission_percent FROM deliveries_stations WHERE station_id = ?', (order['station_id'],))).fetchone()
-            station_name = station['name'] if station else f"תחנה #{order['station_id']}"
-            
-            await db.execute('UPDATE deliveries_orders SET status = "closed", driver_id = ? WHERE order_id = ?', (driver_id, order_id))
-            
-            commission_rate = station['commission_percent'] if station else 10.0
-            debt_amount = order['price'] * (commission_rate / 100)
-            new_debt_id = 0
-            
-            if debt_amount > 0:
-                c = await db.execute('INSERT INTO deliveries_debts (order_id, driver_id, station_id, amount, reason) VALUES (?, ?, ?, ?, ?)', 
-                                     (order_id, driver_id, order['station_id'], debt_amount, f"עמלה {commission_rate}%"))
-                new_debt_id = c.lastrowid
-                await db.execute('UPDATE deliveries_users SET debt_balance = debt_balance + ?, total_trips = total_trips + 1 WHERE user_id = ?', (debt_amount, driver_id))
-            else:
-                await db.execute('UPDATE deliveries_users SET total_trips = total_trips + 1 WHERE user_id = ?', (driver_id,))
-                
-            await db.commit()
-        
-    try:
-        driver_txt = (
-            f"🎉 **אושרת לקריאה #{order_id}!**\n\n"
-            f"🍓 **חויבת בעמלה על סך {debt_amount:.2f} שקלים (🍓) בתחנה {station_name}!**\n\n"
-            f"📋 **פירוט הנסיעה:**\n"
-            f"{order['text']}\n"
-            f"💰 מחיר: ₪{order['price']}\n\n"
-            f"סע בזהירות! לשאלות או בירורים ניתן לערער באמצעות הכפתור למטה:"
-        )
-        appeal_kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="⚖️ ערער / בטל חיוב", callback_data=f"appeal_{new_debt_id or 0}")
-        ]])
-        await bot.send_message(driver_id, driver_txt, reply_markup=appeal_kb)
-    except Exception as e:
-        logging.warning(f"Could not send Telegram debt notification to driver {driver_id}: {e}")
-    
-    rate_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⭐ 1", callback_data=f"rate_{driver_id}_1"), 
-         InlineKeyboardButton(text="⭐⭐ 2", callback_data=f"rate_{driver_id}_2"), 
-         InlineKeyboardButton(text="⭐⭐⭐ 3", callback_data=f"rate_{driver_id}_3")],
-        [InlineKeyboardButton(text="⭐⭐⭐⭐ 4", callback_data=f"rate_{driver_id}_4"), 
-         InlineKeyboardButton(text="⭐⭐⭐⭐⭐ 5", callback_data=f"rate_{driver_id}_5")]
-    ])
-    await call.message.edit_text(f"✅ סגרת את קריאה #{order_id} על הנהג (נרשם חוב אוטומטי).\nאיך הנהג/הרכב נראה לך? דרג עכשיו:")
-    await call.message.edit_reply_markup(reply_markup=rate_kb)
-    await call.answer()
-
-@router.callback_query(F.data.startswith("rate_"))
-async def rate_driver(call: CallbackQuery):
-    _, driver_id, stars = call.data.split("_")
-    stars = int(stars)
-    if USE_POSTGRES:
-        def _rate_sync():
-            with get_pg_cursor() as cur:
-                cur.execute('SELECT rating, total_trips FROM deliveries_users WHERE user_id = %s', (driver_id,))
-                driver = cur.fetchone()
-                current_trips = max(driver['total_trips'], 1)
-                new_rating = round(((driver['rating'] * (current_trips - 1)) + stars) / current_trips, 1)
-                cur.execute('UPDATE deliveries_users SET rating = %s WHERE user_id = %s', (new_rating, driver_id))
-        await run_in_thread(_rate_sync)
-    else:
-        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-            db.row_factory = aiosqlite.Row
-            driver = await (await db.execute('SELECT rating, total_trips FROM deliveries_users WHERE user_id = ?', (driver_id,))).fetchone()
-            current_trips = max(driver['total_trips'], 1)
-            new_rating = round(((driver['rating'] * (current_trips - 1)) + stars) / current_trips, 1)
-            await db.execute('UPDATE deliveries_users SET rating = ? WHERE user_id = ?', (new_rating, driver_id))
-            await db.commit()
-        
-    await call.message.edit_text(f"✅ דירגת את הנהג ב-{stars} כוכבים. המערכת עודכנה.")
-    await call.answer()
-
-# ----------------- מערכת ERP: ניהול חובות וערעורים -----------------
-@router.message(F.text == "💳 חיובים וערעורים")
-async def show_debts(message: Message):
-    if USE_POSTGRES:
-        def _get_debts():
-            with get_pg_cursor() as cur:
-                cur.execute("SELECT * FROM deliveries_debts WHERE driver_id = %s AND status = 'unpaid'", (message.from_user.id,))
-                return cur.fetchall()
-        debts = await run_in_thread(_get_debts)
-    else:
-        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-            db.row_factory = aiosqlite.Row
-            debts = await (await db.execute("SELECT * FROM deliveries_debts WHERE driver_id = ? AND status = 'unpaid'", (message.from_user.id,))).fetchall()
-        
-    if not debts: return await message.answer("✅ אין לך חובות פתוחים במערכת.")
-        
-    for d in debts:
-        txt = f"🧾 **חיוב מתחנה {d['station_id']}**\nעבור קריאה #{d['order_id']}\n💰 סכום לתשלום: {d['amount']} ש\"ח\nסיבה: {d['reason']}"
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⚖️ ערעור / בקשת ביטול", callback_data=f"appeal_{d['debt_id']}")]])
-        await message.answer(txt, reply_markup=kb)
-
-@router.callback_query(F.data.startswith("appeal_"))
-async def start_appeal(call: CallbackQuery, state: FSMContext):
-    await state.update_data(debt_id=call.data.split("_")[1])
-    await state.set_state(DebtFlow.waiting_dispute_reason)
-    await call.message.answer("✍️ **מדוע אתה מבקש לבטל את החיוב הזה?**\nהקש את הסיבה (למשל: 'הלקוח ביטל'):", reply_markup=cancel_kb())
-    await call.answer()
-
-@router.message(DebtFlow.waiting_dispute_reason)
-async def process_appeal(message: Message, state: FSMContext):
-    data = await state.get_data()
-    driver = await get_user(message.from_user.id)
-    debt_id = data['debt_id']
-    
-    appeal_msg = f"⚖️ **ערעור על חיוב #{debt_id}**\nנהג: {driver['full_name']} (טל: {driver['phone']})\nסיבה: {message.text}"
-    admin_kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ אשר ביטול (מחק חוב)", callback_data=f"deldebt_{debt_id}_{driver['user_id']}"),
-         InlineKeyboardButton(text="❌ דחה ערעור (השאר חוב)", callback_data=f"keepdebt_{debt_id}_{driver['user_id']}")]
-    ])
-    
-    for admin_id in ADMIN_IDS:
-        try: await bot.send_message(admin_id, appeal_msg, reply_markup=admin_kb)
-        except Exception: pass
-            
-    await state.clear()
-    await message.answer("✅ הערעור נשלח להנהלה לבדיקה. תקבל עדכון בקרוב.", reply_markup=get_main_kb(driver['role'], driver['status']))
-
-@router.callback_query(F.data.startswith("deldebt_"))
-async def admin_del_debt(call: CallbackQuery):
-    _, debt_id, driver_id = call.data.split("_")
-    if USE_POSTGRES:
-        def _del_debt_sync():
-            with get_pg_cursor() as cur:
-                cur.execute('SELECT amount, status FROM deliveries_debts WHERE debt_id = %s', (debt_id,))
-                debt = cur.fetchone()
-                if debt and debt['status'] == 'unpaid':
-                    cur.execute("UPDATE deliveries_debts SET status = 'cancelled' WHERE debt_id = %s", (debt_id,))
-                    cur.execute('UPDATE deliveries_users SET debt_balance = debt_balance - %s WHERE user_id = %s', (debt['amount'], driver_id))
-                    return debt['amount'], True
-                return 0, False
-        amount, success = await run_in_thread(_del_debt_sync)
-        if success:
-            try:
-                await bot.send_message(driver_id, f"✅ **הערעור התקבל!** חוב של {amount} ש\"ח (עבור חיוב #{debt_id}) בוטל.")
-            except Exception: pass
-            await call.message.edit_text(f"✅ אישרת את הערעור ומחקת את חוב #{debt_id}.")
-        else:
-            await call.message.edit_text(f"⚠️ החוב #{debt_id} כבר טופל או שולם.")
-    else:
-        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-            db.row_factory = aiosqlite.Row
-            debt = await (await db.execute('SELECT amount, status FROM deliveries_debts WHERE debt_id = ?', (debt_id,))).fetchone()
-            if debt and debt['status'] == 'unpaid':
-                await db.execute('UPDATE deliveries_debts SET status = "cancelled" WHERE debt_id = ?', (debt_id,))
-                await db.execute('UPDATE deliveries_users SET debt_balance = debt_balance - ? WHERE user_id = ?', (debt['amount'], driver_id))
-                await db.commit()
-                try:
-                    await bot.send_message(driver_id, f"✅ **הערעור התקבל!** חוב של {debt['amount']} ש\"ח (עבור חיוב #{debt_id}) בוטל.")
-                except Exception: pass
-                await call.message.edit_text(f"✅ אישרת את הערעור ומחקת את חוב #{debt_id}.")
-            else:
-                await call.message.edit_text(f"⚠️ החוב #{debt_id} כבר טופל או שולם.")
-    await call.answer()
-
-@router.callback_query(F.data.startswith("keepdebt_"))
-async def admin_keep_debt(call: CallbackQuery):
-    _, debt_id, driver_id = call.data.split("_")
-    try:
-        await bot.send_message(driver_id, f"❌ **הערעור נדחה!** חיוב #{debt_id} נשאר בעינו ויש להסדירו מול התחנה.")
-    except Exception: pass
-    await call.message.edit_text(f"❌ דחית את הערעור על חוב #{debt_id}. החוב נשאר.")
-    await call.answer()
 
 # ----------------- God Mode וניהול תחנות -----------------
 @router.message(F.text.in_(["🛠️ פאנל מנהל מערכת", "🏢 ניהול תחנה ועובדים"]))
