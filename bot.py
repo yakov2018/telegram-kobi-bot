@@ -82,9 +82,25 @@ ROLE_NAMES = {
     "dispatcher": "סדרן",
     "user": "נהג / שליח"
 }
-CAR_BRANDS = ["יונדאי", "טויוטה", "קיה", "סקודה", "אחר (הקלדה ידנית)"]
+CAR_BRANDS = [
+    "יונדאי", "טויוטה", "קיה", "סקודה", "מאזדה", "שברולט", "ניסאן", "אחר (הקלדה ידנית)"
+]
+POPULAR_CITIES = [
+    "ירושלים", "בני ברק", "פתח תקווה", "תל אביב", 
+    "מודיעין עילית", "אשדוד", "בית שמש", "נתניה"
+]
 
 # ----------------- מצבים (FSM) -----------------
+class Onboarding(StatesGroup):
+    waiting_terms = State()       # שלב 1: אישור תקנון
+    waiting_contact = State()     # שלב 2: אימות טלפון חומרה
+    waiting_birth_year = State()   # שלב 3: אימות גיל (18+)
+    waiting_car_brand = State()    # שלב 4: מותג רכב
+    waiting_car_model = State()    # שלב 4: דגם רכב
+    waiting_car_year = State()     # שלב 4: שנת ייצור
+    waiting_car_seats = State()    # שלב 4: מספר מקומות ישיבה
+    waiting_cities = State()       # שלב 5: בחירת אזורי עבודה וקיצורי ערים
+
 class Reg(StatesGroup):
     name = State()
     birth_year = State()
@@ -325,16 +341,30 @@ def _init_db_sync():
         cur.execute('''CREATE INDEX IF NOT EXISTS idx_deliveries_debts_driver ON deliveries_debts(driver_id, status)''')
         cur.execute('''CREATE INDEX IF NOT EXISTS idx_deliveries_users_role ON deliveries_users(role)''')
 
+        # ניקוי שולחן (Wipe) שלב ב' - אכיפת רישום קפדני לכל המשתמשים הישנים
+        cur.execute("SELECT setting_value FROM deliveries_system_settings WHERE setting_key = 'wipe_stage_b'")
+        wipe_check = cur.fetchone()
+        if not wipe_check:
+            try:
+                cur.execute("TRUNCATE deliveries_users CASCADE")
+                cur.execute("TRUNCATE deliveries_driver_cities")
+                cur.execute("""INSERT INTO deliveries_system_settings (setting_key, setting_value) 
+                               VALUES ('wipe_stage_b', 'completed') 
+                               ON CONFLICT (setting_key) DO UPDATE SET setting_value = 'completed'""")
+                logging.info("🧹 בוצע ניקוי שולחן (TRUNCATE) מלא של טבלת המשתמשים והערים לאכיפת שלב ב'!")
+            except Exception as e:
+                logging.warning(f"Note on TRUNCATE deliveries_users: {e}")
+
         # תחנת ברירת מחדל
         cur.execute('''INSERT INTO deliveries_stations (station_id, name, commission_percent) 
                        VALUES (1, 'תחנה ראשית', 10.0) 
                        ON CONFLICT (station_id) DO NOTHING''')
 
-        # ביצור הרשאות מנהלי מערכת קבועים (552821474 ו-8644923212)
+        # ביצור הרשאות מנהלי מערכת קבועים (552821474 ו-8644923212) - מצב God Mode
         for admin_id in ADMIN_IDS:
-            cur.execute('''INSERT INTO deliveries_users (user_id, full_name, phone, birth_year, role, status, is_blocked)
-                           VALUES (%s, 'מנהל ראשי', '0500000000', 1990, 'admin', 'free', 0)
-                           ON CONFLICT (user_id) DO UPDATE SET role = 'admin', is_blocked = 0''', (admin_id,))
+            cur.execute('''INSERT INTO deliveries_users (user_id, full_name, phone, is_phone_verified, birth_year, role, status, is_blocked)
+                           VALUES (%s, 'מנהל ראשי', '0500000000', 1, 1990, 'admin', 'free', 0)
+                           ON CONFLICT (user_id) DO UPDATE SET role = 'admin', is_phone_verified = 1, is_blocked = 0''', (admin_id,))
 
         # הזנת מילון קיצורי ערים נפוצים
         city_seeds = [
@@ -401,12 +431,21 @@ async def init_db():
             await db.execute('''CREATE TABLE IF NOT EXISTS deliveries_bot_groups (
                 group_id INTEGER PRIMARY KEY, group_name TEXT)''')
                 
+            # ניקוי שולחן (Wipe) שלב ב' עבור SQLite
+            cursor = await db.execute("SELECT setting_value FROM deliveries_system_settings WHERE setting_key = 'wipe_stage_b'")
+            wipe_check = await cursor.fetchone()
+            if not wipe_check:
+                await db.execute("DELETE FROM deliveries_users")
+                await db.execute("DELETE FROM deliveries_driver_cities")
+                await db.execute("INSERT OR REPLACE INTO deliveries_system_settings (setting_key, setting_value) VALUES ('wipe_stage_b', 'completed')")
+                logging.info("🧹 בוצע ניקוי שולחן (SQLite) לאכיפת שלב ב'!")
+
             await db.execute('INSERT OR IGNORE INTO deliveries_stations (station_id, name, commission_percent) VALUES (1, "תחנה ראשית", 10.0)')
 
             for admin_id in ADMIN_IDS:
-                await db.execute('''INSERT INTO deliveries_users (user_id, full_name, phone, birth_year, role, status)
-                                   VALUES (?, 'מנהל ראשי', '0500000000', 1990, 'admin', 'free')
-                                   ON CONFLICT(user_id) DO UPDATE SET role = 'admin', is_blocked = 0''', (admin_id,))
+                await db.execute('''INSERT INTO deliveries_users (user_id, full_name, phone, is_phone_verified, birth_year, role, status)
+                                   VALUES (?, 'מנהל ראשי', '0500000000', 1, 1990, 'admin', 'free')
+                                   ON CONFLICT(user_id) DO UPDATE SET role = 'admin', is_phone_verified = 1, is_blocked = 0''', (admin_id,))
 
             city_seeds = [
                 ('ים', 'ירושלים'), ('י-ם', 'ירושלים'), ('עיר הקודש', 'ירושלים'),
@@ -434,6 +473,48 @@ async def get_user(user_id):
         async with aiosqlite.connect(SQLITE_DB_FILE) as db:
             db.row_factory = aiosqlite.Row
             return await (await db.execute('SELECT * FROM deliveries_users WHERE user_id = ?', (user_id,))).fetchone()
+
+def resolve_city_name_sync(city_input: str) -> str:
+    """זיהוי ונירמול שמות ערים מתוך מאגר הקיצורים deliveries_city_aliases (למשל 'ים' -> 'ירושלים', 'בב' -> 'בני ברק')"""
+    cleaned = city_input.strip()
+    if not cleaned:
+        return ""
+    if USE_POSTGRES:
+        with get_pg_cursor() as cur:
+            cur.execute("SELECT standard_city FROM deliveries_city_aliases WHERE alias = %s", (cleaned,))
+            res = cur.fetchone()
+            if res:
+                return res['standard_city']
+    else:
+        import sqlite3
+        conn = sqlite3.connect(SQLITE_DB_FILE)
+        cur = conn.cursor()
+        cur.execute("SELECT standard_city FROM deliveries_city_aliases WHERE alias = ?", (cleaned,))
+        res = cur.fetchone()
+        conn.close()
+        if res:
+            return res[0]
+    return cleaned
+
+async def resolve_city_name(city_input: str) -> str:
+    return await run_in_thread(resolve_city_name_sync, city_input)
+
+def build_cities_selection_kb(selected_cities: list) -> InlineKeyboardMarkup:
+    buttons = []
+    row = []
+    for city in POPULAR_CITIES:
+        is_sel = city in selected_cities
+        prefix = "✅ " if is_sel else "▫️ "
+        row.append(InlineKeyboardButton(text=f"{prefix}{city}", callback_data=f"ob_city_{city}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    
+    count_txt = f" ({len(selected_cities)} נבחרו)" if selected_cities else ""
+    buttons.append([InlineKeyboardButton(text=f"🚀 סיום הרשמה וכניסה למערכת{count_txt}", callback_data="ob_finish")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # ----------------- תבנית HTML מלאה ומשולבת עבור Telegram Mini App -----------------
 # תבנית זו מבטיחה שלעולם לא יופיע טקסט יבש, אלא ממשק ה-ERP המלא בתוך טלגרם!
@@ -1006,6 +1087,61 @@ async def handle_api_stations(request):
             rows = await (await db.execute("SELECT station_id, name, commission_percent, is_active FROM deliveries_stations ORDER BY station_id ASC")).fetchall()
     return cors_json_response({"ok": True, "stations": [dict(r) for r in rows]})
 
+async def handle_api_driver_profile(request):
+    """קבלת פרטי רכב וערי עבודה מה-Mini App ושמירתם ב-deliveries_users וב-deliveries_driver_cities"""
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+
+    init_data = data.get("initData") or request.headers.get("X-Telegram-Init-Data", "")
+    user_payload = validate_telegram_init_data(init_data)
+    user_id = None
+    if user_payload:
+        user_id = int(user_payload.get("id"))
+    elif data.get("user_id"):
+        user_id = int(data.get("user_id"))
+
+    if not user_id:
+        return cors_json_response({"ok": False, "error": "אימות משתמש נכשל"}, status=401)
+
+    car_brand = str(data.get("car_brand", "")).strip()
+    car_model = str(data.get("car_model", "")).strip()
+    car_year = int(data.get("car_year") or 2022)
+    car_seats = int(data.get("car_seats") or 4)
+    cities = data.get("cities") or []
+
+    if USE_POSTGRES:
+        def _update_profile_sync():
+            with get_pg_cursor() as cur:
+                cur.execute('''UPDATE deliveries_users 
+                               SET car_brand = %s, car_model = %s, car_year = %s, car_seats = %s
+                               WHERE user_id = %s''',
+                            (car_brand, car_model, car_year, car_seats, user_id))
+                
+                # עדכון ערי עבודה
+                cur.execute('DELETE FROM deliveries_driver_cities WHERE user_id = %s', (user_id,))
+                for city in cities:
+                    c = str(city).strip()
+                    if c:
+                        cur.execute('''INSERT INTO deliveries_driver_cities (user_id, city_name) 
+                                       VALUES (%s, %s) ON CONFLICT DO NOTHING''', (user_id, c))
+        await run_in_thread(_update_profile_sync)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            await db.execute('''UPDATE deliveries_users 
+                               SET car_brand = ?, car_model = ?, car_year = ?, car_seats = ?
+                               WHERE user_id = ?''',
+                            (car_brand, car_model, car_year, car_seats, user_id))
+            await db.execute('DELETE FROM deliveries_driver_cities WHERE user_id = ?', (user_id,))
+            for city in cities:
+                c = str(city).strip()
+                if c:
+                    await db.execute('INSERT OR IGNORE INTO deliveries_driver_cities (user_id, city_name) VALUES (?, ?)', (user_id, c))
+            await db.commit()
+
+    return cors_json_response({"ok": True, "message": "פרטי הרכב וערי העבודה נשמרו בהצלחה!"})
+
 async def start_web_server():
     app = web.Application()
     
@@ -1018,6 +1154,7 @@ async def start_web_server():
     app.router.add_post("/api/auth", handle_api_auth)
     app.router.add_get("/api/orders", handle_api_orders)
     app.router.add_post("/api/driver/status", handle_api_driver_status)
+    app.router.add_post("/api/driver/profile", handle_api_driver_profile)
     app.router.add_get("/api/stations", handle_api_stations)
 
     # 1. בדיקה אם קיימת תיקיית dist מקומפלת (React SPA)
@@ -1072,39 +1209,361 @@ def clean_order_text(text):
     text = text.replace("פת", "פתח תקווה").replace("ים", "ירושלים").replace("ספר", "מודיעין עילית")
     return text.strip()
 
-# ----------------- תפריט ראשי, ביטול והרשמה -----------------
+# ----------------- תפריט ראשי, ביטול והרשמה (שלב ב' - Onboarding FSM) -----------------
 @router.message(Command("start"))
 @router.message(F.text == "❌ ביטול וחזרה")
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     user_id = message.from_user.id
     
+    # 1. התנהגות God Mode למנהלים (בלי הרשמה כלל):
+    # עבור שני ה-IDs של מנהלי המערכת (552821474, 8644923212): הבוט מדלג לחלוטין על ההרשמה!
     if user_id in ADMIN_IDS:
         if USE_POSTGRES:
             def _admin_upsert():
                 with get_pg_cursor() as cur:
                     cur.execute('''INSERT INTO deliveries_users 
-                        (user_id, full_name, phone, birth_year, car_brand, car_model, car_year, role, station_id) 
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (user_id) DO UPDATE SET role = 'admin' ''', 
-                        (user_id, "מנהל מערכת", "0500000000", 1990, "מנהל", "מנהל", 2024, "admin", 1))
+                        (user_id, full_name, phone, is_phone_verified, birth_year, car_brand, car_model, car_year, role, status, is_blocked) 
+                        VALUES (%s, %s, %s, 1, %s, %s, %s, %s, 'admin', 'free', 0)
+                        ON CONFLICT (user_id) DO UPDATE SET role = 'admin', is_phone_verified = 1, is_blocked = 0''', 
+                        (user_id, message.from_user.full_name or "מנהל מערכת", "0500000000", 1990, "מנהל", "מנהל", 2024))
             await run_in_thread(_admin_upsert)
         else:
             async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-                await db.execute('''INSERT OR IGNORE INTO deliveries_users 
-                    (user_id, full_name, phone, birth_year, car_brand, car_model, car_year, role, station_id) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''', 
-                    (user_id, "מנהל מערכת", "0500000000", 1990, "מנהל", "מנהל", 2024, "admin", 1))
-                await db.execute('UPDATE deliveries_users SET role = "admin" WHERE user_id = ?', (user_id,))
+                await db.execute('''INSERT INTO deliveries_users 
+                    (user_id, full_name, phone, is_phone_verified, birth_year, car_brand, car_model, car_year, role, status, is_blocked) 
+                    VALUES (?, ?, ?, 1, ?, ?, ?, ?, 'admin', 'free', 0)
+                    ON CONFLICT(user_id) DO UPDATE SET role = 'admin', is_phone_verified = 1, is_blocked = 0''', 
+                    (user_id, message.from_user.full_name or "מנהל מערכת", "0500000000", 1990, "מנהל", "מנהל", 2024))
                 await db.commit()
 
+        admin_user = await get_user(user_id)
+        admin_status = admin_user['status'] if admin_user and 'status' in admin_user else 'free'
+        return await message.answer(
+            "👑 **שלום מנהל מערכת! מצב God Mode פעיל.**\n"
+            "ההרשאות שלך מאושרות לצמיתות ללא צורך בשום שלב הרשמה.\n"
+            "כל פאנלי הניהול, שיגור הקריאות והמיני אפליקציה זמינים עבורך:",
+            reply_markup=get_main_kb('admin', admin_status)
+        )
+
+    # בדיקת משתמש רגיל
     user = await get_user(user_id)
-    if not user:
-        await state.set_state(Reg.name)
-        return await message.answer("👋 ברוכים הבאים למערכת ה-ERP!\nאנא הקלד את **שמך המלא**:", reply_markup=ReplyKeyboardRemove())
+    if user and user.get('is_blocked'):
+        return await message.answer("❌ **חשבונך נחסם על ידי ההנהלה.** לבירורים פנה לשירות הלקוחות.")
+
+    # אם המשתמש כבר השלים את תהליך הקליטה במלואו (כולל טלפון מאומת ותקנון)
+    if user and user.get('is_phone_verified') and user.get('terms_accepted_at') and user.get('car_brand'):
+        return await message.answer("🎛️ **תפריט ראשי:**", reply_markup=get_main_kb(user['role'], user['status']))
+
+    # התחלת תהליך קליטה מסודר ומחמיר (שלב ב' - Onboarding FSM)
+    await state.set_state(Onboarding.waiting_terms)
+    terms_msg = (
+        "👋 **ברוך הבא למערכת ה-ERP וניהול המשלוחים!**\n\n"
+        "כדי להצטרף לצוות הנהגים והשליחים, יש להשלים תהליך קליטה מסודר ומאובטח:\n"
+        "1️⃣ **אישור תקנון ומדיניות פרטיות**\n"
+        "2️⃣ **אימות טלפון חומרתי מאובטח (למניעת התחזות)**\n"
+        "3️⃣ **אימות גיל (18 ומעלה)**\n"
+        "4️⃣ **הזנת פרטי רכב (מותג, דגם, שנת ייצור ומקומות)**\n"
+        "5️⃣ **בחירת אזורי עבודה מועדפים**\n\n"
+        "📜 *תקנון המערכת:* השימוש במערכת מחייב נהיגה זהירה, אמינות בביצוע נסיעות ותשלום עמלות בזמן.\n\n"
+        "לחץ על הכפתור למטה לאישור התקנון והמשך לשלב הבא:"
+    )
+    terms_kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ אני מאשר את התקנון ומדיניות הפרטיות", callback_data="ob_accept_terms")
+    ]])
+    return await message.answer(terms_msg, reply_markup=terms_kb)
+
+# -- שלב 1: אישור תקנון --
+@router.callback_query(F.data == "ob_accept_terms")
+async def ob_accept_terms(call: CallbackQuery, state: FSMContext):
+    await state.update_data(terms_accepted_at=datetime.now().isoformat())
+    await state.set_state(Onboarding.waiting_contact)
     
-    if user['is_blocked']: return await message.answer("❌ חשבונך נחסם.")
-    await message.answer("🎛️ **תפריט ראשי:**", reply_markup=get_main_kb(user['role'], user['status']))
+    contact_kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📱 שתף איש קשר לאימות", request_contact=True)],
+            [KeyboardButton(text="❌ ביטול וחזרה")]
+        ],
+        resize_keyboard=True
+    )
+    await call.message.answer(
+        "📱 **שלב 2/5: אימות טלפון חומרה**\n\n"
+        "לחץ על הכפתור למטה לשיתוף מספר הטלפון שלך.\n\n"
+        "⚠️ *שים לב: מטעמי אבטחה קפדניים, המערכת מאמתת חומרתית שמספר הטלפון שייך למשתמש הטלגרם שלך בלבד! לא ניתן להעלות איש קשר של אדם אחר.*",
+        reply_markup=contact_kb
+    )
+    await call.answer()
+
+# -- שלב 2: אימות טלפון חומרה עם בדיקת אבטחה --
+@router.message(Onboarding.waiting_contact)
+async def ob_contact(message: Message, state: FSMContext):
+    if message.text == "❌ ביטול וחזרה":
+        return await cmd_start(message, state)
+
+    contact_kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📱 שתף איש קשר לאימות", request_contact=True)],
+            [KeyboardButton(text="❌ ביטול וחזרה")]
+        ],
+        resize_keyboard=True
+    )
+
+    if not message.contact:
+        return await message.answer("⚠️ **חובה ללחוץ על הכפתור '📱 שתף איש קשר לאימות' במקלדת למטה!**", reply_markup=contact_kb)
+
+    # בדיקת אבטחה קריטית: חובה שאיש הקשר שייך לאותו משתמש ולא הועבר מאדם אחר!
+    if message.contact.user_id != message.from_user.id:
+        return await message.answer(
+            "🚫 **ניסיון התחזות זוהה!**\n"
+            "חובה לשתף את איש הקשר שלך בלבד דרך הכפתור הייעודי (ולא להעביר איש קשר של אדם אחר).",
+            reply_markup=contact_kb
+        )
+
+    raw_phone = message.contact.phone_number.replace("+", "").replace("-", "").replace(" ", "")
+    if not raw_phone.startswith("05") and not raw_phone.startswith("9725"):
+        return await message.answer("⚠️ מספר הטלפון חייב להיות מספר ישראלי חוקי (המתחיל ב-05 או +9725).", reply_markup=contact_kb)
+
+    phone = "0" + raw_phone[3:] if raw_phone.startswith("972") else raw_phone
+    full_name = message.from_user.full_name or "נהג"
+    username = message.from_user.username or ""
+
+    await state.update_data(phone=phone, full_name=full_name, username=username, is_phone_verified=1)
+    await state.set_state(Onboarding.waiting_birth_year)
+
+    await message.answer(
+        f"✅ הטלפון **{phone}** אומת חומרתית בהצלחה!\n\n"
+        "📅 **שלב 3/5: אימות גיל (18 ומעלה)**\n"
+        "הקלד את **שנת הלידה שלך** ב-4 ספרות (לדוגמה: 1998):",
+        reply_markup=cancel_kb()
+    )
+
+# -- שלב 3: אימות גיל (18 ומעלה) --
+@router.message(Onboarding.waiting_birth_year)
+async def ob_birth_year(message: Message, state: FSMContext):
+    if message.text == "❌ ביטול וחזרה":
+        return await cmd_start(message, state)
+
+    text = message.text.strip()
+    if not text.isdigit() or len(text) != 4:
+        return await message.answer("⚠️ נא להזין שנת לידה תקינה ב-4 ספרות (לדוגמה: 1998):", reply_markup=cancel_kb())
+
+    birth_year = int(text)
+    current_year = datetime.now().year
+    age = current_year - birth_year
+
+    if age < 18:
+        await state.clear()
+        return await message.answer(
+            "❌ **ההרשמה נדחתה:** המערכת מיועדת לגילאי 18 ומעלה בלבד על פי חוק ותקנון המערכת.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+
+    if age > 95 or birth_year < 1930:
+        return await message.answer("⚠️ נא להזין שנת לידה תקינה והגיונית (לדוגמה: 1995):", reply_markup=cancel_kb())
+
+    await state.update_data(birth_year=birth_year)
+    await state.set_state(Onboarding.waiting_car_brand)
+
+    brands_kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=CAR_BRANDS[0]), KeyboardButton(text=CAR_BRANDS[1])],
+            [KeyboardButton(text=CAR_BRANDS[2]), KeyboardButton(text=CAR_BRANDS[3])],
+            [KeyboardButton(text=CAR_BRANDS[4]), KeyboardButton(text=CAR_BRANDS[5])],
+            [KeyboardButton(text=CAR_BRANDS[6]), KeyboardButton(text=CAR_BRANDS[7])],
+            [KeyboardButton(text="❌ ביטול וחזרה")]
+        ],
+        resize_keyboard=True
+    )
+    await message.answer(
+        f"✅ גיל מאושר ({age} שנים).\n\n"
+        "🚗 **שלב 4/5: פרטי רכב**\n"
+        "בחר את **יצרן הרכב** שלך מהרשימה או בחר 'אחר (הקלדה ידנית)':",
+        reply_markup=brands_kb
+    )
+
+# -- שלב 4: מותג, דגם, שנת ייצור ומקומות ישיבה --
+@router.message(Onboarding.waiting_car_brand)
+async def ob_car_brand(message: Message, state: FSMContext):
+    if message.text == "❌ ביטול וחזרה":
+        return await cmd_start(message, state)
+
+    if message.text == "אחר (הקלדה ידנית)":
+        return await message.answer("✍️ הקלד את שם חברת הרכב שלך (למשל: סובארו, פולקסווגן, פיג'ו):", reply_markup=cancel_kb())
+
+    car_brand = message.text.strip()
+    await state.update_data(car_brand=car_brand)
+    await state.set_state(Onboarding.waiting_car_model)
+    await message.answer(f"✅ יצרן: **{car_brand}**\n\n✍️ הקלד כעת את **דגם הרכב** (לדוגמה: קורולה, איוניק, אוקטביה, ספורטאז'):", reply_markup=cancel_kb())
+
+@router.message(Onboarding.waiting_car_model)
+async def ob_car_model(message: Message, state: FSMContext):
+    if message.text == "❌ ביטול וחזרה":
+        return await cmd_start(message, state)
+
+    car_model = message.text.strip()
+    await state.update_data(car_model=car_model)
+    await state.set_state(Onboarding.waiting_car_year)
+    await message.answer("📅 הקלד את **שנת ייצור הרכב** (לדוגמה: 2021):", reply_markup=cancel_kb())
+
+@router.message(Onboarding.waiting_car_year)
+async def ob_car_year(message: Message, state: FSMContext):
+    if message.text == "❌ ביטול וחזרה":
+        return await cmd_start(message, state)
+
+    text = message.text.strip()
+    if not text.isdigit() or int(text) < 1995 or int(text) > 2027:
+        return await message.answer("⚠️ נא להזין שנת ייצור תקינה במספרים (לדוגמה: 2020):", reply_markup=cancel_kb())
+
+    car_year = int(text)
+    await state.update_data(car_year=car_year)
+    await state.set_state(Onboarding.waiting_car_seats)
+
+    seats_kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=str(i)) for i in [4, 5, 6, 7, 8]],
+            [KeyboardButton(text="❌ ביטול וחזרה")]
+        ],
+        resize_keyboard=True
+    )
+    await message.answer("💺 כמה **מקומות ישיבה** יש ברכב (כולל נהג)?", reply_markup=seats_kb)
+
+@router.message(Onboarding.waiting_car_seats)
+async def ob_car_seats(message: Message, state: FSMContext):
+    if message.text == "❌ ביטול וחזרה":
+        return await cmd_start(message, state)
+
+    text = message.text.strip()
+    if not text.isdigit() or int(text) < 2 or int(text) > 10:
+        return await message.answer("⚠️ נא לבחור מספר מקומות תקין (4, 5, 6, 7, 8):")
+
+    car_seats = int(text)
+    await state.update_data(car_seats=car_seats, selected_cities=[])
+    await state.set_state(Onboarding.waiting_cities)
+
+    kb = build_cities_selection_kb([])
+    await message.answer(
+        "📍 **שלב 5/5: בחירת אזורי עבודה**\n\n"
+        "בחר ערים שבהן תרצה לקבל קריאות (לחץ על עיר לבחירה/הסרה).\n"
+        "תוכל גם **להקליד כל עיר או קיצור** בצ'אט (למשל: 'ים', 'בב', 'תא', 'קס', 'אשדוד')!\n\n"
+        "בסיום לחץ על כפתור הסיום למטה:",
+        reply_markup=kb
+    )
+
+# -- שלב 5: בחירת ערים, זיהוי קיצורים וסיום הרשמה --
+@router.callback_query(F.data.startswith("ob_city_"))
+async def ob_toggle_city(call: CallbackQuery, state: FSMContext):
+    city = call.data.replace("ob_city_", "").strip()
+    data = await state.get_data()
+    selected_cities = list(data.get('selected_cities', []))
+    if city in selected_cities:
+        selected_cities.remove(city)
+    else:
+        selected_cities.append(city)
+    await state.update_data(selected_cities=selected_cities)
+    kb = build_cities_selection_kb(selected_cities)
+    try:
+        await call.message.edit_reply_markup(reply_markup=kb)
+    except Exception:
+        pass
+    action_str = "נוספה לרשימה" if city in selected_cities else "הוסרה מהרשימה"
+    await call.answer(f"{city} {action_str}")
+
+@router.message(Onboarding.waiting_cities)
+async def ob_type_city(message: Message, state: FSMContext):
+    if message.text == "❌ ביטול וחזרה":
+        return await cmd_start(message, state)
+
+    if message.text in ["סיום", "סיימתי", "אישור"]:
+        return await finalize_onboarding(message, state)
+
+    city_input = message.text.strip()
+    resolved_city = await resolve_city_name(city_input)
+    
+    data = await state.get_data()
+    selected_cities = list(data.get('selected_cities', []))
+    if resolved_city not in selected_cities:
+        selected_cities.append(resolved_city)
+        await state.update_data(selected_cities=selected_cities)
+        kb = build_cities_selection_kb(selected_cities)
+        alias_note = f" (זוהה מקיצור '{city_input}')" if resolved_city != city_input else ""
+        await message.answer(
+            f"✅ נוספה העיר: **{resolved_city}**{alias_note}\nסך הכל נבחרו {len(selected_cities)} ערים.\nתוכל להקליד עוד או ללחוץ על סיום למטה:",
+            reply_markup=kb
+        )
+    else:
+        await message.answer(
+            f"ℹ️ העיר **{resolved_city}** כבר קיימת ברשימה שלך.",
+            reply_markup=build_cities_selection_kb(selected_cities)
+        )
+
+@router.callback_query(F.data == "ob_finish")
+async def ob_finish_callback(call: CallbackQuery, state: FSMContext):
+    await finalize_onboarding(call.message, state, user_id=call.from_user.id, username=call.from_user.username)
+    await call.answer()
+
+async def finalize_onboarding(message: Message, state: FSMContext, user_id: int = None, username: str = None):
+    data = await state.get_data()
+    uid = user_id or message.from_user.id
+    uname = username or getattr(message.from_user, 'username', '')
+    full_name = data.get('full_name') or getattr(message.from_user, 'full_name', 'נהג')
+    phone = data.get('phone', '0500000000')
+    birth_year = data.get('birth_year', 1995)
+    car_brand = data.get('car_brand', 'טויוטה')
+    car_model = data.get('car_model', 'קורולה')
+    car_year = data.get('car_year', 2022)
+    car_seats = data.get('car_seats', 5)
+    terms_at = data.get('terms_accepted_at') or datetime.now().isoformat()
+    cities = data.get('selected_cities', [])
+    if not cities:
+        cities = ["ירושלים", "בני ברק"]  # ערי ברירת מחדל
+
+    if USE_POSTGRES:
+        def _save_driver_sync():
+            with get_pg_cursor() as cur:
+                cur.execute('''INSERT INTO deliveries_users 
+                               (user_id, telegram_username, full_name, phone, is_phone_verified, birth_year, terms_accepted_at,
+                                car_brand, car_model, car_year, car_seats, role, status, is_blocked, subscription_plan)
+                               VALUES (%s, %s, %s, %s, 1, %s, %s, %s, %s, %s, %s, 'user', 'busy', 0, 'free')
+                               ON CONFLICT (user_id) DO UPDATE SET 
+                               telegram_username = EXCLUDED.telegram_username, full_name = EXCLUDED.full_name, phone = EXCLUDED.phone, 
+                               is_phone_verified = 1, birth_year = EXCLUDED.birth_year, terms_accepted_at = EXCLUDED.terms_accepted_at,
+                               car_brand = EXCLUDED.car_brand, car_model = EXCLUDED.car_model, car_year = EXCLUDED.car_year, 
+                               car_seats = EXCLUDED.car_seats, role = 'user', is_blocked = 0''',
+                            (uid, uname, full_name, phone, birth_year, terms_at, car_brand, car_model, car_year, car_seats))
+                
+                cur.execute("DELETE FROM deliveries_driver_cities WHERE user_id = %s", (uid,))
+                for c in cities:
+                    cur.execute('''INSERT INTO deliveries_driver_cities (user_id, city_name) 
+                                   VALUES (%s, %s) ON CONFLICT DO NOTHING''', (uid, c))
+        await run_in_thread(_save_driver_sync)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            await db.execute('''INSERT INTO deliveries_users 
+                               (user_id, telegram_username, full_name, phone, is_phone_verified, birth_year, terms_accepted_at,
+                                car_brand, car_model, car_year, car_seats, role, status, is_blocked, subscription_plan)
+                               VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 'user', 'busy', 0, 'free')
+                               ON CONFLICT (user_id) DO UPDATE SET 
+                               telegram_username = excluded.telegram_username, full_name = excluded.full_name, phone = excluded.phone, 
+                               is_phone_verified = 1, birth_year = excluded.birth_year, terms_accepted_at = excluded.terms_accepted_at,
+                               car_brand = excluded.car_brand, car_model = excluded.car_model, car_year = excluded.car_year, 
+                               car_seats = excluded.car_seats, role = 'user', is_blocked = 0''',
+                            (uid, uname, full_name, phone, birth_year, terms_at, car_brand, car_model, car_year, car_seats))
+            await db.execute("DELETE FROM deliveries_driver_cities WHERE user_id = ?", (uid,))
+            for c in cities:
+                await db.execute("INSERT OR IGNORE INTO deliveries_driver_cities (user_id, city_name) VALUES (?, ?)", (uid, c))
+            await db.commit()
+
+    await state.clear()
+    cities_txt = ", ".join(cities)
+    welcome_txt = (
+        f"🎉 **ברכות, {full_name}! תהליך הקליטה הושלם בהצלחה!**\n\n"
+        f"📱 טלפון מאומת: {phone}\n"
+        f"🚗 רכב: {car_brand} {car_model} ({car_year}) • {car_seats} מקומות\n"
+        f"📍 אזורי עבודה נבחרים: {cities_txt}\n\n"
+        "🔴 כרגע אתה בסטטוס: **תפוס** (עצור קריאות).\n"
+        "כדי להתחיל לקבל קריאות באזורים שלך, לחץ על **🟢 פנוי לעבודה** בתפריט למטה:"
+    )
+    await message.answer(welcome_txt, reply_markup=get_main_kb('user', 'busy'))
 
 # -- הרשמה מלאה וגמישה --
 @router.message(Reg.name)

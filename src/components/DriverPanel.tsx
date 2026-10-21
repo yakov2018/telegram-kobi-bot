@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import {
   Car,
@@ -14,7 +14,12 @@ import {
   Plus,
   Scale,
   ShieldAlert,
+  Settings,
+  Sparkles,
+  X,
 } from 'lucide-react';
+import { getIsraelCities, getVehicleBrandsAndModels } from '../utils/datasets';
+import { AutocompleteInput } from './AutocompleteInput';
 
 export const DriverPanel: React.FC = () => {
   const {
@@ -29,9 +34,29 @@ export const DriverPanel: React.FC = () => {
     toggleDriverStatus,
     submitOrderBid,
     submitDebtAppeal,
+    updateUserRoleAndStation,
   } = useApp();
 
+  const [allCities, setAllCities] = useState<string[]>([]);
+  const [vehicleData, setVehicleData] = useState<Record<string, string[]>>({});
   const [newCityInput, setNewCityInput] = useState('');
+
+  // Load datasets on mount
+  useEffect(() => {
+    getIsraelCities().then((cities) => setAllCities(cities));
+    getVehicleBrandsAndModels().then((data) => setVehicleData(data));
+  }, []);
+
+  // Vehicle Profile Modal state
+  const [isVehicleModalOpen, setIsVehicleModalOpen] = useState(false);
+  const [vehicleForm, setVehicleForm] = useState({
+    car_brand: currentUser.car_brand || 'טויוטה',
+    car_model: currentUser.car_model || 'קורולה',
+    car_year: currentUser.car_year || 2022,
+    car_seats: currentUser.car_seats || 5,
+  });
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
+
   const [etaModal, setEtaModal] = useState<{ isOpen: boolean; orderId: number; price: number; text: string }>({
     isOpen: false,
     orderId: 0,
