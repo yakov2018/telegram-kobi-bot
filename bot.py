@@ -1600,6 +1600,90 @@ async def handle_options(request):
 async def handle_ping(request):
     return web.Response(text="ERP Master Alive! WebApp is serving.")
 
+async def get_driver_cities(user_id: int) -> list:
+    """שליפת רשימת הערים האמיתיות של הנהג מטבלת deliveries_driver_cities"""
+    if not user_id:
+        return []
+    if USE_POSTGRES:
+        def _get():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT city_name FROM deliveries_driver_cities WHERE user_id = %s ORDER BY city_name ASC", (user_id,))
+                return [r['city_name'] for r in cur.fetchall()]
+        return await run_in_thread(_get)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            rows = await (await db.execute("SELECT city_name FROM deliveries_driver_cities WHERE user_id = ? ORDER BY city_name ASC", (user_id,))).fetchall()
+            return [r[0] for r in rows]
+
+async def handle_api_driver_cities_get(request):
+    """שליפת ערי עבודה של נהג מתוך deliveries_driver_cities עבור המיני-אפליקציה"""
+    user_id = request.query.get("user_id")
+    if not user_id:
+        return cors_json_response({"ok": False, "error": "user_id חובה"}, status=400)
+    cities = await get_driver_cities(int(user_id))
+    return cors_json_response({"ok": True, "cities": cities})
+
+async def handle_api_driver_cities_add(request):
+    """הוספת עיר עבודה לנהג ב-deliveries_driver_cities ישירות מהאפליקציה"""
+    try: data = await request.json()
+    except Exception: data = {}
+    user_id = data.get("user_id")
+    city_name = (data.get("city_name") or "").strip()
+    if not user_id or not city_name:
+        return cors_json_response({"ok": False, "error": "user_id ו-city_name חובה"}, status=400)
+    user_id = int(user_id)
+    if USE_POSTGRES:
+        def _add():
+            with get_pg_cursor() as cur:
+                cur.execute("INSERT INTO deliveries_driver_cities (user_id, city_name) VALUES (%s, %s) ON CONFLICT DO NOTHING", (user_id, city_name))
+        await run_in_thread(_add)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            await db.execute("INSERT OR IGNORE INTO deliveries_driver_cities (user_id, city_name) VALUES (?, ?)", (user_id, city_name))
+            await db.commit()
+    cities = await get_driver_cities(user_id)
+    return cors_json_response({"ok": True, "cities": cities})
+
+async def handle_api_driver_cities_remove(request):
+    """הסרת עיר עבודה לנהג מ-deliveries_driver_cities ישירות מהאפליקציה"""
+    try: data = await request.json()
+    except Exception: data = {}
+    user_id = data.get("user_id")
+    city_name = (data.get("city_name") or "").strip()
+    if not user_id or not city_name:
+        return cors_json_response({"ok": False, "error": "user_id ו-city_name חובה"}, status=400)
+    user_id = int(user_id)
+    if USE_POSTGRES:
+        def _rem():
+            with get_pg_cursor() as cur:
+                cur.execute("DELETE FROM deliveries_driver_cities WHERE user_id = %s AND city_name = %s", (user_id, city_name))
+        await run_in_thread(_rem)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            await db.execute("DELETE FROM deliveries_driver_cities WHERE user_id = ? AND city_name = ?", (user_id, city_name))
+            await db.commit()
+    cities = await get_driver_cities(user_id)
+    return cors_json_response({"ok": True, "cities": cities})
+
+async def handle_api_driver_cities_clear(request):
+    """ניקוי כל ערי העבודה לנהג ב-deliveries_driver_cities"""
+    try: data = await request.json()
+    except Exception: data = {}
+    user_id = data.get("user_id")
+    if not user_id:
+        return cors_json_response({"ok": False, "error": "user_id חובה"}, status=400)
+    user_id = int(user_id)
+    if USE_POSTGRES:
+        def _clr():
+            with get_pg_cursor() as cur:
+                cur.execute("DELETE FROM deliveries_driver_cities WHERE user_id = %s", (user_id,))
+        await run_in_thread(_clr)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            await db.execute("DELETE FROM deliveries_driver_cities WHERE user_id = ?", (user_id,))
+            await db.commit()
+    return cors_json_response({"ok": True, "cities": []})
+
 async def handle_api_auth(request):
     try:
         data = await request.json()
@@ -1795,6 +1879,8 @@ async def handle_api_driver_profile(request):
     car_model = str(data.get("car_model", "")).strip()
     car_year = int(data.get("car_year") or 2022)
     car_seats = int(data.get("car_seats") or 4)
+    # עדכון ערי עבודה אך ורק אם נשלחה רשימת ערים מפורשת בבקשה (מניעת איפוס ערים בעת שמירת רכב)
+    should_update_cities = ("cities" in data and isinstance(data["cities"], list))
     cities = data.get("cities") or []
 
     if USE_POSTGRES:
@@ -1805,13 +1891,13 @@ async def handle_api_driver_profile(request):
                                WHERE user_id = %s''',
                             (car_brand, car_model, car_year, car_seats, user_id))
                 
-                # עדכון ערי עבודה
-                cur.execute('DELETE FROM deliveries_driver_cities WHERE user_id = %s', (user_id,))
-                for city in cities:
-                    c = str(city).strip()
-                    if c:
-                        cur.execute('''INSERT INTO deliveries_driver_cities (user_id, city_name) 
-                                       VALUES (%s, %s) ON CONFLICT DO NOTHING''', (user_id, c))
+                if should_update_cities:
+                    cur.execute('DELETE FROM deliveries_driver_cities WHERE user_id = %s', (user_id,))
+                    for city in cities:
+                        c = str(city).strip()
+                        if c:
+                            cur.execute('''INSERT INTO deliveries_driver_cities (user_id, city_name) 
+                                           VALUES (%s, %s) ON CONFLICT DO NOTHING''', (user_id, c))
         await run_in_thread(_update_profile_sync)
     else:
         async with aiosqlite.connect(SQLITE_DB_FILE) as db:
@@ -1819,14 +1905,15 @@ async def handle_api_driver_profile(request):
                                SET car_brand = ?, car_model = ?, car_year = ?, car_seats = ?
                                WHERE user_id = ?''',
                             (car_brand, car_model, car_year, car_seats, user_id))
-            await db.execute('DELETE FROM deliveries_driver_cities WHERE user_id = ?', (user_id,))
-            for city in cities:
-                c = str(city).strip()
-                if c:
-                    await db.execute('INSERT OR IGNORE INTO deliveries_driver_cities (user_id, city_name) VALUES (?, ?)', (user_id, c))
+            if should_update_cities:
+                await db.execute('DELETE FROM deliveries_driver_cities WHERE user_id = ?', (user_id,))
+                for city in cities:
+                    c = str(city).strip()
+                    if c:
+                        await db.execute('INSERT OR IGNORE INTO deliveries_driver_cities (user_id, city_name) VALUES (?, ?)', (user_id, c))
             await db.commit()
 
-    return cors_json_response({"ok": True, "message": "פרטי הרכב וערי העבודה נשמרו בהצלחה!"})
+    return cors_json_response({"ok": True, "message": "פרטי הפרופיל נשמרו בהצלחה!"})
 
 # ----------------- נתיבי REST API נוספים לניהול מלא (CRUD) עבור ה-Mini App -----------------
 async def handle_api_users(request):
@@ -1973,29 +2060,72 @@ async def handle_api_debts(request):
     return cors_json_response({"ok": True, "debts": [dict(r) for r in rows]})
 
 async def handle_api_debts_charge(request):
-    """חיוב נהג ידני או הטלת קנס (רישום ביומן Ledger ועדכון debt_balance)"""
+    """חיוב נהג ידני או הטלת קנס (רישום ביומן Ledger, עדכון debt_balance והתראה מיידית לנהג בטלגרם עם כפתור ערעור)"""
     try: data = await request.json()
     except Exception: data = {}
     driver_id = int(data.get("driver_id") or 0)
     amount = float(data.get("amount") or 0)
-    reason = data.get("reason") or "חיוב ידני מנהל"
-    station_id = int(data.get("station_id") or 1)
+    reason = data.get("reason") or "חיוב ידני מנהל/סדרן"
+    station_id = int(data.get("station_id") or 0)
+    order_id = data.get("order_id")
+    order_id = int(order_id) if order_id else None
+
     if not driver_id or amount <= 0:
         return cors_json_response({"ok": False, "error": "פרמטרים לא תקינים"}, status=400)
+
+    station_name = "הנהלת המערכת"
+    new_debt_id = None
     if USE_POSTGRES:
         def _ch():
+            nonlocal station_id, station_name, new_debt_id
             with get_pg_cursor() as cur:
+                if not station_id:
+                    cur.execute("SELECT station_id FROM deliveries_users WHERE user_id = %s", (driver_id,))
+                    u_row = cur.fetchone()
+                    station_id = u_row['station_id'] if u_row and u_row['station_id'] else 1
+                cur.execute("SELECT name FROM deliveries_stations WHERE station_id = %s", (station_id,))
+                st_row = cur.fetchone()
+                if st_row:
+                    station_name = st_row['name']
                 cur.execute("""INSERT INTO deliveries_debts (order_id, driver_id, station_id, amount, reason, status, transaction_type)
-                               VALUES (NULL, %s, %s, %s, %s, 'unpaid', 'manual_charge')""", (driver_id, station_id, amount, reason))
+                               VALUES (%s, %s, %s, %s, %s, 'unpaid', 'manual_charge') RETURNING debt_id""", 
+                            (order_id, driver_id, station_id, amount, reason))
+                d_row = cur.fetchone()
+                new_debt_id = d_row['debt_id'] if d_row else None
                 cur.execute("UPDATE deliveries_users SET debt_balance = debt_balance + %s WHERE user_id = %s", (amount, driver_id))
         await run_in_thread(_ch)
     else:
         async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-            await db.execute("""INSERT INTO deliveries_debts (order_id, driver_id, station_id, amount, reason, status, transaction_type)
-                                VALUES (NULL, ?, ?, ?, ?, 'unpaid', 'manual_charge')""", (driver_id, station_id, amount, reason))
+            if not station_id:
+                u_row = await (await db.execute("SELECT station_id FROM deliveries_users WHERE user_id = ?", (driver_id,))).fetchone()
+                station_id = u_row[0] if u_row and u_row[0] else 1
+            st_row = await (await db.execute("SELECT name FROM deliveries_stations WHERE station_id = ?", (station_id,))).fetchone()
+            if st_row:
+                station_name = st_row[0]
+            c = await db.execute("""INSERT INTO deliveries_debts (order_id, driver_id, station_id, amount, reason, status, transaction_type)
+                                    VALUES (?, ?, ?, ?, ?, 'unpaid', 'manual_charge')""", 
+                                 (order_id, driver_id, station_id, amount, reason))
+            new_debt_id = c.lastrowid
             await db.execute("UPDATE deliveries_users SET debt_balance = debt_balance + ? WHERE user_id = ?", (amount, driver_id))
             await db.commit()
-    return cors_json_response({"ok": True})
+
+    # סעיף 4ג': שליחת הודעה מיידית לפרטי של הנהג עם תות 🍓 וכפתור "ערער / בטל חיוב"
+    try:
+        order_info = f"קריאה #{order_id}\n" if order_id else ""
+        driver_msg = (
+            f"🍓 **חויבת בעמלה על סך {amount:.2f} ש\"ח (🍓) בתחנה {station_name}!**\n\n"
+            f"📋 **פירוט החיוב:**\n"
+            f"{order_info}• סיבה: {reason}\n\n"
+            f"לבירורים או ביטול ניתן ללחוץ על הכפתור למטה:"
+        )
+        appeal_kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="⚖️ ערער / בטל חיוב", callback_data=f"appeal_{new_debt_id or 0}")
+        ]])
+        await bot.send_message(driver_id, driver_msg, reply_markup=appeal_kb)
+    except Exception as e:
+        logging.warning(f"Could not send Telegram debt notification to driver {driver_id}: {e}")
+
+    return cors_json_response({"ok": True, "debt_id": new_debt_id})
 
 async def handle_api_debts_credit(request):
     """זיכוי נהג, מחיקת חוב או אישור/דחיית ערעור"""
@@ -2004,12 +2134,21 @@ async def handle_api_debts_credit(request):
     driver_id = int(data.get("driver_id") or 0)
     amount = float(data.get("amount") or 0)
     debt_id = data.get("debt_id")
+    station_id = int(data.get("station_id") or 1)
     approve = data.get("approve", True)
+    reason = data.get("reason", "זיכוי מנהל")
     if not driver_id:
         return cors_json_response({"ok": False, "error": "driver_id חובה"}, status=400)
+    
+    station_name = "הנהלת המערכת"
     if USE_POSTGRES:
         def _cr():
+            nonlocal station_name
             with get_pg_cursor() as cur:
+                cur.execute("SELECT name FROM deliveries_stations WHERE station_id = %s", (station_id,))
+                st_row = cur.fetchone()
+                if st_row:
+                    station_name = st_row['name']
                 if debt_id:
                     if approve:
                         cur.execute("UPDATE deliveries_debts SET status = 'cancelled', appeal_status = 'approved' WHERE debt_id = %s", (int(debt_id),))
@@ -2018,11 +2157,14 @@ async def handle_api_debts_credit(request):
                         cur.execute("UPDATE deliveries_debts SET appeal_status = 'rejected' WHERE debt_id = %s", (int(debt_id),))
                 else:
                     cur.execute("""INSERT INTO deliveries_debts (order_id, driver_id, station_id, amount, reason, status, transaction_type)
-                                   VALUES (NULL, %s, 1, %s, %s, 'paid', 'manual_credit')""", (driver_id, amount, data.get("reason", "זיכוי מנהל")))
+                                   VALUES (NULL, %s, %s, %s, %s, 'paid', 'manual_credit')""", (driver_id, station_id, amount, reason))
                     cur.execute("UPDATE deliveries_users SET debt_balance = GREATEST(0, debt_balance - %s) WHERE user_id = %s", (amount, driver_id))
         await run_in_thread(_cr)
     else:
         async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            st_row = await (await db.execute("SELECT name FROM deliveries_stations WHERE station_id = ?", (station_id,))).fetchone()
+            if st_row:
+                station_name = st_row[0]
             if debt_id:
                 if approve:
                     await db.execute("UPDATE deliveries_debts SET status = 'cancelled', appeal_status = 'approved' WHERE debt_id = ?", (int(debt_id),))
@@ -2031,10 +2173,150 @@ async def handle_api_debts_credit(request):
                     await db.execute("UPDATE deliveries_debts SET appeal_status = 'rejected' WHERE debt_id = ?", (int(debt_id),))
             else:
                 await db.execute("""INSERT INTO deliveries_debts (order_id, driver_id, station_id, amount, reason, status, transaction_type)
-                                    VALUES (NULL, ?, 1, ?, ?, 'paid', 'manual_credit')""", (driver_id, amount, data.get("reason", "זיכוי מנהל")))
+                                    VALUES (NULL, ?, ?, ?, ?, 'paid', 'manual_credit')""", (driver_id, station_id, amount, reason))
                 await db.execute("UPDATE deliveries_users SET debt_balance = MAX(0, debt_balance - ?) WHERE user_id = ?", (amount, driver_id))
             await db.commit()
+
+    # התראה לנהג בטלגרם
+    try:
+        if debt_id:
+            if approve:
+                await bot.send_message(driver_id, f"✅ **הערעור התקבל!** חוב של {amount} ש\"ח (עבור חיוב #{debt_id}) בוטל בהצלחה.")
+            else:
+                await bot.send_message(driver_id, f"❌ **הערעור נדחה!** חיוב #{debt_id} נשאר בעינו ויש להסדירו מול התחנה.")
+        else:
+            await bot.send_message(driver_id, f"🍏 **קיבלת זיכוי על סך {amount:.2f} ש\"ח (🍏) בתחנה {station_name}!**\nסיבה: {reason}")
+    except Exception:
+        pass
+
     return cors_json_response({"ok": True})
+
+async def handle_api_debts_update(request):
+    """CRUD: עריכת פרטי חיוב קיים (סכום, סיבה, תחנה, סטטוס) ועדכון debt_balance בהתאם להפרש"""
+    try: data = await request.json()
+    except Exception: data = {}
+    debt_id = data.get("debt_id")
+    if not debt_id:
+        return cors_json_response({"ok": False, "error": "debt_id חובה"}, status=400)
+    debt_id = int(debt_id)
+
+    new_amount = float(data["amount"]) if "amount" in data and data["amount"] is not None else None
+    new_reason = data.get("reason")
+    new_station_id = int(data["station_id"]) if "station_id" in data and data["station_id"] is not None else None
+    new_status = data.get("status")
+
+    if USE_POSTGRES:
+        def _update_debt():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT debt_id, driver_id, amount, status FROM deliveries_debts WHERE debt_id = %s", (debt_id,))
+                debt = cur.fetchone()
+                if not debt:
+                    return False, "חיוב לא נמצא"
+                old_amount = float(debt['amount'])
+                old_status = debt['status']
+                driver_id = debt['driver_id']
+
+                updates = []
+                params = []
+                if new_amount is not None:
+                    updates.append("amount = %s")
+                    params.append(new_amount)
+                if new_reason is not None:
+                    updates.append("reason = %s")
+                    params.append(new_reason)
+                if new_station_id is not None:
+                    updates.append("station_id = %s")
+                    params.append(new_station_id)
+                if new_status is not None:
+                    updates.append("status = %s")
+                    params.append(new_status)
+
+                if updates:
+                    params.append(debt_id)
+                    cur.execute(f"UPDATE deliveries_debts SET {', '.join(updates)} WHERE debt_id = %s", tuple(params))
+
+                effective_old = old_amount if old_status == 'unpaid' else 0.0
+                curr_status = new_status if new_status is not None else old_status
+                curr_amount = new_amount if new_amount is not None else old_amount
+                effective_new = curr_amount if curr_status == 'unpaid' else 0.0
+                diff = effective_new - effective_old
+                if diff != 0:
+                    cur.execute("UPDATE deliveries_users SET debt_balance = GREATEST(0, debt_balance + %s) WHERE user_id = %s", (diff, driver_id))
+                return True, None
+        ok, err = await run_in_thread(_update_debt)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            debt = await (await db.execute("SELECT debt_id, driver_id, amount, status FROM deliveries_debts WHERE debt_id = ?", (debt_id,))).fetchone()
+            if not debt:
+                return cors_json_response({"ok": False, "error": "חיוב לא נמצא"}, status=404)
+            old_amount = float(debt['amount'])
+            old_status = debt['status']
+            driver_id = debt['driver_id']
+
+            updates = []
+            params = []
+            if new_amount is not None:
+                updates.append("amount = ?")
+                params.append(new_amount)
+            if new_reason is not None:
+                updates.append("reason = ?")
+                params.append(new_reason)
+            if new_station_id is not None:
+                updates.append("station_id = ?")
+                params.append(new_station_id)
+            if new_status is not None:
+                updates.append("status = ?")
+                params.append(new_status)
+
+            if updates:
+                params.append(debt_id)
+                await db.execute(f"UPDATE deliveries_debts SET {', '.join(updates)} WHERE debt_id = ?", tuple(params))
+
+            effective_old = old_amount if old_status == 'unpaid' else 0.0
+            curr_status = new_status if new_status is not None else old_status
+            curr_amount = new_amount if new_amount is not None else old_amount
+            effective_new = curr_amount if curr_status == 'unpaid' else 0.0
+            diff = effective_new - effective_old
+            if diff != 0:
+                await db.execute("UPDATE deliveries_users SET debt_balance = MAX(0, debt_balance + ?) WHERE user_id = ?", (diff, driver_id))
+            await db.commit()
+            ok, err = True, None
+
+    if not ok:
+        return cors_json_response({"ok": False, "error": err}, status=400)
+    return cors_json_response({"ok": True})
+
+async def handle_api_debts_delete(request):
+    """CRUD: מחיקת חיוב (ביטול והפחתת יתרה מהנהג)"""
+    try: data = await request.json()
+    except Exception: data = {}
+    debt_id = data.get("debt_id")
+    if not debt_id:
+        return cors_json_response({"ok": False, "error": "debt_id חובה"}, status=400)
+    debt_id = int(debt_id)
+
+    if USE_POSTGRES:
+        def _del():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT amount, status, driver_id FROM deliveries_debts WHERE debt_id = %s", (debt_id,))
+                row = cur.fetchone()
+                if row:
+                    if row['status'] == 'unpaid':
+                        cur.execute("UPDATE deliveries_users SET debt_balance = GREATEST(0, debt_balance - %s) WHERE user_id = %s", (row['amount'], row['driver_id']))
+                    cur.execute("DELETE FROM deliveries_debts WHERE debt_id = %s", (debt_id,))
+        await run_in_thread(_del)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            row = await (await db.execute("SELECT amount, status, driver_id FROM deliveries_debts WHERE debt_id = ?", (debt_id,))).fetchone()
+            if row:
+                if row['status'] == 'unpaid':
+                    await db.execute("UPDATE deliveries_users SET debt_balance = MAX(0, debt_balance - ?) WHERE user_id = ?", (row['amount'], row['driver_id']))
+                await db.execute("DELETE FROM deliveries_debts WHERE debt_id = ?", (debt_id,))
+                await db.commit()
+    return cors_json_response({"ok": True})
+
 
 async def handle_api_settings_get(request):
     """שליפת הגדרות מערכת וקיצורי ערים (NLP)"""
@@ -2123,6 +2405,10 @@ async def start_web_server():
     app.router.add_get("/api/orders", handle_api_orders)
     app.router.add_post("/api/driver/status", handle_api_driver_status)
     app.router.add_post("/api/driver/profile", handle_api_driver_profile)
+    app.router.add_get("/api/driver/cities", handle_api_driver_cities_get)
+    app.router.add_post("/api/driver/cities/add", handle_api_driver_cities_add)
+    app.router.add_post("/api/driver/cities/remove", handle_api_driver_cities_remove)
+    app.router.add_post("/api/driver/cities/clear", handle_api_driver_cities_clear)
     app.router.add_get("/api/stations", handle_api_stations)
     app.router.add_post("/api/stations/create", handle_api_stations_create)
     app.router.add_post("/api/stations/update", handle_api_stations_update)
@@ -2131,6 +2417,8 @@ async def start_web_server():
     app.router.add_get("/api/debts", handle_api_debts)
     app.router.add_post("/api/debts/charge", handle_api_debts_charge)
     app.router.add_post("/api/debts/credit", handle_api_debts_credit)
+    app.router.add_post("/api/debts/update", handle_api_debts_update)
+    app.router.add_post("/api/debts/delete", handle_api_debts_delete)
     app.router.add_get("/api/settings", handle_api_settings_get)
     app.router.add_post("/api/settings", handle_api_settings_post)
     app.router.add_post("/api/broadcast", handle_api_broadcast)
@@ -2601,9 +2889,8 @@ async def finalize_onboarding(message: Message, state: FSMContext, user_id: int 
     car_year = data.get('car_year', 2022)
     car_seats = data.get('car_seats', 5)
     terms_at = data.get('terms_accepted_at') or datetime.now().isoformat()
+    has_custom_cities = bool(data.get('selected_cities'))
     cities = data.get('selected_cities', [])
-    if not cities:
-        cities = ["ירושלים", "בני ברק"]  # ערי ברירת מחדל
 
     if USE_POSTGRES:
         def _save_driver_sync():
@@ -2619,10 +2906,18 @@ async def finalize_onboarding(message: Message, state: FSMContext, user_id: int 
                                car_seats = EXCLUDED.car_seats, role = 'user', is_blocked = 0''',
                             (uid, uname, full_name, phone, birth_year, terms_at, car_brand, car_model, car_year, car_seats))
                 
-                cur.execute("DELETE FROM deliveries_driver_cities WHERE user_id = %s", (uid,))
-                for c in cities:
-                    cur.execute('''INSERT INTO deliveries_driver_cities (user_id, city_name) 
-                                   VALUES (%s, %s) ON CONFLICT DO NOTHING''', (uid, c))
+                if has_custom_cities:
+                    cur.execute("DELETE FROM deliveries_driver_cities WHERE user_id = %s", (uid,))
+                    for c in cities:
+                        cur.execute('''INSERT INTO deliveries_driver_cities (user_id, city_name) 
+                                       VALUES (%s, %s) ON CONFLICT DO NOTHING''', (uid, c))
+                else:
+                    cur.execute("SELECT count(*) as cnt FROM deliveries_driver_cities WHERE user_id = %s", (uid,))
+                    cnt_row = cur.fetchone()
+                    if not cnt_row or (cnt_row['cnt'] if isinstance(cnt_row, dict) else cnt_row[0]) == 0:
+                        for c in ["ירושלים", "בני ברק"]:
+                            cur.execute('''INSERT INTO deliveries_driver_cities (user_id, city_name) 
+                                           VALUES (%s, %s) ON CONFLICT DO NOTHING''', (uid, c))
         await run_in_thread(_save_driver_sync)
     else:
         async with aiosqlite.connect(SQLITE_DB_FILE) as db:
@@ -2636,9 +2931,15 @@ async def finalize_onboarding(message: Message, state: FSMContext, user_id: int 
                                car_brand = excluded.car_brand, car_model = excluded.car_model, car_year = excluded.car_year, 
                                car_seats = excluded.car_seats, role = 'user', is_blocked = 0''',
                             (uid, uname, full_name, phone, birth_year, terms_at, car_brand, car_model, car_year, car_seats))
-            await db.execute("DELETE FROM deliveries_driver_cities WHERE user_id = ?", (uid,))
-            for c in cities:
-                await db.execute("INSERT OR IGNORE INTO deliveries_driver_cities (user_id, city_name) VALUES (?, ?)", (uid, c))
+            if has_custom_cities:
+                await db.execute("DELETE FROM deliveries_driver_cities WHERE user_id = ?", (uid,))
+                for c in cities:
+                    await db.execute("INSERT OR IGNORE INTO deliveries_driver_cities (user_id, city_name) VALUES (?, ?)", (uid, c))
+            else:
+                cnt = (await (await db.execute("SELECT count(*) FROM deliveries_driver_cities WHERE user_id = ?", (uid,))).fetchone())[0]
+                if cnt == 0:
+                    for c in ["ירושלים", "בני ברק"]:
+                        await db.execute("INSERT OR IGNORE INTO deliveries_driver_cities (user_id, city_name) VALUES (?, ?)", (uid, c))
             await db.commit()
 
     await state.clear()
@@ -3224,25 +3525,29 @@ async def approve_driver(call: CallbackQuery):
                 order = cur.fetchone()
                 
                 if not order or order['status'] != 'open':
-                    return None, 0
+                    return None, 0, "", 0
                     
-                cur.execute('SELECT commission_percent FROM deliveries_stations WHERE station_id = %s', (order['station_id'],))
+                cur.execute('SELECT name, commission_percent FROM deliveries_stations WHERE station_id = %s', (order['station_id'],))
                 station = cur.fetchone()
+                station_name = station['name'] if station else f"תחנה #{order['station_id']}"
                 
                 cur.execute("UPDATE deliveries_orders SET status = 'closed', driver_id = %s WHERE order_id = %s", (driver_id, order_id))
                 
                 commission_rate = station['commission_percent'] if station else 10.0
                 debt_amount = order['price'] * (commission_rate / 100)
+                new_debt_id = 0
                 
                 if debt_amount > 0:
-                    cur.execute('INSERT INTO deliveries_debts (order_id, driver_id, station_id, amount, reason) VALUES (%s, %s, %s, %s, %s)', 
+                    cur.execute('INSERT INTO deliveries_debts (order_id, driver_id, station_id, amount, reason) VALUES (%s, %s, %s, %s, %s) RETURNING debt_id', 
                                 (order_id, driver_id, order['station_id'], debt_amount, f"עמלה {commission_rate}%"))
+                    d_row = cur.fetchone()
+                    new_debt_id = d_row['debt_id'] if d_row else 0
                     cur.execute('UPDATE deliveries_users SET debt_balance = debt_balance + %s, total_trips = total_trips + 1 WHERE user_id = %s', (debt_amount, driver_id))
                 else:
                     cur.execute('UPDATE deliveries_users SET total_trips = total_trips + 1 WHERE user_id = %s', (driver_id,))
-                return order, debt_amount
+                return order, debt_amount, station_name, new_debt_id
 
-        order, debt_amount = await run_in_thread(_approve_transaction)
+        order, debt_amount, station_name, new_debt_id = await run_in_thread(_approve_transaction)
         if order is None:
             return await call.answer("⚠️ הקריאה כבר נסגרה!", show_alert=True)
     else:
@@ -3253,16 +3558,19 @@ async def approve_driver(call: CallbackQuery):
             if not order or order['status'] != 'open':
                 return await call.answer("⚠️ הקריאה כבר נסגרה!", show_alert=True)
                 
-            station = await (await db.execute('SELECT commission_percent FROM deliveries_stations WHERE station_id = ?', (order['station_id'],))).fetchone()
+            station = await (await db.execute('SELECT name, commission_percent FROM deliveries_stations WHERE station_id = ?', (order['station_id'],))).fetchone()
+            station_name = station['name'] if station else f"תחנה #{order['station_id']}"
             
             await db.execute('UPDATE deliveries_orders SET status = "closed", driver_id = ? WHERE order_id = ?', (driver_id, order_id))
             
             commission_rate = station['commission_percent'] if station else 10.0
             debt_amount = order['price'] * (commission_rate / 100)
+            new_debt_id = 0
             
             if debt_amount > 0:
-                await db.execute('INSERT INTO deliveries_debts (order_id, driver_id, station_id, amount, reason) VALUES (?, ?, ?, ?, ?)', 
-                                 (order_id, driver_id, order['station_id'], debt_amount, f"עמלה {commission_rate}%"))
+                c = await db.execute('INSERT INTO deliveries_debts (order_id, driver_id, station_id, amount, reason) VALUES (?, ?, ?, ?, ?)', 
+                                     (order_id, driver_id, order['station_id'], debt_amount, f"עמלה {commission_rate}%"))
+                new_debt_id = c.lastrowid
                 await db.execute('UPDATE deliveries_users SET debt_balance = debt_balance + ?, total_trips = total_trips + 1 WHERE user_id = ?', (debt_amount, driver_id))
             else:
                 await db.execute('UPDATE deliveries_users SET total_trips = total_trips + 1 WHERE user_id = ?', (driver_id,))
@@ -3270,9 +3578,20 @@ async def approve_driver(call: CallbackQuery):
             await db.commit()
         
     try:
-        await bot.send_message(driver_id, f"🎉 **אושרת לקריאה #{order_id}!**\nסע בזהירות.\n(חויבת בעמלה של {debt_amount} ש\"ח לתחנה)")
-    except Exception:
-        pass
+        driver_txt = (
+            f"🎉 **אושרת לקריאה #{order_id}!**\n\n"
+            f"🍓 **חויבת בעמלה על סך {debt_amount:.2f} שקלים (🍓) בתחנה {station_name}!**\n\n"
+            f"📋 **פירוט הנסיעה:**\n"
+            f"{order['text']}\n"
+            f"💰 מחיר: ₪{order['price']}\n\n"
+            f"סע בזהירות! לשאלות או בירורים ניתן לערער באמצעות הכפתור למטה:"
+        )
+        appeal_kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="⚖️ ערער / בטל חיוב", callback_data=f"appeal_{new_debt_id or 0}")
+        ]])
+        await bot.send_message(driver_id, driver_txt, reply_markup=appeal_kb)
+    except Exception as e:
+        logging.warning(f"Could not send Telegram debt notification to driver {driver_id}: {e}")
     
     rate_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⭐ 1", callback_data=f"rate_{driver_id}_1"), 
@@ -3542,7 +3861,7 @@ async def main():
     except Exception as e:
         logging.warning(f"Could not set default menu button web app: {e}")
 
-    # מחיקת webhook ועדכונים ממתינים עם מרווח שחרור
+    # מחיקת webhook ועדכונים ממתינים לפני התחלת polling בודד
     try:
         await bot.delete_webhook(drop_pending_updates=True)
     except Exception as e:
@@ -3550,17 +3869,21 @@ async def main():
 
     await asyncio.sleep(1)
 
-    while True:
+    try:
+        logging.info("📡 Bot Polling started (single instance)...")
+        # הרצת polling פעם אחת בלבד ללא לולאת restart פנימית שגורמת ל-TelegramConflictError
+        await dp.start_polling(bot, drop_pending_updates=True, allowed_updates=dp.resolve_used_update_types())
+    except TelegramConflictError:
+        logging.critical("⚠️ שגיאת TelegramConflictError: קיים מופע נוסף שרץ עם אותו BOT_TOKEN (למשל הרצה כפולה ב-Render או תהליך פעיל). יש לוודא שיש רק שירות/Worker יחיד פעיל.")
+    except (KeyboardInterrupt, SystemExit):
+        logging.info("Bot stopped safely.")
+    except Exception as e:
+        logging.error(f"⚠️ שגיאה במהלך Polling: {e}")
+    finally:
         try:
-            logging.info("📡 Bot Polling started (optimized updates)...")
-            await dp.start_polling(bot, drop_pending_updates=True, allowed_updates=dp.resolve_used_update_types())
-            break
-        except TelegramConflictError:
-            logging.error("⚠️ זוהה בוט כפול (TelegramConflictError)! יש מופע נוסף שרץ במקביל עם אותו ה-BOT_TOKEN. בדוק שירותים כפולים ב-Render או הרצה פתוחה במחשב. מנסה שוב בעוד 5 שניות...")
-            await asyncio.sleep(5)
-        except Exception as e:
-            logging.error(f"⚠️ שגיאה ב-Polling: {e}. מנסה שוב בעוד 3 שניות...")
-            await asyncio.sleep(3)
+            await bot.session.close()
+        except Exception:
+            pass
 
 if __name__ == '__main__':
     try:

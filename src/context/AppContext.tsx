@@ -52,7 +52,11 @@ interface AppContextType {
   submitDebtAppeal: (debtId: number, reason: string) => boolean;
   resolveDebtAppeal: (debtId: number, approve: boolean) => void;
   createStation: (name: string, commissionPercent: number) => Station;
-  updateUserRoleAndStation: (targetId: number, newRole: Role | 'blocked', stationId: number) => void;
+  updateStation: (stationId: number, name: string, commissionPercent: number) => void;
+  updateUserRoleAndStation: (targetId: number, newRole: Role | 'blocked', stationId: number, subscriptionPlan?: string) => void;
+  chargeDriverDebt: (driverId: number, amount: number, reason: string, stationId: number, orderId?: number) => void;
+  updateDebt: (debtId: number, updates: { amount?: number; reason?: string; station_id?: number; status?: 'unpaid' | 'paid' | 'cancelled' }) => void;
+  deleteDebt: (debtId: number) => void;
   sendBroadcast: (text: string) => number;
   resetToInitialData: () => void;
   isTelegramWebApp: boolean;
@@ -254,6 +258,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                   }))
                 );
               }
+
+              if (Array.isArray(data.cities)) {
+                const freshCities = data.cities.map((cityName: string) => ({
+                  user_id: serverUser.user_id,
+                  city_name: cityName,
+                }));
+                setDriverCities((prev) => {
+                  const others = prev.filter((dc) => dc.user_id !== serverUser.user_id);
+                  return [...others, ...freshCities];
+                });
+              }
             }
           })
           .catch((err) => {
@@ -263,6 +278,66 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         console.warn('Telegram WebApp init note:', err);
       }
     }
+  }, []);
+
+  // סנכרון חי ועדכני של ערי הנהג האמיתיות ממסד הנתונים בכל שינוי משתמש
+  useEffect(() => {
+    if (currentUserId) {
+      fetch(`/api/driver/cities?user_id=${currentUserId}`)
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.ok && Array.isArray(data.cities)) {
+            const freshCities = data.cities.map((cityName: string) => ({
+              user_id: currentUserId,
+              city_name: cityName,
+            }));
+            setDriverCities((prev) => {
+              const others = prev.filter((dc) => dc.user_id !== currentUserId);
+              return [...others, ...freshCities];
+            });
+          }
+        })
+        .catch(() => {});
+    }
+  }, [currentUserId]);
+
+  // סנכרון תחנות ויומן חיובים מהשרת
+  useEffect(() => {
+    fetch('/api/stations')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.ok && Array.isArray(data.stations) && data.stations.length > 0) {
+          setStations(
+            data.stations.map((s: any) => ({
+              station_id: Number(s.station_id),
+              name: s.name,
+              commission_percent: Number(s.commission_percent),
+            }))
+          );
+        }
+      })
+      .catch(() => {});
+
+    fetch('/api/debts')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.ok && Array.isArray(data.debts)) {
+          setDebts(
+            data.debts.map((d: any) => ({
+              debt_id: Number(d.debt_id),
+              order_id: d.order_id ? Number(d.order_id) : 0,
+              driver_id: Number(d.driver_id),
+              station_id: Number(d.station_id || 1),
+              amount: Number(d.amount),
+              status: d.status || 'unpaid',
+              reason: d.reason || '',
+              appeal_status: d.appeal_status || 'none',
+              appeal_reason: d.appeal_reason,
+            }))
+          );
+        }
+      })
+      .catch(() => {});
   }, []);
 
   // Current active user
@@ -356,16 +431,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       return [...prev, { user_id: userId, city_name: trimmed }];
     });
+
+    fetch('/api/driver/cities/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: userId, city_name: trimmed }),
+    }).catch((err) => console.warn('addDriverCity sync note:', err));
   };
 
   const removeDriverCity = (userId: number, cityName: string) => {
     setDriverCities((prev) =>
       prev.filter((dc) => !(dc.user_id === userId && dc.city_name === cityName))
     );
+
+    fetch('/api/driver/cities/remove', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: userId, city_name: cityName }),
+    }).catch((err) => console.warn('removeDriverCity sync note:', err));
   };
 
   const clearDriverCities = (userId: number) => {
     setDriverCities((prev) => prev.filter((dc) => dc.user_id !== userId));
+
+    fetch('/api/driver/cities/clear', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: userId }),
+    }).catch((err) => console.warn('clearDriverCities sync note:', err));
   };
 
   // Publish order with text cleaning and driver matching
@@ -612,11 +705,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return newStation;
   };
 
-  // Admin God Mode: Update user role and station assignment
+  // Admin updates existing station (name & commission_percent)
+  const updateStation = (stationId: number, name: string, commissionPercent: number) => {
+    setStations((prev) =>
+      prev.map((s) =>
+        s.station_id === stationId
+          ? { ...s, name, commission_percent: commissionPercent }
+          : s
+      )
+    );
+
+    fetch('/api/stations/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        station_id: stationId,
+        name,
+        commission_percent: commissionPercent,
+      }),
+    }).catch((err) => console.warn('updateStation sync note:', err));
+  };
+
+  // Admin God Mode: Update user role, station assignment and optional subscription
   const updateUserRoleAndStation = (
     targetId: number,
     newRole: Role | 'blocked',
-    stationId: number
+    stationId: number,
+    subscriptionPlan?: string
   ) => {
     const isBlocked = newRole === 'blocked' ? 1 : 0;
     const roleToSave: Role = newRole === 'blocked' ? 'user' : newRole;
@@ -629,10 +744,155 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               role: roleToSave,
               station_id: stationId,
               is_blocked: isBlocked,
+              ...(subscriptionPlan ? { subscription_plan: subscriptionPlan as any } : {}),
             }
           : u
       )
     );
+
+    fetch('/api/users/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        user_id: targetId,
+        role: roleToSave,
+        station_id: stationId,
+        is_blocked: isBlocked,
+        ...(subscriptionPlan ? { subscription_plan: subscriptionPlan } : {}),
+      }),
+    }).catch((err) => console.warn('updateUserRoleAndStation sync note:', err));
+  };
+
+  // Admin / Dispatcher charges a driver debt manually
+  const chargeDriverDebt = (
+    driverId: number,
+    amount: number,
+    reason: string,
+    stationId: number,
+    orderId?: number
+  ) => {
+    const newDebtId = Math.max(500, ...debts.map((d) => d.debt_id)) + 1;
+    const newDebt: Debt = {
+      debt_id: newDebtId,
+      order_id: orderId || 0,
+      driver_id: driverId,
+      station_id: stationId,
+      amount: amount,
+      status: 'unpaid',
+      reason: reason,
+      appeal_status: 'none',
+    };
+    setDebts((prev) => [newDebt, ...prev]);
+    setUsers((prev) =>
+      prev.map((u) =>
+        u.user_id === driverId
+          ? { ...u, debt_balance: Math.round((u.debt_balance + amount) * 100) / 100 }
+          : u
+      )
+    );
+
+    fetch('/api/debts/charge', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        driver_id: driverId,
+        amount: amount,
+        reason: reason,
+        station_id: stationId,
+        order_id: orderId,
+      }),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.ok && data.debt_id) {
+          setDebts((prev) =>
+            prev.map((d) => (d.debt_id === newDebtId ? { ...d, debt_id: data.debt_id } : d))
+          );
+        }
+      })
+      .catch((err) => console.warn('chargeDriverDebt sync note:', err));
+  };
+
+  // Admin / Dispatcher edits existing debt (CRUD)
+  const updateDebt = (
+    debtId: number,
+    updates: {
+      amount?: number;
+      reason?: string;
+      station_id?: number;
+      status?: 'unpaid' | 'paid' | 'cancelled';
+    }
+  ) => {
+    const target = debts.find((d) => d.debt_id === debtId);
+    if (!target) return;
+
+    const oldAmount = target.amount;
+    const oldStatus = target.status;
+    const driverId = target.driver_id;
+
+    const newAmount = updates.amount !== undefined ? updates.amount : oldAmount;
+    const newStatus = updates.status !== undefined ? updates.status : oldStatus;
+
+    const effectiveOld = oldStatus === 'unpaid' ? oldAmount : 0;
+    const effectiveNew = newStatus === 'unpaid' ? newAmount : 0;
+    const diff = effectiveNew - effectiveOld;
+
+    setDebts((prev) =>
+      prev.map((d) =>
+        d.debt_id === debtId
+          ? {
+              ...d,
+              ...(updates.amount !== undefined ? { amount: updates.amount } : {}),
+              ...(updates.reason !== undefined ? { reason: updates.reason } : {}),
+              ...(updates.station_id !== undefined ? { station_id: updates.station_id } : {}),
+              ...(updates.status !== undefined ? { status: updates.status } : {}),
+            }
+          : d
+      )
+    );
+
+    if (diff !== 0) {
+      setUsers((prev) =>
+        prev.map((u) =>
+          u.user_id === driverId
+            ? { ...u, debt_balance: Math.max(0, Math.round((u.debt_balance + diff) * 100) / 100) }
+            : u
+        )
+      );
+    }
+
+    fetch('/api/debts/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        debt_id: debtId,
+        ...updates,
+      }),
+    }).catch((err) => console.warn('updateDebt sync note:', err));
+  };
+
+  // Admin deletes debt record
+  const deleteDebt = (debtId: number) => {
+    const target = debts.find((d) => d.debt_id === debtId);
+    if (!target) return;
+
+    if (target.status === 'unpaid') {
+      setUsers((prev) =>
+        prev.map((u) =>
+          u.user_id === target.driver_id
+            ? { ...u, debt_balance: Math.max(0, Math.round((u.debt_balance - target.amount) * 100) / 100) }
+            : u
+        )
+      );
+    }
+
+    setDebts((prev) => prev.filter((d) => d.debt_id !== debtId));
+
+    fetch('/api/debts/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ debt_id: debtId }),
+    }).catch((err) => console.warn('deleteDebt sync note:', err));
   };
 
   // Admin broadcast to all users
@@ -685,7 +945,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         submitDebtAppeal,
         resolveDebtAppeal,
         createStation,
+        updateStation,
         updateUserRoleAndStation,
+        chargeDriverDebt,
+        updateDebt,
+        deleteDebt,
         sendBroadcast,
         resetToInitialData,
         isTelegramWebApp,
