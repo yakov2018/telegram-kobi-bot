@@ -187,8 +187,17 @@ def _init_db_sync():
             station_id SERIAL PRIMARY KEY, 
             name TEXT NOT NULL, 
             commission_percent REAL DEFAULT 10.0,
-            is_active BOOLEAN DEFAULT TRUE,
+            is_active INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+        station_columns_to_add = [
+            ("is_active", "INTEGER DEFAULT 1"),
+            ("created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+        ]
+        for col_name, col_type in station_columns_to_add:
+            try:
+                cur.execute(f"ALTER TABLE deliveries_stations ADD COLUMN IF NOT EXISTS {col_name} {col_type}")
+            except Exception: pass
 
         # 2. טבלת משתמשים מורחבת (כולל Onboarding, מנויים, דירוג וחובות)
         cur.execute('''CREATE TABLE IF NOT EXISTS deliveries_users (
@@ -196,13 +205,13 @@ def _init_db_sync():
             telegram_username TEXT,
             full_name TEXT NOT NULL, 
             phone TEXT, 
-            is_phone_verified BOOLEAN DEFAULT FALSE,
+            is_phone_verified INTEGER DEFAULT 0,
             birth_year INTEGER, 
             terms_accepted_at TIMESTAMP,
             role TEXT DEFAULT 'user', 
             station_id INTEGER DEFAULT 1, 
             status TEXT DEFAULT 'busy', 
-            is_blocked BOOLEAN DEFAULT FALSE, 
+            is_blocked INTEGER DEFAULT 0, 
             block_reason TEXT,
             car_brand TEXT, 
             car_model TEXT, 
@@ -222,7 +231,7 @@ def _init_db_sync():
         # הגירה בטוחה (Safe ALTER TABLE) למקרה שהטבלה כבר הייתה קיימת
         user_columns_to_add = [
             ("telegram_username", "TEXT"),
-            ("is_phone_verified", "BOOLEAN DEFAULT FALSE"),
+            ("is_phone_verified", "INTEGER DEFAULT 0"),
             ("terms_accepted_at", "TIMESTAMP"),
             ("subscription_plan", "TEXT DEFAULT 'free'"),
             ("sub_start_date", "TIMESTAMP"),
@@ -230,6 +239,7 @@ def _init_db_sync():
             ("daily_trips_count", "INTEGER DEFAULT 0"),
             ("last_trip_date", "DATE"),
             ("block_reason", "TEXT"),
+            ("is_blocked", "INTEGER DEFAULT 0"),
             ("created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
         ]
         for col_name, col_type in user_columns_to_add:
@@ -323,8 +333,8 @@ def _init_db_sync():
         # ביצור הרשאות מנהלי מערכת קבועים (552821474 ו-8644923212)
         for admin_id in ADMIN_IDS:
             cur.execute('''INSERT INTO deliveries_users (user_id, full_name, phone, birth_year, role, status, is_blocked)
-                           VALUES (%s, 'מנהל ראשי', '0500000000', 1990, 'admin', 'free', FALSE)
-                           ON CONFLICT (user_id) DO UPDATE SET role = 'admin', is_blocked = FALSE''', (admin_id,))
+                           VALUES (%s, 'מנהל ראשי', '0500000000', 1990, 'admin', 'free', 0)
+                           ON CONFLICT (user_id) DO UPDATE SET role = 'admin', is_blocked = 0''', (admin_id,))
 
         # הזנת מילון קיצורי ערים נפוצים
         city_seeds = [
@@ -891,7 +901,7 @@ async def handle_api_auth(request):
         if USE_POSTGRES:
             def _fix_adm():
                 with get_pg_cursor() as cur:
-                    cur.execute("UPDATE deliveries_users SET role = 'admin', is_blocked = FALSE WHERE user_id = %s", (user_id,))
+                    cur.execute("UPDATE deliveries_users SET role = 'admin', is_blocked = 0 WHERE user_id = %s", (user_id,))
             await run_in_thread(_fix_adm)
         else:
             async with aiosqlite.connect(SQLITE_DB_FILE) as db:
