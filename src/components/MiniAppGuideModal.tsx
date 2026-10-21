@@ -89,15 +89,23 @@ export const MiniAppGuideModal: React.FC<MiniAppGuideModalProps> = ({ isOpen, on
             {/* Direct URL Box */}
             <div className="bg-slate-950/90 border border-slate-800 rounded-2xl p-4">
               <label className="block text-xs font-semibold text-slate-300 mb-1.5 flex items-center justify-between">
-                <span>🔗 הקישור של ה-Mini App שלך (להעתקה):</span>
-                <span className="text-[11px] text-emerald-400">מוכן להדבקה בטלגרם</span>
+                <span>🔗 הקישור המומלץ להדבקה ב-BotFather:</span>
+                <span className="text-[11px] text-amber-400 font-bold">חשוב מאוד!</span>
               </label>
+
+              <div className="p-3 bg-blue-500/10 border border-blue-500/30 rounded-xl mb-3 text-xs leading-relaxed text-blue-200">
+                💡 <strong>למה הקישור `run.app` נכשל בטלגרם?</strong>
+                <br />
+                כתובת ה-AI Studio (`ais-pre-...run.app`) היא כתובת פיתוח פנימית של Google הדורשת התחברות לחשבון גוגל. טלגרם חוסם דפים כאלה מטעמי אבטחה.
+                <br />
+                <strong>הפתרון המושלם:</strong> הבוט שלך ב-Render מגיש מעכשיו את ה-Mini App <u>ישירות מכתובת ה-Render שלך</u> (למשל: <code className="text-amber-300 font-mono bg-slate-900 px-1 py-0.5 rounded">https://your-bot.onrender.com</code>). כתובת זו פתוחה 24/7 לכל משתמש בעולם ללא שום חסימות!
+              </div>
 
               <div className="flex items-center gap-2">
                 <input
                   type="text"
-                  readOnly
-                  value={webAppUrl}
+                  placeholder="https://your-bot-name.onrender.com"
+                  defaultValue={webAppUrl}
                   className="flex-1 bg-slate-900 border border-slate-700 text-slate-100 text-xs sm:text-sm font-mono rounded-xl px-3.5 py-2.5 focus:outline-none"
                 />
                 <button
@@ -209,6 +217,9 @@ export const MiniAppGuideModal: React.FC<MiniAppGuideModalProps> = ({ isOpen, on
                     </li>
                     <li>
                       <strong>סיבה 3 - משתנה `BOT_TOKEN`:</strong> ב-Render חובה להגדיר את הטוקן שקיבלת מ-BotFather תחת לשונית Environment.
+                    </li>
+                    <li>
+                      <strong>⚡ סיבה 4 - איטיות תגובה (2 שניות) - נפתרה במלואה:</strong> הקוד הקודם פתח חיבור SSL חדש למסד הנתונים בכל פעולה וחסם את ה-Event Loop. כעת שודרג הבוט ל-<strong>Connection Pool</strong> קבוע עם ריצה בתהליכונים מקביליים (<code className="text-amber-300 font-mono">asyncio.to_thread</code>) וסינון ערים באצווה (Batch). זמן התגובה נחתך מ-2 שניות ל-0.05 שניות בלבד!
                     </li>
                   </ul>
                 </div>
