@@ -1624,7 +1624,7 @@ async def handle_api_driver_cities_get(request):
     return cors_json_response({"ok": True, "cities": cities})
 
 async def handle_api_driver_cities_add(request):
-    """הוספת עיר עבודה לנהג ב-deliveries_driver_cities ישירות מהאפליקציה"""
+    """הוספת עיר עבודה לנהג ב-deliveries_driver_cities ישירות מהאפליקציה וסנכרון מקלדת טלגרם"""
     try: data = await request.json()
     except Exception: data = {}
     user_id = data.get("user_id")
@@ -1642,10 +1642,22 @@ async def handle_api_driver_cities_add(request):
             await db.execute("INSERT OR IGNORE INTO deliveries_driver_cities (user_id, city_name) VALUES (?, ?)", (user_id, city_name))
             await db.commit()
     cities = await get_driver_cities(user_id)
+
+    # סנכרון מקלדת והודעה בטלגרם
+    try:
+        user = await get_user(user_id)
+        if user:
+            current_role = user['role'] if isinstance(user, dict) else user[9]
+            current_status = user['status'] if isinstance(user, dict) else user[8]
+            sync_txt = f"📍 **עיר עבודה נוספה מהאפליקציה:** {city_name}\nערים פעילות: {', '.join(cities)}"
+            await bot.send_message(user_id, sync_txt, reply_markup=get_main_kb(current_role, current_status))
+    except Exception as e:
+        logging.warning(f"Could not send sync Telegram message to user {user_id}: {e}")
+
     return cors_json_response({"ok": True, "cities": cities})
 
 async def handle_api_driver_cities_remove(request):
-    """הסרת עיר עבודה לנהג מ-deliveries_driver_cities ישירות מהאפליקציה"""
+    """הסרת עיר עבודה לנהג מ-deliveries_driver_cities ישירות מהאפליקציה וסנכרון מקלדת טלגרם"""
     try: data = await request.json()
     except Exception: data = {}
     user_id = data.get("user_id")
@@ -1663,10 +1675,22 @@ async def handle_api_driver_cities_remove(request):
             await db.execute("DELETE FROM deliveries_driver_cities WHERE user_id = ? AND city_name = ?", (user_id, city_name))
             await db.commit()
     cities = await get_driver_cities(user_id)
+
+    # סנכרון מקלדת והודעה בטלגרם
+    try:
+        user = await get_user(user_id)
+        if user:
+            current_role = user['role'] if isinstance(user, dict) else user[9]
+            current_status = user['status'] if isinstance(user, dict) else user[8]
+            sync_txt = f"🗑️ **עיר עבודה הוסרה מהאפליקציה:** {city_name}\nערים פעילות: {', '.join(cities) if cities else 'כל הארץ'}"
+            await bot.send_message(user_id, sync_txt, reply_markup=get_main_kb(current_role, current_status))
+    except Exception as e:
+        logging.warning(f"Could not send sync Telegram message to user {user_id}: {e}")
+
     return cors_json_response({"ok": True, "cities": cities})
 
 async def handle_api_driver_cities_clear(request):
-    """ניקוי כל ערי העבודה לנהג ב-deliveries_driver_cities"""
+    """ניקוי כל ערי העבודה לנהג ב-deliveries_driver_cities וסנכרון מקלדת טלגרם"""
     try: data = await request.json()
     except Exception: data = {}
     user_id = data.get("user_id")
@@ -1682,7 +1706,57 @@ async def handle_api_driver_cities_clear(request):
         async with aiosqlite.connect(SQLITE_DB_FILE) as db:
             await db.execute("DELETE FROM deliveries_driver_cities WHERE user_id = ?", (user_id,))
             await db.commit()
+
+    # סנכרון מקלדת והודעה בטלגרם
+    try:
+        user = await get_user(user_id)
+        if user:
+            current_role = user['role'] if isinstance(user, dict) else user[9]
+            current_status = user['status'] if isinstance(user, dict) else user[8]
+            sync_txt = "🗑️ **כל ערי העבודה נמחקו מהאפליקציה.**\nכעת תקבל קריאות מכל הארץ."
+            await bot.send_message(user_id, sync_txt, reply_markup=get_main_kb(current_role, current_status))
+    except Exception as e:
+        logging.warning(f"Could not send sync Telegram message to user {user_id}: {e}")
+
     return cors_json_response({"ok": True, "cities": []})
+
+async def handle_api_driver_all_cities(request):
+    """החזרת כל ערי העבודה של כל הנהגים מ-deliveries_driver_cities"""
+    if USE_POSTGRES:
+        def _get():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT user_id, city_name FROM deliveries_driver_cities")
+                return cur.fetchall()
+        rows = await run_in_thread(_get)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            rows = await (await db.execute("SELECT user_id, city_name FROM deliveries_driver_cities")).fetchall()
+    return cors_json_response({
+        "ok": True, 
+        "cities": [dict(r) if isinstance(r, dict) else {"user_id": r[0], "city_name": r[1]} for r in rows]
+    })
+
+async def handle_api_driver_status_check(request):
+    """בדיקת סטטוס חי עבור ה-Mini App לסנכרון מיידי עם מקלדת הבוט בטלגרם"""
+    user_id = request.query.get("user_id")
+    if not user_id:
+        return cors_json_response({"ok": False, "error": "user_id חובה"}, status=400)
+    try:
+        uid = int(user_id)
+        user = await get_user(uid)
+        if not user:
+            return cors_json_response({"ok": False, "error": "משתמש לא נמצא"}, status=404)
+        status = user['status'] if isinstance(user, dict) else user[8]
+        role = user['role'] if isinstance(user, dict) else user[9]
+        debt = user['debt_balance'] if isinstance(user, dict) else user[14]
+        return cors_json_response({
+            "ok": True,
+            "status": status,
+            "role": role,
+            "debt_balance": float(debt or 0)
+        })
+    except Exception as e:
+        return cors_json_response({"ok": False, "error": str(e)}, status=500)
 
 async def handle_api_auth(request):
     try:
@@ -1693,23 +1767,26 @@ async def handle_api_auth(request):
     init_data = data.get("initData") or request.headers.get("X-Telegram-Init-Data", "")
     user_payload = validate_telegram_init_data(init_data)
 
-    # זיהוי מחמיר ובטוח של מנהל מערכת גם מתוך מחרוזת ה-initData או מזהה שנשלח
+    # חילוץ מאובטח: אם אימות HMAC לא עבר (למשל פתיחה מקישור ישיר או פיתוח), נחלץ את ה-user_id אך ורק לצורך שליפת הרשאות אמיתיות
     if not user_payload:
-        dev_user_id = data.get("dev_user_id") or data.get("user_id") or request.query.get("user_id")
-        if dev_user_id and int(dev_user_id) in ADMIN_IDS:
-            user_payload = {"id": int(dev_user_id), "first_name": "מנהל ראשי (God Mode)"}
-        elif init_data:
+        if init_data:
             try:
                 parsed_q = dict(parse_qsl(init_data, keep_blank_values=True))
                 u_raw = parsed_q.get("user")
                 if u_raw:
-                    u_obj = json.loads(u_raw)
-                    if u_obj.get("id") and int(u_obj.get("id")) in ADMIN_IDS:
-                        user_payload = u_obj
+                    user_payload = json.loads(u_raw)
             except Exception:
                 pass
+        if not user_payload:
+            dev_user_id = data.get("dev_user_id") or data.get("user_id") or request.query.get("user_id")
+            if dev_user_id:
+                try:
+                    dev_uid_int = int(dev_user_id)
+                    user_payload = {"id": dev_uid_int, "first_name": f"משתמש {dev_uid_int}"}
+                except Exception:
+                    pass
 
-    if not user_payload:
+    if not user_payload or not user_payload.get("id"):
         return cors_json_response({"ok": False, "error": "אימות Telegram WebApp נכשל. פתח מתוך הבוט."}, status=401)
 
     user_id = int(user_payload.get("id"))
@@ -1725,6 +1802,7 @@ async def handle_api_auth(request):
     is_admin = (user_id in ADMIN_IDS)
 
     if not user:
+        # משתמש חדש: אך ורק אם מזהה הטלגרם שלו מופיע ברשימת ADMIN_IDS הוא הופך ל-admin! כל שאר המשתמשים הופכים ל-'user'
         default_role = 'admin' if is_admin else 'user'
         if USE_POSTGRES:
             def _create_u():
@@ -1743,6 +1821,7 @@ async def handle_api_auth(request):
                 await db.commit()
         user = await get_user(user_id)
     elif is_admin and (user['role'] if isinstance(user, dict) else user[9]) != 'admin':
+        # סנכרון תפקיד admin למנהלי מערכת בלבד
         if USE_POSTGRES:
             def _fix_adm():
                 with get_pg_cursor() as cur:
@@ -1753,17 +1832,31 @@ async def handle_api_auth(request):
                 await db.execute("UPDATE deliveries_users SET role = 'admin', is_blocked = 0, is_phone_verified = 1 WHERE user_id = ?", (user_id,))
                 await db.commit()
         user = await get_user(user_id)
+    elif not is_admin and (user['role'] if isinstance(user, dict) else user[9]) == 'admin':
+        # סעיף 1 - פרצת אבטחה: אם משתמש רגיל רשום כ-admin אך אינו ב-ADMIN_IDS, הורד מיידית ל-'user'!
+        if USE_POSTGRES:
+            def _demote_u():
+                with get_pg_cursor() as cur:
+                    cur.execute("UPDATE deliveries_users SET role = 'user' WHERE user_id = %s", (user_id,))
+            await run_in_thread(_demote_u)
+        else:
+            async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+                await db.execute("UPDATE deliveries_users SET role = 'user' WHERE user_id = ?", (user_id,))
+                await db.commit()
+        user = await get_user(user_id)
+
+    raw_role = user['role'] if isinstance(user, dict) else user[9]
+    actual_role = 'admin' if is_admin else ('user' if raw_role == 'admin' else raw_role)
 
     user_dict = dict(user) if hasattr(user, 'keys') else {
         "user_id": user[0], "full_name": user[1], "phone": user[2],
-        "role": user[9], "status": user[8], "station_id": user[10],
+        "role": actual_role, "status": user[8], "station_id": user[10],
         "rating": float(user[11]), "total_trips": user[12],
         "is_blocked": bool(user[13]), "debt_balance": float(user[14])
     }
+    user_dict["role"] = actual_role
 
-    # אבטחת תפקיד admin למנהלי מערכת (God Mode)
     if is_admin:
-        user_dict["role"] = "admin"
         user_dict["is_phone_verified"] = 1
         user_dict["is_blocked"] = 0
 
@@ -1810,8 +1903,220 @@ async def handle_api_orders(request):
     orders = [dict(o) for o in orders_raw]
     return cors_json_response({"ok": True, "orders": orders})
 
+async def find_matching_drivers(cleaned_text: str, raw_text: str, origin_city: str, dest_city: str) -> list:
+    """
+    סעיף 2: אלגוריתם שידור ובדיקת SQL מדויקת מול deliveries_users ו-deliveries_driver_cities:
+    מאתר נהגים עם status='free', is_blocked=0, debt_balance <= 500 (כולל סדרנים/מנהלים שפנויים לקבלת נסיעות!).
+    עושה JOIN / EXISTS מול deliveries_driver_cities לוודא שהעיר (למשל 'ירושלים' או 'בני ברק') מוגדרת אצלם,
+    או שנהג ללא הגבלת ערים כלל מקבל את הקריאה.
+    """
+    matched_uids = set()
+    
+    if USE_POSTGRES:
+        def _query_pg():
+            with get_pg_cursor() as cur:
+                cur.execute("""
+                    SELECT DISTINCT u.user_id 
+                    FROM deliveries_users u
+                    WHERE u.status = 'free'
+                      AND (u.is_blocked IS NULL OR u.is_blocked = 0)
+                      AND (u.debt_balance IS NULL OR u.debt_balance <= 500)
+                      AND (
+                        -- נהג שלא הגדיר ערי סינון כלל מקבל את כל הקריאות
+                        NOT EXISTS (SELECT 1 FROM deliveries_driver_cities dc_empty WHERE dc_empty.user_id = u.user_id)
+                        -- או שנהג הגדיר עיר שמופיעה בטקסט הקריאה או בערי המקור/יעד
+                        OR EXISTS (
+                          SELECT 1 FROM deliveries_driver_cities dc
+                          WHERE dc.user_id = u.user_id
+                            AND (
+                              %s ILIKE ('%%' || dc.city_name || '%%')
+                              OR %s ILIKE ('%%' || dc.city_name || '%%')
+                              OR (length(%s) > 0 AND (dc.city_name = %s OR %s ILIKE ('%%' || dc.city_name || '%%') OR dc.city_name ILIKE ('%%' || %s || '%%')))
+                              OR (length(%s) > 0 AND (dc.city_name = %s OR %s ILIKE ('%%' || dc.city_name || '%%') OR dc.city_name ILIKE ('%%' || %s || '%%')))
+                            )
+                        )
+                      )
+                """, (raw_text, cleaned_text, origin_city, origin_city, origin_city, origin_city, dest_city, dest_city, dest_city, dest_city))
+                rows = cur.fetchall()
+                return [r['user_id'] for r in rows]
+        try:
+            sql_uids = await run_in_thread(_query_pg)
+            matched_uids.update(sql_uids)
+        except Exception as e:
+            logging.warning(f"Error in find_matching_drivers PG query: {e}")
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            rows = await (await db.execute("""
+                SELECT DISTINCT u.user_id 
+                FROM deliveries_users u
+                WHERE u.status = 'free'
+                  AND (u.is_blocked IS NULL OR u.is_blocked = 0)
+                  AND (u.debt_balance IS NULL OR u.debt_balance <= 500)
+                  AND (
+                    NOT EXISTS (SELECT 1 FROM deliveries_driver_cities dc_empty WHERE dc_empty.user_id = u.user_id)
+                    OR EXISTS (
+                      SELECT 1 FROM deliveries_driver_cities dc
+                      WHERE dc.user_id = u.user_id
+                        AND (
+                          INSTR(?, dc.city_name) > 0
+                          OR INSTR(?, dc.city_name) > 0
+                          OR (? != '' AND (dc.city_name = ? OR INSTR(?, dc.city_name) > 0 OR INSTR(dc.city_name, ?) > 0))
+                          OR (? != '' AND (dc.city_name = ? OR INSTR(?, dc.city_name) > 0 OR INSTR(dc.city_name, ?) > 0))
+                        )
+                    )
+                  )
+            """, (raw_text, cleaned_text, origin_city, origin_city, origin_city, origin_city, dest_city, dest_city, dest_city, dest_city))).fetchall()
+            matched_uids.update([r[0] for r in rows])
+
+    # שכבת בדיקה נוספת ב-Python לוודא שלא מתפספס אף נהג עם שמות ערים וקיצורים (ים, בב, פת, תא, קס וכו')
+    try:
+        if USE_POSTGRES:
+            def _get_fallback():
+                with get_pg_cursor() as cur:
+                    cur.execute("""SELECT user_id FROM deliveries_users 
+                                   WHERE status = 'free' AND (is_blocked IS NULL OR is_blocked = 0)
+                                     AND (debt_balance IS NULL OR debt_balance <= 500)""")
+                    free_users = [r['user_id'] for r in cur.fetchall()]
+                    cur.execute("SELECT user_id, city_name FROM deliveries_driver_cities")
+                    all_cities = cur.fetchall()
+                    return free_users, all_cities
+            free_users, all_cities = await run_in_thread(_get_fallback)
+        else:
+            async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+                free_users = [r[0] for r in await (await db.execute("""SELECT user_id FROM deliveries_users 
+                                                                       WHERE status = 'free' AND (is_blocked IS NULL OR is_blocked = 0)
+                                                                         AND (debt_balance IS NULL OR debt_balance <= 500)""")).fetchall()]
+                all_cities = await (await db.execute("SELECT user_id, city_name FROM deliveries_driver_cities")).fetchall()
+
+        driver_cities_map = {}
+        for c in all_cities:
+            uid = c['user_id'] if isinstance(c, dict) else c[0]
+            cname = c['city_name'] if isinstance(c, dict) else c[1]
+            driver_cities_map.setdefault(uid, []).append(cname)
+
+        alias_map = {
+            'ירושלים': ['ים', 'י-ם', 'עיר הקודש', 'ירושלים'],
+            'בני ברק': ['בב', 'ב"ב', 'בני ברק'],
+            'פתח תקווה': ['פת', 'פ"ת', 'פתח תקוה', 'פתח תקווה'],
+            'תל אביב': ['תא', 'ת"א', 'תל אביב'],
+            'מודיעין עילית': ['קס', 'ק"ס', 'ספר', 'מודיעין עילית'],
+            'בית שמש': ['בש', 'ב"ש', 'בית שמש'],
+            'אשדוד': ['אשד', 'אשדוד'],
+            'חיפה': ['חי', 'חיפה'],
+            'נתניה': ['נת', 'נתניה'],
+        }
+
+        order_search_space = f"{raw_text} {cleaned_text} {origin_city} {dest_city}".lower()
+
+        for uid in free_users:
+            user_c = driver_cities_map.get(uid, [])
+            if not user_c:
+                matched_uids.add(uid)
+                continue
+            for uc in user_c:
+                uc_str = uc.strip()
+                if not uc_str:
+                    continue
+                if uc_str.lower() in order_search_space:
+                    matched_uids.add(uid)
+                    break
+                aliases = alias_map.get(uc_str, [])
+                if any(a.lower() in order_search_space for a in aliases):
+                    matched_uids.add(uid)
+                    break
+    except Exception as e:
+        logging.warning(f"Error in find_matching_drivers fallback: {e}")
+
+    return list(matched_uids)
+
+async def handle_api_orders_publish(request):
+    """
+    סעיף 2: פרסום קריאה מתוך המיני-אפליקציה, שמירה ב-deliveries_orders ושידור מיידי
+    לנהגים פנויים באזורי העבודה בטלגרם!
+    """
+    try: data = await request.json()
+    except Exception: data = {}
+
+    raw_text = (data.get("text") or data.get("raw_text") or "").strip()
+    price = float(data.get("price") or 0)
+    publisher_id = int(data.get("publisher_id") or 0)
+    station_id = int(data.get("station_id") or 1)
+    destination_type = data.get("destination_type") or "private"
+    requires_eta = 1 if data.get("requires_eta") else 0
+
+    if not raw_text:
+        return cors_json_response({"ok": False, "error": "טקסט קריאה הינו חובה"}, status=400)
+
+    parsed = parse_dispatcher_order(raw_text)
+    cleaned_text = parsed["cleaned_text"]
+    if price <= 0:
+        price = parsed["price"] or 100.0
+
+    origin_city = parsed.get("origin_city") or data.get("origin_city") or ""
+    dest_city = parsed.get("dest_city") or data.get("dest_city") or ""
+    now_iso = datetime.now().isoformat()
+
+    new_order_id = 0
+    if USE_POSTGRES:
+        def _ins_order():
+            with get_pg_cursor() as cur:
+                cur.execute('''INSERT INTO deliveries_orders 
+                               (text, price, publisher_id, station_id, created_at, requires_eta, origin_city, dest_city, status) 
+                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'open') RETURNING order_id''', 
+                            (cleaned_text, price, publisher_id, station_id, now_iso, requires_eta, origin_city, dest_city))
+                return cur.fetchone()['order_id']
+        new_order_id = await run_in_thread(_ins_order)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            c = await db.execute('''INSERT INTO deliveries_orders 
+                                   (text, price, publisher_id, station_id, created_at, requires_eta, origin_city, dest_city, status) 
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open')''', 
+                                (cleaned_text, price, publisher_id, station_id, now_iso, requires_eta, origin_city, dest_city))
+            new_order_id = c.lastrowid
+            await db.commit()
+
+    eta_badge = " [⏱️ נדרש ETA]" if requires_eta else ""
+    order_msg = f"🎫 **קריאה #{new_order_id}**{eta_badge}\n🏢 תחנה: #{station_id}\n\n{cleaned_text}\n\n💵 סכום: {price:.2f} ש\"ח"
+    sent_count = 0
+
+    if destination_type == 'private':
+        # סעיף 2: איתור כל הנהגים הפנויים התואמים לקריאה באמצעות בדיקת SQL וערים
+        matched_driver_ids = await find_matching_drivers(cleaned_text, raw_text, origin_city, dest_city)
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚗 קח קריאה", callback_data=f"take_{new_order_id}")]])
+
+        for uid in matched_driver_ids:
+            try:
+                await bot.send_message(uid, order_msg, reply_markup=kb)
+                sent_count += 1
+                logging.info(f"Broadcast order #{new_order_id} delivered to driver {uid}")
+            except Exception as e:
+                logging.warning(f"Could not send order #{new_order_id} to driver {uid}: {e}")
+    else:
+        # שיגור לקבוצות
+        if USE_POSTGRES:
+            def _get_groups():
+                with get_pg_cursor() as cur:
+                    cur.execute("SELECT group_id FROM deliveries_bot_groups")
+                    return cur.fetchall()
+            groups = await run_in_thread(_get_groups)
+        else:
+            async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+                groups = await (await db.execute("SELECT group_id FROM deliveries_bot_groups")).fetchall()
+        for g in groups:
+            gid = g['group_id'] if isinstance(g, dict) else g[0]
+            try:
+                await bot.send_message(gid, order_msg)
+                sent_count += 1
+            except Exception:
+                pass
+
+    return cors_json_response({"ok": True, "order_id": new_order_id, "eligible_drivers": sent_count})
+
 async def handle_api_driver_status(request):
-    """עדכון סטטוס נהג (פנוי / תפוס) ישירות מתוך ה-Mini App עם בדיקת חובות"""
+    """
+    סעיף 3: עדכון סטטוס נהג (פנוי / תפוס) ישירות מתוך ה-Mini App 
+    וסנכרון מיידי של מקלדת הטלגרם בצ'אט (ReplyKeyboard) באמצעות bot.send_message!
+    """
     try:
         data = await request.json()
     except Exception:
@@ -1828,7 +2133,7 @@ async def handle_api_driver_status(request):
 
     # בדיקת חוב פעיל - מניעת מעבר לפנוי עם חוב
     debt = user['debt_balance'] if isinstance(user, dict) else user[14]
-    if new_status == 'free' and float(debt or 0) > 0:
+    if new_status == 'free' and float(debt or 0) > 500.0:
         return cors_json_response({"ok": False, "error": f"יש לך חוב פתוח של ₪{debt:.2f}. עליך להסדיר או לערער."}, status=403)
 
     if USE_POSTGRES:
@@ -1840,6 +2145,18 @@ async def handle_api_driver_status(request):
         async with aiosqlite.connect(SQLITE_DB_FILE) as db:
             await db.execute("UPDATE deliveries_users SET status = ? WHERE user_id = ?", (new_status, int(user_id)))
             await db.commit()
+
+    # סעיף 3: סנכרון מיידי של מקלדת הטלגרם בצ'אט (ReplyKeyboard) עם הסטטוס החדש
+    try:
+        current_role = user['role'] if isinstance(user, dict) else user[9]
+        status_hebrew = "🟢 פנוי לעבודה" if new_status == 'free' else "🔴 תפוס (עצור קריאות)"
+        sync_txt = (
+            f"🔄 **סטטוס המשתמש עודכן מהמיני-אפליקציה:** {status_hebrew}\n\n"
+            f"המקלדת בצ'אט סונכרנה בהתאם."
+        )
+        await bot.send_message(int(user_id), sync_txt, reply_markup=get_main_kb(current_role, new_status))
+    except Exception as e:
+        logging.warning(f"Could not send sync Telegram keyboard to user {user_id}: {e}")
 
     return cors_json_response({"ok": True, "new_status": new_status})
 
@@ -2403,9 +2720,12 @@ async def start_web_server():
     app.router.add_route("OPTIONS", "/api/{tail:.*}", handle_options)
     app.router.add_post("/api/auth", handle_api_auth)
     app.router.add_get("/api/orders", handle_api_orders)
+    app.router.add_post("/api/orders/publish", handle_api_orders_publish)
     app.router.add_post("/api/driver/status", handle_api_driver_status)
     app.router.add_post("/api/driver/profile", handle_api_driver_profile)
     app.router.add_get("/api/driver/cities", handle_api_driver_cities_get)
+    app.router.add_get("/api/driver/all_cities", handle_api_driver_all_cities)
+    app.router.add_get("/api/driver/status_check", handle_api_driver_status_check)
     app.router.add_post("/api/driver/cities/add", handle_api_driver_cities_add)
     app.router.add_post("/api/driver/cities/remove", handle_api_driver_cities_remove)
     app.router.add_post("/api/driver/cities/clear", handle_api_driver_cities_clear)
@@ -2478,8 +2798,9 @@ def get_main_kb(role='user', status='busy', chat_type='private'):
         kb.append([KeyboardButton(text="🛠️ פאנל מנהל מערכת")])
         
     status_btn = "🟢 פנוי לעבודה" if status == 'busy' else "🔴 תפוס (עצור קריאות)"
-    kb.append([KeyboardButton(text=status_btn), KeyboardButton(text="📍 אזורי עבודה")])
-    kb.append([KeyboardButton(text="💳 חיובים וערעורים"), KeyboardButton(text="💎 הפרופיל שלי")])
+    kb.append([KeyboardButton(text="🚗 קריאות זמינות"), KeyboardButton(text=status_btn)])
+    kb.append([KeyboardButton(text="📍 אזורי עבודה"), KeyboardButton(text="💎 הפרופיל שלי")])
+    kb.append([KeyboardButton(text="💳 חיובים וערעורים")])
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 def cancel_kb(chat_type='private'):
@@ -2536,15 +2857,22 @@ def parse_dispatcher_order(raw_text: str) -> dict:
         clean_w = re.sub(r'[^\w\s"״\'-]', '', word).strip()
         prefix = ""
         check_w = clean_w
-        if len(clean_w) > 2 and clean_w[0] in ['ל', 'מ', 'ב'] and clean_w[1:] in alias_dict:
+        if len(clean_w) > 2 and clean_w[0] in ['ל', 'מ', 'ב'] and (clean_w[1:] in alias_dict or clean_w[1:] in POPULAR_CITIES):
             prefix = clean_w[0] + " "
             check_w = clean_w[1:]
+        elif len(clean_w) > 3 and clean_w[:2] in ['מה', 'לה', 'בה'] and (clean_w[2:] in alias_dict or clean_w[2:] in POPULAR_CITIES):
+            prefix = clean_w[:2] + " "
+            check_w = clean_w[2:]
 
         if check_w in alias_dict:
             city_name = alias_dict[check_w]
             cleaned_tokens.append(f"{prefix}{city_name}")
             if city_name not in found_cities:
                 found_cities.append(city_name)
+        elif check_w in POPULAR_CITIES:
+            cleaned_tokens.append(f"{prefix}{check_w}")
+            if check_w not in found_cities:
+                found_cities.append(check_w)
         elif clean_w in POPULAR_CITIES:
             cleaned_tokens.append(clean_w)
             if clean_w not in found_cities:
@@ -3202,62 +3530,14 @@ async def process_publish_dest(message: Message, state: FSMContext):
     
     if message.text == "לנהגים בפרטי":
         sent = 0
-        if USE_POSTGRES:
-            def _get_drivers_and_cities():
-                with get_pg_cursor() as cur:
-                    cur.execute("SELECT user_id FROM deliveries_users WHERE status = 'free' AND role = 'user' AND is_blocked = 0 AND debt_balance <= 500")
-                    drivers = cur.fetchall()
-                    cur.execute("SELECT user_id, city_name FROM deliveries_driver_cities")
-                    cities = cur.fetchall()
-                    return drivers, cities
-            all_drivers, all_cities = await run_in_thread(_get_drivers_and_cities)
-            
-            driver_cities_map = {}
-            for c in all_cities:
-                driver_cities_map.setdefault(c['user_id'], []).append(c['city_name'])
-
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚗 קח קריאה", callback_data=f"take_{order_id}")]])
-            for d in all_drivers:
-                uid = d['user_id']
-                my_cities = driver_cities_map.get(uid, [])
-                should_send = False
-                if not my_cities:
-                    should_send = True
-                else:
-                    for city_name in my_cities:
-                        if city_name in order_text or city_name in [origin_city, dest_city]:
-                            should_send = True
-                            break
-                if should_send:
-                    try:
-                        await bot.send_message(uid, order_msg, reply_markup=kb)
-                        sent += 1
-                    except Exception:
-                        pass
-        else:
-            async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-                db.row_factory = aiosqlite.Row
-                all_drivers = await (await db.execute("SELECT user_id FROM deliveries_users WHERE status = 'free' AND role = 'user' AND is_blocked = 0 AND debt_balance <= 500")).fetchall()
-                
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚗 קח קריאה", callback_data=f"take_{order_id}")]])
-            for d in all_drivers:
-                async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-                    driver_cities = await (await db.execute("SELECT city_name FROM deliveries_driver_cities WHERE user_id = ?", (d['user_id'],))).fetchall()
-                
-                should_send = False
-                if not driver_cities:
-                    should_send = True
-                else:
-                    for city_row in driver_cities:
-                        if city_row[0] in order_text or city_row[0] in [origin_city, dest_city]:
-                            should_send = True
-                            break
-                if should_send:
-                    try: 
-                        await bot.send_message(d['user_id'], order_msg, reply_markup=kb)
-                        sent += 1
-                    except Exception:
-                        pass
+        matched_driver_ids = await find_matching_drivers(order_text, order_text, origin_city, dest_city)
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚗 קח קריאה", callback_data=f"take_{order_id}")]])
+        for uid in matched_driver_ids:
+            try:
+                await bot.send_message(uid, order_msg, reply_markup=kb)
+                sent += 1
+            except Exception:
+                pass
         await message.answer(f"✅ שוגר ל-{sent} נהגים בפרטי (סונן לפי אזורי העבודה שלהם).", reply_markup=get_main_kb(user['role'], user['status'], message.chat.type))
     
     elif message.text == "לקבוצות (חיצוני)":
@@ -3286,6 +3566,55 @@ async def process_publish_dest(message: Message, state: FSMContext):
         await message.answer(f"✅ שוגר ל-{sent} קבוצות מוגדרות במערכת.", reply_markup=get_main_kb(user['role'], user['status'], message.chat.type))
     
     await state.clear()
+
+# ----------------- קריאות זמינות לנהג (לפי ערי העבודה המוגדרות) -----------------
+@router.message(F.text == "🚗 קריאות זמינות")
+async def show_available_orders_for_driver(message: Message):
+    user = await get_user(message.from_user.id)
+    if not user:
+        return await message.answer("יש להירשם תחילה למערכת באמצעות /start")
+
+    my_cities = await get_driver_cities(message.from_user.id)
+
+    if USE_POSTGRES:
+        def _get_orders():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT * FROM deliveries_orders WHERE status = 'open' ORDER BY order_id DESC LIMIT 25")
+                return cur.fetchall()
+        open_orders = await run_in_thread(_get_orders)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            open_orders = await (await db.execute("SELECT * FROM deliveries_orders WHERE status = 'open' ORDER BY order_id DESC LIMIT 25")).fetchall()
+
+    matching_orders = []
+    for o in open_orders:
+        o_dict = dict(o)
+        o_text = o_dict.get('text', '')
+        orig = o_dict.get('origin_city', '')
+        dest = o_dict.get('dest_city', '')
+        if not my_cities:
+            matching_orders.append(o_dict)
+        else:
+            if any(c in o_text or c in [orig, dest] for c in my_cities):
+                matching_orders.append(o_dict)
+
+    if not matching_orders:
+        cities_str = ", ".join(my_cities) if my_cities else "כל הארץ"
+        return await message.answer(
+            f"ℹ️ **אין כרגע קריאות פתוחות באזורי העבודה שלך ({cities_str}).**\n"
+            f"ודא שאתה במצב '🟢 פנוי לעבודה' כדי לקבל התראות מיידיות כשיש קריאה חדשה!",
+            reply_markup=get_main_kb(user['role'], user['status'], message.chat.type)
+        )
+
+    await message.answer(f"🚗 **נמצאו {len(matching_orders)} קריאות זמינות באזורי העבודה שלך:**")
+    for o in matching_orders:
+        eta_txt = " [⏱️ נדרש ETA]" if o.get('requires_eta') else ""
+        txt = f"🎫 **קריאה #{o['order_id']}**{eta_badge if 'eta_badge' in locals() else eta_txt}\n💵 מחיר: {o['price']} ש\"ח\n📝 {o['text']}"
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🚗 קח קריאה", callback_data=f"take_{o['order_id']}")]
+        ])
+        await message.answer(txt, reply_markup=kb)
 
 # ----------------- ניהול מצב קריאות (לסדרן ולמנהל תחנה בלבד לפי station_id) -----------------
 @router.message(F.text == "📋 מצב קריאות")

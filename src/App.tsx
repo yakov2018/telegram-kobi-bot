@@ -23,26 +23,63 @@ import {
 } from 'lucide-react';
 
 export const AppContent: React.FC = () => {
-  const { currentUser, orders, users, debts, stations } = useApp();
+  const { currentUser, isAuthLoading, orders, users, debts, stations } = useApp();
   const [viewMode, setViewMode] = useState<'erp' | 'driver' | 'telegram'>('erp');
-  const [erpSubTab, setErpSubTab] = useState<'dispatcher' | 'admin' | 'driver'>('dispatcher');
+  const [dispatcherSubTab, setDispatcherSubTab] = useState<'dispatcher' | 'driver'>('dispatcher');
   const [isRegisterOpen, setIsRegisterOpen] = useState(false);
   const [isGuideOpen, setIsGuideOpen] = useState(false);
 
-  // ברגע שהמשתמש הוא מנהל מערכת (admin), המערכת מסתירה את המסך הרגיל ומרנדרת את AdminDashboard הייעודי!
+  // סעיף 1 (פרצת אבטחה): המתנה מלאה לתשובה מהשרת לפני הצגת ממשק
+  if (isAuthLoading) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-6 text-center">
+        <div className="w-16 h-16 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-3xl mb-4 animate-bounce">
+          🚖
+        </div>
+        <h2 className="text-xl font-extrabold text-white mb-2">מתחבר למערכת...</h2>
+        <p className="text-xs text-slate-400 max-w-sm mb-6">
+          מאמת הרשאות ומסנכרן נתונים וערי עבודה מול מסד הנתונים בענן
+        </p>
+        <div className="w-56 h-1.5 bg-slate-800 rounded-full overflow-hidden">
+          <div className="w-full h-full bg-gradient-to-r from-amber-500 to-amber-300 animate-pulse" />
+        </div>
+      </div>
+    );
+  }
+
+  // סעיף 1: מנהל מערכת (admin) - מקבל את לוח הבקרה הייעודי AdminDashboard
   if (currentUser.role === 'admin') {
     return <AdminDashboard />;
   }
 
+  // סעיף 1: משתמש רגיל / נהג / שליח (user) - אך ורק ממשק נהג! ללא שום גישה למסכי ניהול או סדרן!
+  if (currentUser.role === 'user') {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
+        <Header
+          viewMode="driver"
+          setViewMode={() => {}}
+          onOpenRegister={() => setIsRegisterOpen(true)}
+          onOpenGuide={() => setIsGuideOpen(true)}
+        />
+        <main className="flex-1 max-w-5xl w-full mx-auto px-4 sm:px-6 py-6">
+          <DriverPanel />
+        </main>
+        <RegistrationModal isOpen={isRegisterOpen} onClose={() => setIsRegisterOpen(false)} />
+        <MiniAppGuideModal isOpen={isGuideOpen} onClose={() => setIsGuideOpen(false)} />
+      </div>
+    );
+  }
+
   const openOrdersCount = orders.filter((o) => o.status === 'open').length;
   const activeDriversCount = users.filter(
-    (u) => u.role === 'user' && u.status === 'free' && !u.is_blocked
+    (u) => u.status === 'free' && !u.is_blocked
   ).length;
   const totalCompletedTrips = users.reduce((acc, u) => acc + u.total_trips, 0);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
-      {/* Navigation Header */}
+      {/* Navigation Header for Dispatchers */}
       <Header
         viewMode={viewMode}
         setViewMode={setViewMode}
@@ -95,46 +132,33 @@ export const AppContent: React.FC = () => {
           </div>
         </div>
 
-        {/* View Mode 1: ERP Management Dashboard */}
+        {/* View Mode 1: Dispatcher Station View */}
         {viewMode === 'erp' && (
           <div className="space-y-6">
-            {/* Sub Tabs inside ERP for rapid testing of all roles */}
             <div className="flex items-center justify-between bg-slate-900/80 p-2 rounded-2xl border border-slate-800">
               <div className="flex items-center gap-2">
                 <button
-                  onClick={() => setErpSubTab('dispatcher')}
+                  onClick={() => setDispatcherSubTab('dispatcher')}
                   className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 ${
-                    erpSubTab === 'dispatcher'
+                    dispatcherSubTab === 'dispatcher'
                       ? 'bg-amber-500 text-slate-950 shadow'
                       : 'text-slate-300 hover:text-white hover:bg-slate-800'
                   }`}
                 >
                   <Radio className="w-3.5 h-3.5" />
-                  <span>עמדת סדרן (שיגור, סינון חכם, אישור נהגים)</span>
+                  <span>עמדת סדרן (שיגור קריאות ואישור נהגים)</span>
                 </button>
 
                 <button
-                  onClick={() => setErpSubTab('admin')}
+                  onClick={() => setDispatcherSubTab('driver')}
                   className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 ${
-                    erpSubTab === 'admin'
-                      ? 'bg-amber-500 text-slate-950 shadow'
-                      : 'text-slate-300 hover:text-white hover:bg-slate-800'
-                  }`}
-                >
-                  <Shield className="w-3.5 h-3.5" />
-                  <span>ניהול תחנות ו-God Mode (הרשאות, עמלות, ערעורים)</span>
-                </button>
-
-                <button
-                  onClick={() => setErpSubTab('driver')}
-                  className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-2 ${
-                    erpSubTab === 'driver'
+                    dispatcherSubTab === 'driver'
                       ? 'bg-amber-500 text-slate-950 shadow'
                       : 'text-slate-300 hover:text-white hover:bg-slate-800'
                   }`}
                 >
                   <Car className="w-3.5 h-3.5" />
-                  <span>ממשק נהג (סטטוס, אזורי עבודה, חובות)</span>
+                  <span>מעבר לממשק נהג אישי</span>
                 </button>
               </div>
 
@@ -144,9 +168,8 @@ export const AppContent: React.FC = () => {
               </div>
             </div>
 
-            {erpSubTab === 'dispatcher' && <DispatcherPanel />}
-            {erpSubTab === 'admin' && <AdminPanel />}
-            {erpSubTab === 'driver' && <DriverPanel />}
+            {dispatcherSubTab === 'dispatcher' && <DispatcherPanel />}
+            {dispatcherSubTab === 'driver' && <DriverPanel />}
           </div>
         )}
 

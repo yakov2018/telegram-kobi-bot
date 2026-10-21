@@ -345,7 +345,7 @@ export const TelegramSimulator: React.FC = () => {
   };
 
   // Inline callback query handler executing bot.py callback logic
-  const handleCallback = (callback_data: string) => {
+  const handleCallback = async (callback_data: string) => {
     addUserMessage(`[לחיצה על כפתור: ${callback_data}]`);
 
     if (callback_data === 'add_city') {
@@ -362,7 +362,7 @@ export const TelegramSimulator: React.FC = () => {
 
     if (callback_data === 'dest_private') {
       const data = fsmData;
-      const res = publishOrder(data.order_text, 'private', data.est_price);
+      const res = await publishOrder(data.order_text, 'private', data.est_price);
       setFsmState('idle');
       addBotMessage(
         `✅ קריאה #${res.order.order_id} שוגרה בהצלחה ל-${res.eligibleDriversCount} נהגים בפרטי (סונן לפי אזורי עבודה וסטטוס פנוי).`
@@ -372,7 +372,7 @@ export const TelegramSimulator: React.FC = () => {
 
     if (callback_data === 'dest_groups') {
       const data = fsmData;
-      const res = publishOrder(data.order_text, 'groups', data.est_price);
+      const res = await publishOrder(data.order_text, 'groups', data.est_price);
       setFsmState('idle');
       addBotMessage(`✅ קריאה #${res.order.order_id} שוגרה בהצלחה ל-${botGroups.length} קבוצות מוגדרות במערכת.`);
       return;

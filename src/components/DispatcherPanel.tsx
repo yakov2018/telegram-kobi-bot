@@ -72,7 +72,7 @@ export const DispatcherPanel: React.FC = () => {
     return cities.some((c) => cleanedPreview.includes(c));
   }).length;
 
-  const handlePublish = (e: React.FormEvent) => {
+  const handlePublish = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!rawText.trim()) return;
 
@@ -82,14 +82,16 @@ export const DispatcherPanel: React.FC = () => {
       return;
     }
 
-    const res = publishOrder(rawText, destType, detectedPrice);
+    setFeedbackMsg('⏳ משגר קריאה ומאתר נהגים פנויים באזורי היעד...');
+    const currentText = rawText;
     setRawText('');
+    const res = await publishOrder(currentText, destType, detectedPrice);
     setFeedbackMsg(
       destType === 'private'
         ? `✅ קריאה #${res.order.order_id} שוגרה בהצלחה ל-${res.eligibleDriversCount} נהגים פנויים באזורי היעד!`
         : `✅ קריאה #${res.order.order_id} שוגרה בהצלחה ל-${botGroups.length} קבוצות חיצוניות!`
     );
-    setTimeout(() => setFeedbackMsg(null), 5000);
+    setTimeout(() => setFeedbackMsg(null), 6000);
   };
 
   const handleApproveDriver = (orderId: number, driverId: number) => {

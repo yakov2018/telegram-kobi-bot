@@ -5,14 +5,28 @@
 export function cleanOrderText(rawText: string): string {
   if (!rawText) return '';
   let text = rawText;
-  // Replace arrows: [ -=]+> with '-' and <[ -=]+ with '-'
-  text = text.replace(/[-=]+>/g, '-');
-  text = text.replace(/<[-=]+/g, '-');
+  // Replace arrows: [ -=]+> with ' ➔ '
+  text = text.replace(/[-=]+>/g, ' ➔ ');
+  text = text.replace(/<[-=]+/g, ' ➔ ');
   
-  // Replace common Israeli transport acronyms
-  text = text.replace(/\bפת\b/g, 'פתח תקווה');
-  text = text.replace(/\bים\b/g, 'ירושלים');
-  text = text.replace(/\bספר\b/g, 'מודיעין עילית');
+  // Replace common Israeli transport acronyms and nicknames
+  text = text.replace(/\b(י-ם|עיר הקודש|ים)\b/g, 'ירושלים');
+  text = text.replace(/\b(מ-?ים|מירושלים)\b/g, 'מ ירושלים');
+  text = text.replace(/\b(ל-?ים|לירושלים)\b/g, 'ל ירושלים');
+  text = text.replace(/\b(ב"ב|בב)\b/g, 'בני ברק');
+  text = text.replace(/\b(לב"ב|לבב|לבני ברק)\b/g, 'ל בני ברק');
+  text = text.replace(/\b(מב"ב|מבב|מבני ברק)\b/g, 'מ בני ברק');
+  text = text.replace(/\b(פ"ת|פת)\b/g, 'פתח תקווה');
+  text = text.replace(/\b(לפ"ת|לפת|לפתח תקווה)\b/g, 'ל פתח תקווה');
+  text = text.replace(/\b(מפ"ת|מפת|מפתח תקווה)\b/g, 'מ פתח תקווה');
+  text = text.replace(/\b(ת"א|תא)\b/g, 'תל אביב');
+  text = text.replace(/\b(לת"א|לתא|לתל אביב)\b/g, 'ל תל אביב');
+  text = text.replace(/\b(מת"א|מתא|מתל אביב)\b/g, 'מ תל אביב');
+  text = text.replace(/\b(ק"ס|קס|ספר)\b/g, 'מודיעין עילית');
+  text = text.replace(/\b(לק"ס|לקס|למודיעין עילית)\b/g, 'ל מודיעין עילית');
+  text = text.replace(/\b(מק"ס|מקס|ממודיעין עילית)\b/g, 'מ מודיעין עילית');
+  text = text.replace(/\b(ב"ש|בש)\b/g, 'בית שמש');
+  text = text.replace(/\b(אשד|אשדו)\b/g, 'אשדוד');
   
   return text.trim();
 }

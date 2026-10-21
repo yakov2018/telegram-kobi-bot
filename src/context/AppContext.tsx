@@ -43,7 +43,7 @@ interface AppContextType {
     rawText: string,
     destinationType: 'private' | 'groups',
     customPrice?: number
-  ) => { order: Order; eligibleDriversCount: number };
+  ) => Promise<{ order: Order; eligibleDriversCount: number }>;
   submitOrderBid: (orderId: number, driverId: number, etaMinutes: number) => { success: boolean; message: string };
   approveDriverOrder: (orderId: number, driverId: number) => { success: boolean; debtAmount: number };
   denyDriverOrder: (orderId: number, driverId: number) => void;
@@ -60,6 +60,7 @@ interface AppContextType {
   sendBroadcast: (text: string) => number;
   resetToInitialData: () => void;
   isTelegramWebApp: boolean;
+  isAuthLoading: boolean;
 }
 
 const AppContext = createContext<AppContextType | null>(null);
@@ -74,9 +75,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   });
 
   const [currentUserId, setCurrentUserId] = useState<number>(() => {
+    try {
+      const tg = (window as any).Telegram?.WebApp;
+      const tgId = tg?.initDataUnsafe?.user?.id;
+      if (tgId) return Number(tgId);
+    } catch {}
+    try {
+      const qId = new URLSearchParams(window.location.search).get('user_id');
+      if (qId && !isNaN(Number(qId))) return Number(qId);
+    } catch {}
     const saved = localStorage.getItem(STORAGE_PREFIX + 'current_user_id');
-    return saved ? JSON.parse(saved) : 8644923212; // Default to Admin
+    return saved ? JSON.parse(saved) : 0;
   });
+
+  const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
 
   const [stations, setStations] = useState<Station[]>(() => {
     const saved = localStorage.getItem(STORAGE_PREFIX + 'stations');
@@ -164,120 +176,107 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Auto-detect Telegram WebApp environment & Authenticate via REST API
   useEffect(() => {
+    let resolvedUid: number | null = null;
+    let initDataStr = '';
+
     const tg = (window as any).Telegram?.WebApp;
     if (tg) {
       try {
         tg.ready();
         tg.expand();
         setIsTelegramWebApp(true);
-
+        initDataStr = tg.initData || '';
         const tgUser = tg.initDataUnsafe?.user;
-        const userNumId = tgUser?.id ? Number(tgUser.id) : null;
-        const isAdmin = userNumId ? ADMIN_IDS.includes(userNumId) : false;
-
-        if (userNumId) {
-          const fullName = [tgUser.first_name, tgUser.last_name].filter(Boolean).join(' ') || tgUser.username || `מנהל טלגרם ${userNumId}`;
-          setUsers((prev) => {
-            const exists = prev.find((u) => u.user_id === userNumId);
-            if (!exists) {
-              const newTgDriver: User = {
-                user_id: userNumId,
-                full_name: fullName,
-                phone: '0500000000',
-                birth_year: 1995,
-                car_brand: 'טויוטה',
-                car_model: 'קורולה',
-                car_year: 2022,
-                car_seats: 5,
-                status: 'free',
-                role: isAdmin ? 'admin' : 'user',
-                station_id: 1,
-                rating: 5.0,
-                total_trips: 0,
-                is_blocked: 0,
-                debt_balance: 0.0,
-              };
-              return [...prev, newTgDriver];
-            } else if (isAdmin && exists.role !== 'admin') {
-              return prev.map((u) => (u.user_id === userNumId ? { ...u, role: 'admin', is_blocked: 0 } : u));
-            }
-            return prev;
-          });
-          setCurrentUserId(userNumId);
+        if (tgUser?.id) {
+          resolvedUid = Number(tgUser.id);
         }
-
-        // שליחת initData לאימות קריפטוגרפי וסנכרון תפקיד מול שרת ה-API
-        fetch('/api/auth', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            initData: tg.initData || '',
-            user_id: userNumId,
-            dev_user_id: userNumId,
-          }),
-        })
-          .then((res) => res.json())
-          .then((data) => {
-            if (data.ok && data.user) {
-              const isServerAdmin = ADMIN_IDS.includes(Number(data.user.user_id)) || data.user.role === 'admin';
-              const serverUser: User = {
-                user_id: Number(data.user.user_id),
-                full_name: data.user.full_name,
-                phone: data.user.phone || '0500000000',
-                birth_year: data.user.birth_year || 1995,
-                car_brand: data.user.car_brand || 'טויוטה',
-                car_model: data.user.car_model || 'קורולה',
-                car_year: data.user.car_year || 2022,
-                car_seats: data.user.car_seats || 5,
-                status: data.user.status || 'free',
-                role: isServerAdmin ? 'admin' : (data.user.role || 'user'),
-                station_id: data.user.station_id || 1,
-                rating: Number(data.user.rating || 5.0),
-                total_trips: Number(data.user.total_trips || 0),
-                is_blocked: isServerAdmin ? 0 : (data.user.is_blocked ? 1 : 0),
-                debt_balance: Number(data.user.debt_balance || 0.0),
-              };
-
-              setUsers((prev) => {
-                const idx = prev.findIndex((u) => u.user_id === serverUser.user_id);
-                if (idx >= 0) {
-                  const updated = [...prev];
-                  updated[idx] = serverUser;
-                  return updated;
-                }
-                return [...prev, serverUser];
-              });
-              setCurrentUserId(serverUser.user_id);
-
-              if (data.stations && Array.isArray(data.stations) && data.stations.length > 0) {
-                setStations(
-                  data.stations.map((s: any) => ({
-                    station_id: Number(s.station_id),
-                    name: s.name,
-                    commission_percent: Number(s.commission_percent),
-                  }))
-                );
-              }
-
-              if (Array.isArray(data.cities)) {
-                const freshCities = data.cities.map((cityName: string) => ({
-                  user_id: serverUser.user_id,
-                  city_name: cityName,
-                }));
-                setDriverCities((prev) => {
-                  const others = prev.filter((dc) => dc.user_id !== serverUser.user_id);
-                  return [...others, ...freshCities];
-                });
-              }
-            }
-          })
-          .catch((err) => {
-            console.warn('API /api/auth sync note:', err);
-          });
       } catch (err) {
         console.warn('Telegram WebApp init note:', err);
       }
     }
+
+    if (!resolvedUid) {
+      try {
+        const qId = new URLSearchParams(window.location.search).get('user_id');
+        if (qId && !isNaN(Number(qId))) resolvedUid = Number(qId);
+      } catch {}
+    }
+
+    if (!resolvedUid) {
+      resolvedUid = currentUserId || 0;
+    }
+
+    // שליחת אימות לשרת ה-API לקבלת ה-role האמיתי ממסד הנתונים
+    fetch('/api/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        initData: initDataStr,
+        user_id: resolvedUid,
+        dev_user_id: resolvedUid,
+      }),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.ok && data.user) {
+          const isServerAdmin = ADMIN_IDS.includes(Number(data.user.user_id));
+          // סעיף 1 (פרצת אבטחה): רק מי שמופיע ב-ADMIN_IDS מקבל תפקיד admin! כל משתמש רגיל מקבל את תפקידו האמיתי (user/dispatcher)
+          const userRole: Role = isServerAdmin
+            ? 'admin'
+            : (data.user.role === 'admin' ? 'user' : (data.user.role || 'user'));
+
+          const serverUser: User = {
+            user_id: Number(data.user.user_id),
+            full_name: data.user.full_name,
+            phone: data.user.phone || '0500000000',
+            birth_year: data.user.birth_year || 1995,
+            car_brand: data.user.car_brand || 'טויוטה',
+            car_model: data.user.car_model || 'קורולה',
+            car_year: data.user.car_year || 2022,
+            car_seats: data.user.car_seats || 5,
+            status: data.user.status || 'free',
+            role: userRole,
+            station_id: data.user.station_id || 1,
+            rating: Number(data.user.rating || 5.0),
+            total_trips: Number(data.user.total_trips || 0),
+            is_blocked: isServerAdmin ? 0 : (data.user.is_blocked ? 1 : 0),
+            debt_balance: Number(data.user.debt_balance || 0.0),
+          };
+
+          setUsers((prev) => {
+            const others = prev.filter((u) => u.user_id !== serverUser.user_id);
+            return [serverUser, ...others];
+          });
+          setCurrentUserId(serverUser.user_id);
+
+          if (data.stations && Array.isArray(data.stations) && data.stations.length > 0) {
+            setStations(
+              data.stations.map((s: any) => ({
+                station_id: Number(s.station_id),
+                name: s.name,
+                commission_percent: Number(s.commission_percent),
+              }))
+            );
+          }
+
+          if (Array.isArray(data.cities)) {
+            const freshCities = data.cities.map((cityName: string) => ({
+              user_id: serverUser.user_id,
+              city_name: cityName,
+            }));
+            setDriverCities((prev) => {
+              const others = prev.filter((dc) => dc.user_id !== serverUser.user_id);
+              return [...others, ...freshCities];
+            });
+          }
+        }
+      })
+      .catch((err) => {
+        console.warn('API /api/auth sync note:', err);
+      })
+      .finally(() => {
+        setIsAuthLoading(false);
+      });
   }, []);
 
   // סנכרון חי ועדכני של ערי הנהג האמיתיות ממסד הנתונים בכל שינוי משתמש
@@ -301,7 +300,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [currentUserId]);
 
-  // סנכרון תחנות ויומן חיובים מהשרת
+  // סנכרון תחנות, קריאות ויומן חיובים מהשרת
   useEffect(() => {
     fetch('/api/stations')
       .then((res) => res.json())
@@ -312,6 +311,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               station_id: Number(s.station_id),
               name: s.name,
               commission_percent: Number(s.commission_percent),
+            }))
+          );
+        }
+      })
+      .catch(() => {});
+
+    fetch('/api/orders')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.ok && Array.isArray(data.orders)) {
+          setOrders(
+            data.orders.map((o: any) => ({
+              order_id: Number(o.order_id),
+              text: o.text,
+              price: Number(o.price),
+              publisher_id: Number(o.publisher_id),
+              station_id: Number(o.station_id || 1),
+              driver_id: o.driver_id ? Number(o.driver_id) : null,
+              status: o.status || 'open',
+              created_at: o.created_at || new Date().toISOString(),
+              destination_type: 'private',
+              bids: [],
             }))
           );
         }
@@ -338,10 +359,98 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       })
       .catch(() => {});
+
+    // סנכרון כל המשתמשים האמיתיים ממסד הנתונים בענן
+    fetch('/api/users')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.ok && Array.isArray(data.users)) {
+          setUsers((prev) => {
+            const serverUsers: User[] = data.users.map((u: any) => ({
+              user_id: Number(u.user_id),
+              full_name: u.full_name,
+              phone: u.phone || '',
+              birth_year: u.birth_year || 1995,
+              car_brand: u.car_brand || 'טויוטה',
+              car_model: u.car_model || 'קורולה',
+              car_year: u.car_year || 2022,
+              car_seats: u.car_seats || 5,
+              status: u.status || 'busy',
+              role: ADMIN_IDS.includes(Number(u.user_id)) ? 'admin' : (u.role === 'admin' ? 'user' : (u.role || 'user')),
+              station_id: Number(u.station_id || 1),
+              rating: Number(u.rating || 5.0),
+              total_trips: Number(u.total_trips || 0),
+              is_blocked: ADMIN_IDS.includes(Number(u.user_id)) ? 0 : (u.is_blocked ? 1 : 0),
+              debt_balance: Number(u.debt_balance || 0.0),
+              subscription_plan: u.subscription_plan || 'free',
+            }));
+            const serverIds = new Set(serverUsers.map((su) => su.user_id));
+            const remaining = prev.filter((u) => !serverIds.has(u.user_id));
+            return [...serverUsers, ...remaining];
+          });
+        }
+      })
+      .catch((err) => console.warn('users sync note:', err));
+
+    // סנכרון כל ערי הנהגים מ-deliveries_driver_cities
+    fetch('/api/driver/all_cities')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.ok && Array.isArray(data.cities)) {
+          setDriverCities(
+            data.cities.map((c: any) => ({
+              user_id: Number(c.user_id),
+              city_name: c.city_name,
+            }))
+          );
+        }
+      })
+      .catch(() => {});
   }, []);
 
-  // Current active user
-  const currentUser = users.find((u) => u.user_id === currentUserId) || users[0];
+  // סעיף 3: בדיקת סטטוס שוטפת מול הבוט כל 4 שניות לסנכרון מיידי בין מקלדת הטלגרם לאפליקציה
+  useEffect(() => {
+    if (!currentUserId || currentUserId === 0) return;
+    const interval = setInterval(() => {
+      fetch(`/api/driver/status_check?user_id=${currentUserId}`)
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.ok && data.status) {
+            setUsers((prev) =>
+              prev.map((u) =>
+                u.user_id === currentUserId && u.status !== data.status
+                  ? { ...u, status: data.status, debt_balance: data.debt_balance ?? u.debt_balance }
+                  : u
+              )
+            );
+          }
+        })
+        .catch(() => {});
+    }, 4000);
+    return () => clearInterval(interval);
+  }, [currentUserId]);
+
+  // משתמש אורח בטוח - לעולם אינו מקבל תפקיד admin כברירת מחדל!
+  const GUEST_USER: User = {
+    user_id: 0,
+    full_name: 'טוען נתונים...',
+    phone: '',
+    birth_year: 2000,
+    car_brand: '',
+    car_model: '',
+    car_year: 2024,
+    car_seats: 4,
+    status: 'busy',
+    role: 'user', // NEVER ADMIN!
+    station_id: 1,
+    rating: 5.0,
+    total_trips: 0,
+    is_blocked: 0,
+    debt_balance: 0.0,
+  };
+
+  // סעיף 1: משתמש נוכחי - לעולם לא נופל ל-users[0] של המנהל!
+  const currentUser = users.find((u) => u.user_id === currentUserId && currentUserId > 0) || GUEST_USER;
 
   const switchUser = (userId: number) => {
     const found = users.find((u) => u.user_id === userId);
@@ -410,6 +519,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       prev.map((u) => (u.user_id === targetId ? { ...u, status: newStatus } : u))
     );
 
+    // סעיף 3: שליחת API מיידית ל-bot.py לסנכרון מסד הנתונים ועדכון מקלדת הטלגרם בצ'אט
+    fetch('/api/driver/status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: targetId, status: newStatus }),
+    }).catch((err) => console.warn('toggleDriverStatus API sync note:', err));
+
     const message =
       newStatus === 'free'
         ? '🟢 אתה כעת פנוי לעבודה (קריאות באזורים שלך יקפצו)!'
@@ -461,18 +577,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }).catch((err) => console.warn('clearDriverCities sync note:', err));
   };
 
-  // Publish order with text cleaning and driver matching
-  const publishOrder = (
+  // Publish order with text cleaning, driver matching and real server broadcasting
+  const publishOrder = async (
     rawText: string,
     destinationType: 'private' | 'groups',
     customPrice?: number
-  ) => {
+  ): Promise<{ order: Order; eligibleDriversCount: number }> => {
     const cleaned = cleanOrderText(rawText);
     const price = customPrice !== undefined ? customPrice : extractOrderPrice(cleaned);
-    const newOrderId = Math.max(1000, ...orders.map((o) => o.order_id)) + 1;
+    const tempOrderId = Math.max(1000, ...orders.map((o) => o.order_id)) + 1;
 
     const newOrder: Order = {
-      order_id: newOrderId,
+      order_id: tempOrderId,
       text: cleaned,
       price: price,
       publisher_id: currentUser.user_id,
@@ -484,31 +600,62 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       bids: [],
     };
 
-    // Calculate eligible drivers matching city & status & debt <= 500
-    let eligibleCount = 0;
-    if (destinationType === 'private') {
+    setOrders((prev) => [newOrder, ...prev]);
+
+    let finalEligibleCount = 0;
+    let finalOrderId = tempOrderId;
+
+    // סעיף 2: שידור ושמירה אמיתיים ב-PostgreSQL דרך ה-API של הבוט
+    try {
+      const res = await fetch('/api/orders/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: cleaned,
+          raw_text: rawText,
+          price,
+          publisher_id: currentUser.user_id,
+          station_id: currentUser.station_id || 1,
+          destination_type: destinationType,
+          requires_eta: false,
+        }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        if (data.order_id) {
+          finalOrderId = data.order_id;
+          newOrder.order_id = data.order_id;
+          setOrders((prev) =>
+            prev.map((o) => (o.order_id === tempOrderId ? { ...o, order_id: data.order_id } : o))
+          );
+        }
+        if (typeof data.eligible_drivers === 'number') {
+          finalEligibleCount = data.eligible_drivers;
+        }
+      }
+    } catch (err) {
+      console.warn('publishOrder API sync note:', err);
+    }
+
+    // אם הקריאה לא הצליחה לקבל תשובה מהשרת, נשתמש בחישוב המקומי
+    if (finalEligibleCount === 0 && destinationType === 'private') {
       const freeDrivers = users.filter(
         (u) =>
-          u.role === 'user' &&
           u.status === 'free' &&
           !u.is_blocked &&
-          u.debt_balance <= 500
+          (u.debt_balance || 0) <= 500
       );
-
-      eligibleCount = freeDrivers.filter((driver) => {
+      const localCount = freeDrivers.filter((driver) => {
         const userCities = driverCities
           .filter((dc) => dc.user_id === driver.user_id)
           .map((dc) => dc.city_name);
-        if (userCities.length === 0) return true; // gets all if no cities set
-        return userCities.some((c) => cleaned.includes(c));
+        if (userCities.length === 0) return true;
+        return userCities.some((c) => cleaned.includes(c) || rawText.includes(c));
       }).length;
-    } else {
-      eligibleCount = botGroups.length;
+      if (localCount > 0) finalEligibleCount = localCount;
     }
 
-    setOrders((prev) => [newOrder, ...prev]);
-
-    return { order: newOrder, eligibleDriversCount: eligibleCount };
+    return { order: { ...newOrder, order_id: finalOrderId }, eligibleDriversCount: finalEligibleCount };
   };
 
   // Driver submits ETA bid for an order
@@ -953,6 +1100,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         sendBroadcast,
         resetToInitialData,
         isTelegramWebApp,
+        isAuthLoading,
       }}
     >
       {children}

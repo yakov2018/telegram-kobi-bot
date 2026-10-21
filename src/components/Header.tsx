@@ -82,59 +82,63 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           </div>
 
-          {/* View Mode Tabs */}
-          <div className="flex items-center bg-slate-950/70 p-1 rounded-xl border border-slate-800">
-            <button
-              onClick={() => setViewMode('erp')}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                viewMode === 'erp'
-                  ? 'bg-amber-500 text-slate-950 font-bold shadow'
-                  : 'text-slate-300 hover:text-white hover:bg-slate-800/60'
-              }`}
-            >
-              <LayoutDashboard className="w-3.5 h-3.5" />
-              <span>פאנל ניהול ERP</span>
-            </button>
-            <button
-              onClick={() => setViewMode('driver')}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                viewMode === 'driver'
-                  ? 'bg-amber-500 text-slate-950 font-bold shadow'
-                  : 'text-slate-300 hover:text-white hover:bg-slate-800/60'
-              }`}
-            >
-              <Smartphone className="w-3.5 h-3.5" />
-              <span>עמדת נהג</span>
-            </button>
-            <button
-              onClick={() => setViewMode('telegram')}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                viewMode === 'telegram'
-                  ? 'bg-blue-600 text-white font-bold shadow'
-                  : 'text-slate-300 hover:text-white hover:bg-slate-800/60'
-              }`}
-            >
-              <Bot className="w-3.5 h-3.5" />
-              <span>בוט טלגרם (Live)</span>
-            </button>
-          </div>
+          {/* View Mode Tabs - מוצג אך ורק למנהלים וסדרנים לצורכי ניהול ותפעול */}
+          {(currentUser.role === 'admin' || currentUser.role === 'dispatcher') && (
+            <div className="flex items-center bg-slate-950/70 p-1 rounded-xl border border-slate-800">
+              <button
+                onClick={() => setViewMode('erp')}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                  viewMode === 'erp'
+                    ? 'bg-amber-500 text-slate-950 font-bold shadow'
+                    : 'text-slate-300 hover:text-white hover:bg-slate-800/60'
+                }`}
+              >
+                <LayoutDashboard className="w-3.5 h-3.5" />
+                <span>פאנל ניהול ERP</span>
+              </button>
+              <button
+                onClick={() => setViewMode('driver')}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                  viewMode === 'driver'
+                    ? 'bg-amber-500 text-slate-950 font-bold shadow'
+                    : 'text-slate-300 hover:text-white hover:bg-slate-800/60'
+                }`}
+              >
+                <Smartphone className="w-3.5 h-3.5" />
+                <span>עמדת נהג</span>
+              </button>
+              <button
+                onClick={() => setViewMode('telegram')}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                  viewMode === 'telegram'
+                    ? 'bg-blue-600 text-white font-bold shadow'
+                    : 'text-slate-300 hover:text-white hover:bg-slate-800/60'
+                }`}
+              >
+                <Bot className="w-3.5 h-3.5" />
+                <span>בוט טלגרם (Live)</span>
+              </button>
+            </div>
+          )}
 
           {/* User Profile Switcher */}
           <div className="flex items-center gap-3">
-            <div className="hidden md:flex items-center gap-2">
-              <span className="text-xs text-slate-400">החלף משתמש:</span>
-              <select
-                value={currentUser.user_id}
-                onChange={(e) => switchUser(Number(e.target.value))}
-                className="bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-amber-500 cursor-pointer"
-              >
-                {users.map((u) => (
-                  <option key={u.user_id} value={u.user_id}>
-                    {u.full_name} ({ROLE_NAMES[u.role] || u.role})
-                  </option>
-                ))}
-              </select>
-            </div>
+            {(currentUser.role === 'admin' || currentUser.role === 'dispatcher') && (
+              <div className="hidden md:flex items-center gap-2">
+                <span className="text-xs text-slate-400">החלף משתמש:</span>
+                <select
+                  value={currentUser.user_id}
+                  onChange={(e) => switchUser(Number(e.target.value))}
+                  className="bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-amber-500 cursor-pointer"
+                >
+                  {users.map((u) => (
+                    <option key={u.user_id} value={u.user_id}>
+                      {u.full_name} ({ROLE_NAMES[u.role] || u.role})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
 
             {/* Current user badge */}
             <div
