@@ -48,7 +48,7 @@ export interface Station {
 
 export interface DriverBid {
   bid_id?: number;
-  order_id: number;
+  order_id?: number;
   driver_id: number;
   driver_name: string;
   telegram_username?: string;
@@ -59,7 +59,7 @@ export interface DriverBid {
   car_year?: number;
   car_seats: number;
   eta_minutes?: number;
-  eta_text: string;
+  eta_text?: string;
   submitted_at: string;
   status?: 'pending' | 'accepted' | 'rejected';
 }
