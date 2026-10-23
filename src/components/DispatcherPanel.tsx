@@ -58,27 +58,33 @@ export const DispatcherPanel: React.FC = () => {
     debtAmount: 0,
   });
 
-  const currentStation = stations.find((s) => s.station_id === currentUser.station_id) || stations[0];
+  const defaultStation = {
+    station_id: 1,
+    name: 'תחנה ראשית',
+    commission_percent: 10.0,
+  };
+  const currentStation = (stations && stations.find((s) => s.station_id === currentUser?.station_id)) || (stations && stations[0]) || defaultStation;
 
   // Real-time text cleaning & price extraction preview
   const cleanedPreview = cleanOrderText(rawText);
   const detectedPrice = extractOrderPrice(cleanedPreview);
 
   // Filter open orders for current dispatcher's station (or all if admin)
-  const stationOrders = orders.filter((o) => {
-    if (currentUser.role === 'admin') return o.status === 'open';
-    return o.status === 'open' && o.station_id === currentUser.station_id;
+  const stationOrders = (orders || []).filter((o) => {
+    if (currentUser?.role === 'admin') return o.status === 'open';
+    return o.status === 'open' && o.station_id === currentUser?.station_id;
   });
 
   // Calculate matching drivers for preview
-  const matchingDriversCount = users.filter((u) => {
-    if (u.role !== 'user' || u.status !== 'free' || u.is_blocked || u.debt_balance > 500) {
+  const matchingDriversCount = (users || []).filter((u) => {
+    if (u.role !== 'user' || u.status !== 'free' || u.is_blocked || Number(u.debt_balance || 0) > 500) {
       return false;
     }
-    const cities = driverCities.filter((dc) => dc.user_id === u.user_id).map((dc) => dc.city_name);
+    const cities = (driverCities || []).filter((dc) => dc.user_id === u.user_id).map((dc) => dc.city_name);
     if (cities.length === 0) return true;
     return cities.some((c) => cleanedPreview.includes(c));
   }).length;
+
 
   const handlePublish = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -356,7 +362,7 @@ export const DispatcherPanel: React.FC = () => {
                                   </span>
                                   <span className="text-xs text-amber-400 flex items-center gap-0.5 font-bold">
                                     <Star className="w-3 h-3 fill-amber-400" />
-                                    {bid.rating.toFixed(1)}
+                                    {Number(bid?.rating || 5.0).toFixed(1)}
                                   </span>
                                   <span className="text-[11px] text-slate-400 bg-slate-900 px-2 py-0.5 rounded">
                                     {bid.car_brand} {bid.car_model} ({bid.car_seats} מקומות)

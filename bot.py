@@ -2087,24 +2087,29 @@ async def handle_api_auth(request):
 
 async def handle_api_orders(request):
     """החזרת רשימת קריאות פתוחות עבור ה-Mini App"""
-    if USE_POSTGRES:
-        def _get_orders():
-            with get_pg_cursor() as cur:
-                cur.execute('''SELECT order_id, text, price, publisher_id, station_id, driver_id, status, created_at, origin_city, dest_city
-                               FROM deliveries_orders
-                               WHERE status = 'open'
-                               ORDER BY order_id DESC LIMIT 50''')
-                return cur.fetchall()
-        orders_raw = await run_in_thread(_get_orders)
-    else:
-        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-            db.row_factory = aiosqlite.Row
-            orders_raw = await (await db.execute('''SELECT order_id, text, price, publisher_id, station_id, driver_id, status, created_at, origin_city, dest_city
-                                                   FROM deliveries_orders
-                                                   WHERE status = 'open'
-                                                   ORDER BY order_id DESC LIMIT 50''')).fetchall()
-    orders = [dict(o) for o in orders_raw]
-    return cors_json_response({"ok": True, "orders": orders})
+    try:
+        if USE_POSTGRES:
+            def _get_orders():
+                with get_pg_cursor() as cur:
+                    cur.execute('''SELECT order_id, text, price, publisher_id, station_id, driver_id, status, created_at, origin_city, dest_city
+                                   FROM deliveries_orders
+                                   WHERE status = 'open'
+                                   ORDER BY order_id DESC LIMIT 50''')
+                    return cur.fetchall()
+            orders_raw = await run_in_thread(_get_orders)
+        else:
+            async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+                db.row_factory = aiosqlite.Row
+                orders_raw = await (await db.execute('''SELECT order_id, text, price, publisher_id, station_id, driver_id, status, created_at, origin_city, dest_city
+                                                       FROM deliveries_orders
+                                                       WHERE status = 'open'
+                                                       ORDER BY order_id DESC LIMIT 50''')).fetchall()
+        orders = [dict(o) for o in (orders_raw or [])]
+        return cors_json_response({"ok": True, "orders": orders})
+    except Exception as e:
+        logging.error(f"❌ שגיאה ב-handle_api_orders: {e}")
+        return cors_json_response({"ok": True, "orders": []})
+
 
 async def find_matching_drivers(cleaned_text: str, raw_text: str, origin_city: str, dest_city: str) -> list:
     """
@@ -2365,17 +2370,22 @@ async def handle_api_driver_status(request):
 
 async def handle_api_stations(request):
     """החזרת רשימת התחנות והעמלות"""
-    if USE_POSTGRES:
-        def _get_st():
-            with get_pg_cursor() as cur:
-                cur.execute("SELECT station_id, name, commission_percent, is_active FROM deliveries_stations ORDER BY station_id ASC")
-                return cur.fetchall()
-        rows = await run_in_thread(_get_st)
-    else:
-        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-            db.row_factory = aiosqlite.Row
-            rows = await (await db.execute("SELECT station_id, name, commission_percent, is_active FROM deliveries_stations ORDER BY station_id ASC")).fetchall()
-    return cors_json_response({"ok": True, "stations": [dict(r) for r in rows]})
+    try:
+        if USE_POSTGRES:
+            def _get_st():
+                with get_pg_cursor() as cur:
+                    cur.execute("SELECT station_id, name, commission_percent, is_active FROM deliveries_stations ORDER BY station_id ASC")
+                    return cur.fetchall()
+            rows = await run_in_thread(_get_st)
+        else:
+            async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+                db.row_factory = aiosqlite.Row
+                rows = await (await db.execute("SELECT station_id, name, commission_percent, is_active FROM deliveries_stations ORDER BY station_id ASC")).fetchall()
+        return cors_json_response({"ok": True, "stations": [dict(r) for r in (rows or [])]})
+    except Exception as e:
+        logging.error(f"❌ שגיאה ב-handle_api_stations: {e}")
+        return cors_json_response({"ok": True, "stations": []})
+
 
 async def handle_api_driver_profile(request):
     """קבלת פרטי רכב וערי עבודה מה-Mini App ושמירתם ב-deliveries_users וב-deliveries_driver_cities"""
@@ -2438,23 +2448,28 @@ async def handle_api_driver_profile(request):
 # ----------------- נתיבי REST API נוספים לניהול מלא (CRUD) עבור ה-Mini App -----------------
 async def handle_api_users(request):
     """החזרת כל משתמשי המערכת עבור פאנל הניהול של ה-Mini App"""
-    if USE_POSTGRES:
-        def _get():
-            with get_pg_cursor() as cur:
-                cur.execute("""SELECT user_id, full_name, phone, telegram_username, role, status, 
-                                      station_id, rating, total_trips, is_blocked, debt_balance, 
-                                      car_brand, car_model, car_year, car_seats, subscription_plan 
-                               FROM deliveries_users ORDER BY user_id ASC""")
-                return cur.fetchall()
-        rows = await run_in_thread(_get)
-    else:
-        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-            db.row_factory = aiosqlite.Row
-            rows = await (await db.execute("""SELECT user_id, full_name, phone, telegram_username, role, status, 
-                                                     station_id, rating, total_trips, is_blocked, debt_balance, 
-                                                     car_brand, car_model, car_year, car_seats, subscription_plan 
-                                              FROM deliveries_users ORDER BY user_id ASC""")).fetchall()
-    return cors_json_response({"ok": True, "users": [dict(r) for r in rows]})
+    try:
+        if USE_POSTGRES:
+            def _get():
+                with get_pg_cursor() as cur:
+                    cur.execute("""SELECT user_id, full_name, phone, telegram_username, role, status, 
+                                          station_id, rating, total_trips, is_blocked, debt_balance, 
+                                          car_brand, car_model, car_year, car_seats, subscription_plan 
+                                   FROM deliveries_users ORDER BY user_id ASC""")
+                    return cur.fetchall()
+            rows = await run_in_thread(_get)
+        else:
+            async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+                db.row_factory = aiosqlite.Row
+                rows = await (await db.execute("""SELECT user_id, full_name, phone, telegram_username, role, status, 
+                                                         station_id, rating, total_trips, is_blocked, debt_balance, 
+                                                         car_brand, car_model, car_year, car_seats, subscription_plan 
+                                                  FROM deliveries_users ORDER BY user_id ASC""")).fetchall()
+        return cors_json_response({"ok": True, "users": [dict(r) for r in (rows or [])]})
+    except Exception as e:
+        logging.error(f"❌ שגיאה ב-handle_api_users: {e}")
+        return cors_json_response({"ok": True, "users": []})
+
 
 async def handle_api_users_update(request):
     """עדכון הרשאות, תפקיד, שיוך לתחנה או מנוי של משתמש"""
@@ -2563,21 +2578,26 @@ async def handle_api_stations_update(request):
 
 async def handle_api_debts(request):
     """החזרת יומן החובות והערעורים"""
-    if USE_POSTGRES:
-        def _get():
-            with get_pg_cursor() as cur:
-                cur.execute("""SELECT debt_id, order_id, driver_id, station_id, amount, status, reason, 
-                                      appeal_status, appeal_reason, transaction_type, created_at 
-                               FROM deliveries_debts ORDER BY debt_id DESC LIMIT 50""")
-                return cur.fetchall()
-        rows = await run_in_thread(_get)
-    else:
-        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-            db.row_factory = aiosqlite.Row
-            rows = await (await db.execute("""SELECT debt_id, order_id, driver_id, station_id, amount, status, reason, 
-                                                     appeal_status, appeal_reason, transaction_type, created_at 
-                                              FROM deliveries_debts ORDER BY debt_id DESC LIMIT 50""")).fetchall()
-    return cors_json_response({"ok": True, "debts": [dict(r) for r in rows]})
+    try:
+        if USE_POSTGRES:
+            def _get():
+                with get_pg_cursor() as cur:
+                    cur.execute("""SELECT debt_id, order_id, driver_id, station_id, amount, status, reason, 
+                                          appeal_status, appeal_reason, transaction_type, created_at 
+                                   FROM deliveries_debts ORDER BY debt_id DESC LIMIT 50""")
+                    return cur.fetchall()
+            rows = await run_in_thread(_get)
+        else:
+            async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+                db.row_factory = aiosqlite.Row
+                rows = await (await db.execute("""SELECT debt_id, order_id, driver_id, station_id, amount, status, reason, 
+                                                         appeal_status, appeal_reason, transaction_type, created_at 
+                                                  FROM deliveries_debts ORDER BY debt_id DESC LIMIT 50""")).fetchall()
+        return cors_json_response({"ok": True, "debts": [dict(r) for r in (rows or [])]})
+    except Exception as e:
+        logging.error(f"❌ שגיאה ב-handle_api_debts: {e}")
+        return cors_json_response({"ok": True, "debts": []})
+
 
 async def handle_api_debts_charge(request):
     """חיוב נהג ידני או הטלת קנס (רישום ביומן Ledger, עדכון debt_balance והתראה מיידית לנהג בטלגרם עם כפתור ערעור)"""

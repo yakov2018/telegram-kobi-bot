@@ -75,15 +75,15 @@ export const DriverPanel: React.FC = () => {
 
   const [feedback, setFeedback] = useState<string | null>(null);
 
-  const driverCities = getDriverCities(currentUser.user_id);
-  const driverDebts = debts.filter((d) => d.driver_id === currentUser.user_id && d.status === 'unpaid');
-  const isOverDebtLimit = currentUser.debt_balance > 500.0;
+  const driverCities = getDriverCities(currentUser?.user_id ?? 0);
+  const driverDebts = (debts || []).filter((d) => d.driver_id === currentUser?.user_id && d.status === 'unpaid');
+  const isOverDebtLimit = Number(currentUser?.debt_balance || 0) > 500.0;
 
   // Open orders matching driver's cities
-  const matchingOrders = orders.filter((o) => {
+  const matchingOrders = (orders || []).filter((o) => {
     if (o.status !== 'open') return false;
     if (driverCities.length === 0) return true; // gets all if no cities defined
-    return driverCities.some((c) => o.text.includes(c));
+    return driverCities.some((c) => (o?.text || '').includes(c));
   });
 
   const handleStatusToggle = () => {
@@ -94,7 +94,7 @@ export const DriverPanel: React.FC = () => {
 
   const handleAddCity = (cityName: string) => {
     if (!cityName.trim()) return;
-    addDriverCity(currentUser.user_id, cityName.trim());
+    addDriverCity(currentUser?.user_id ?? 0, cityName.trim());
     setNewCityInput('');
   };
 
@@ -107,7 +107,7 @@ export const DriverPanel: React.FC = () => {
       return;
     }
 
-    const res = submitOrderBid(etaModal.orderId, currentUser.user_id, minutes);
+    const res = submitOrderBid(etaModal.orderId, currentUser?.user_id ?? 0, minutes);
     setEtaModal({ isOpen: false, orderId: 0, price: 0, text: '' });
     setFeedback(res.message);
     setTimeout(() => setFeedback(null), 5000);
@@ -135,14 +135,14 @@ export const DriverPanel: React.FC = () => {
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-xl font-extrabold text-white">{currentUser.full_name}</h2>
+                <h2 className="text-xl font-extrabold text-white">{currentUser?.full_name || 'נהג'}</h2>
                 <span className="text-xs px-2.5 py-0.5 rounded-full bg-slate-900 border border-slate-700 text-amber-300 font-semibold flex items-center gap-1">
                   <Star className="w-3 h-3 fill-amber-300" />
-                  {currentUser.rating.toFixed(1)} ({currentUser.total_trips} נסיעות)
+                  {Number(currentUser?.rating || 5.0).toFixed(1)} ({currentUser?.total_trips || 0} נסיעות)
                 </span>
               </div>
               <p className="text-xs text-slate-400 mt-1">
-                רכב: <strong className="text-slate-200">{currentUser.car_brand} {currentUser.car_model}</strong> ({currentUser.car_year}) • {currentUser.car_seats} מקומות | טל: {currentUser.phone}
+                רכב: <strong className="text-slate-200">{currentUser?.car_brand || ''} {currentUser?.car_model || ''}</strong> ({currentUser?.car_year || ''}) • {currentUser?.car_seats || 4} מקומות | טל: {currentUser?.phone || ''}
               </p>
             </div>
           </div>
@@ -152,19 +152,19 @@ export const DriverPanel: React.FC = () => {
             <button
               onClick={handleStatusToggle}
               className={`flex-1 md:flex-initial px-5 py-3 rounded-xl font-extrabold text-sm transition flex items-center justify-center gap-2 shadow-md cursor-pointer ${
-                currentUser.status === 'free'
+                currentUser?.status === 'free'
                   ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
                   : 'bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/30'
               }`}
             >
-              <span className={`w-3 h-3 rounded-full ${currentUser.status === 'free' ? 'bg-slate-950' : 'bg-red-400 animate-pulse'}`} />
-              <span>{currentUser.status === 'free' ? '🟢 פנוי לעבודה (קולט קריאות)' : '🔴 תפוס (עצור קריאות)'}</span>
+              <span className={`w-3 h-3 rounded-full ${currentUser?.status === 'free' ? 'bg-slate-950' : 'bg-red-400 animate-pulse'}`} />
+              <span>{currentUser?.status === 'free' ? '🟢 פנוי לעבודה (קולט קריאות)' : '🔴 תפוס (עצור קריאות)'}</span>
             </button>
 
             <div className="bg-slate-900 px-4 py-2.5 rounded-xl border border-slate-700 text-center">
               <span className="text-[11px] text-slate-400 block">חוב לתחנה</span>
               <span className={`text-base font-extrabold ${isOverDebtLimit ? 'text-red-400 animate-bounce' : 'text-amber-400'}`}>
-                ₪{currentUser.debt_balance.toFixed(2)}
+                ₪{Number(currentUser?.debt_balance || 0).toFixed(2)}
               </span>
             </div>
           </div>
@@ -299,7 +299,7 @@ export const DriverPanel: React.FC = () => {
                         </div>
                       </div>
                       <span className="text-sm font-extrabold text-amber-400 bg-slate-800 px-2.5 py-1 rounded-lg">
-                        ₪{d.amount.toFixed(2)}
+                        ₪{Number(d?.amount || 0).toFixed(2)}
                       </span>
                     </div>
 

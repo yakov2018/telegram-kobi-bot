@@ -30,9 +30,9 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const { currentUser, users, stations, switchUser, resetToInitialData, isTelegramWebApp } = useApp();
 
-  const currentStation = stations.find((s) => s.station_id === currentUser.station_id);
+  const currentStation = (stations || []).find((s) => s.station_id === currentUser?.station_id);
 
-  const getRoleIcon = (role: Role) => {
+  const getRoleIcon = (role?: Role) => {
     switch (role) {
       case 'admin':
         return <Shield className="w-4 h-4 text-amber-400" />;
@@ -46,7 +46,7 @@ export const Header: React.FC<HeaderProps> = ({
     }
   };
 
-  const getRoleBadgeColor = (role: Role) => {
+  const getRoleBadgeColor = (role?: Role) => {
     switch (role) {
       case 'admin':
         return 'bg-amber-500/10 text-amber-300 border-amber-500/30';
@@ -73,7 +73,7 @@ export const Header: React.FC<HeaderProps> = ({
               <div className="flex items-center gap-2">
                 <span className="font-extrabold text-lg text-white tracking-tight">Kobi ERP Bot</span>
                 <span className="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">
-                  {currentStation ? currentStation.name : 'מערכת כללית'} ({currentStation ? `${currentStation.commission_percent}% עמלה` : ''})
+                  {currentStation ? currentStation.name : 'מערכת כללית'} {currentStation ? `(${currentStation.commission_percent}% עמלה)` : ''}
                 </span>
               </div>
               <p className="text-xs text-slate-400 hidden sm:block">
@@ -98,7 +98,7 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
 
             {/* 2. כרטיסיית סדרן - נהג רגיל לא רואה ב-DOM! רק סדרן, מנהל תחנה ומנהל מערכת */}
-            {(currentUser.role === 'dispatcher' || currentUser.role === 'station_manager' || currentUser.role === 'admin') && (
+            {(currentUser?.role === 'dispatcher' || currentUser?.role === 'station_manager' || currentUser?.role === 'admin') && (
               <button
                 onClick={() => setActiveTab('dispatcher')}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold transition-all ${
@@ -113,7 +113,7 @@ export const Header: React.FC<HeaderProps> = ({
             )}
 
             {/* 3. כרטיסיית ניהול מערכת - אך ורק מנהל מערכת (Super Admin) רואה ב-DOM! */}
-            {currentUser.role === 'admin' && (
+            {currentUser?.role === 'admin' && (
               <button
                 onClick={() => setActiveTab('admin')}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-black transition-all ${
@@ -131,17 +131,17 @@ export const Header: React.FC<HeaderProps> = ({
           {/* User Profile Switcher & Actions */}
           <div className="flex items-center gap-3">
             {/* החלפת משתמש זמינה אך ורק ל-admin מורשה - נחסם לחלוטין מ-DOM של משתמשים/סדרנים */}
-            {currentUser.role === 'admin' && (
+            {currentUser?.role === 'admin' && (
               <div className="hidden md:flex items-center gap-2">
                 <span className="text-xs text-slate-400">החלף משתמש:</span>
                 <select
-                  value={currentUser.user_id}
+                  value={currentUser?.user_id ?? 0}
                   onChange={(e) => switchUser(Number(e.target.value))}
                   className="bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-amber-500 cursor-pointer"
                 >
-                  {users.map((u) => (
+                  {(users || []).map((u) => (
                     <option key={u.user_id} value={u.user_id}>
-                      {u.full_name} ({ROLE_NAMES[u.role] || u.role})
+                      {u.full_name || `משתמש #${u.user_id}`} ({ROLE_NAMES[u.role] || u.role})
                     </option>
                   ))}
                 </select>
@@ -151,11 +151,11 @@ export const Header: React.FC<HeaderProps> = ({
             {/* Current user badge */}
             <div
               className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-semibold ${getRoleBadgeColor(
-                currentUser.role
+                currentUser?.role
               )}`}
             >
-              {getRoleIcon(currentUser.role)}
-              <span className="truncate max-w-[120px]">{currentUser.full_name}</span>
+              {getRoleIcon(currentUser?.role)}
+              <span className="truncate max-w-[120px]">{currentUser?.full_name || 'משתמש'}</span>
             </div>
 
             {/* Telegram WebApp indicator if opened inside Telegram */}
@@ -166,10 +166,10 @@ export const Header: React.FC<HeaderProps> = ({
             )}
 
             {/* BotFather Guide & Link Button - זמין למנהלים בלבד */}
-            {currentUser.role === 'admin' && (
+            {currentUser?.role === 'admin' && (
               <button
                 onClick={onOpenGuide}
-                className="px-2.5 py-1.5 rounded-lg bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white border border-blue-500/30 text-xs font-bold transition flex items-center gap-1.5 shadow-sm"
+                className="px-2.5 py-1.5 rounded-lg bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white border border-blue-500/30 text-xs font-bold transition flex items-center gap-1.5 shadow-sm cursor-pointer"
                 title="קבל את הקישור ל-BotFather בטלגרם"
               >
                 <Smartphone className="w-3.5 h-3.5" />
@@ -178,18 +178,18 @@ export const Header: React.FC<HeaderProps> = ({
             )}
 
             {/* Quick Actions - הרשמת נהג ידנית זמינה רק ל-admin או station_manager */}
-            {(currentUser.role === 'admin' || currentUser.role === 'station_manager') && (
+            {(currentUser?.role === 'admin' || currentUser?.role === 'station_manager') && (
               <button
                 onClick={onOpenRegister}
                 title="הרשמת נהג חדש (FSM)"
-                className="p-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-amber-400 hover:bg-slate-700 border border-slate-700 transition"
+                className="p-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-amber-400 hover:bg-slate-700 border border-slate-700 transition cursor-pointer"
               >
                 <UserPlus className="w-4 h-4" />
               </button>
             )}
 
             {/* איפוס נתונים - הרשאת admin בלבד */}
-            {currentUser.role === 'admin' && (
+            {currentUser?.role === 'admin' && (
               <button
                 onClick={() => {
                   if (window.confirm('האם לאפס את כל הנתונים לברירת המחדל של הבוט?')) {
@@ -197,7 +197,7 @@ export const Header: React.FC<HeaderProps> = ({
                   }
                 }}
                 title="איפוס נתונים לברירת מחדל"
-                className="p-1.5 rounded-lg bg-slate-800 text-slate-400 hover:text-red-400 hover:bg-slate-700 border border-slate-700 transition"
+                className="p-1.5 rounded-lg bg-slate-800 text-slate-400 hover:text-red-400 hover:bg-slate-700 border border-slate-700 transition cursor-pointer"
               >
                 <RotateCcw className="w-4 h-4" />
               </button>
@@ -208,3 +208,4 @@ export const Header: React.FC<HeaderProps> = ({
     </header>
   );
 };
+

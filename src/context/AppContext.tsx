@@ -222,13 +222,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const tg = (window as any).Telegram?.WebApp;
     if (tg) {
       try {
-        tg.ready();
-        tg.expand();
         setIsTelegramWebApp(true);
         initDataStr = tg.initData || '';
         tgUser = tg.initDataUnsafe?.user || null;
       } catch (err) {
-        console.warn('Telegram WebApp init note:', err);
+        console.error('🚨 [Telegram WebApp pre-init error]:', err);
       }
     }
 
@@ -315,13 +313,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       })
       .catch((err) => {
-        console.warn('API /api/auth sync note:', err);
+        console.error('🚨 [API /api/auth Error]:', err);
         setAuthenticatedUser(null);
         setIsAuthenticated(false);
         setAuthError('שגיאת תקשורת באימות מול השרת. אנא פתח מחדש מתוך הטלגרם.');
       })
       .finally(() => {
         setIsAuthLoading(false);
+        // שחרור האפליקציה בטלגרם: קריאה ל-ready() ו-expand() רק לאחר סיום הטעינה והרינדור הראשוני!
+        try {
+          const tgObj = (window as any).Telegram?.WebApp;
+          if (tgObj) {
+            tgObj.ready();
+            tgObj.expand();
+          }
+        } catch (e) {
+          console.error('🚨 [Telegram WebApp ready error]:', e);
+        }
       });
   }, []);
 
@@ -342,7 +350,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             });
           }
         })
-        .catch(() => {});
+        .catch((err) => console.error('🚨 [API /api/driver/cities Error]:', err));
     }
   }, [currentUserId]);
 
@@ -361,7 +369,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           );
         }
       })
-      .catch(() => {});
+      .catch((err) => console.error('🚨 [API /api/stations Error]:', err));
 
     fetch('/api/orders')
       .then((res) => res.json())
@@ -383,7 +391,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           );
         }
       })
-      .catch(() => {});
+      .catch((err) => console.error('🚨 [API /api/orders Error]:', err));
 
     fetch('/api/debts')
       .then((res) => res.json())
@@ -404,7 +412,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           );
         }
       })
-      .catch(() => {});
+      .catch((err) => console.error('🚨 [API /api/debts Error]:', err));
 
     // סנכרון כל המשתמשים האמיתיים ממסד הנתונים בענן
     fetch('/api/users')
@@ -436,7 +444,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           });
         }
       })
-      .catch((err) => console.warn('users sync note:', err));
+      .catch((err) => console.error('🚨 [API /api/users Error]:', err));
 
     // סנכרון כל ערי הנהגים מ-deliveries_driver_cities
     fetch('/api/driver/all_cities')
@@ -451,7 +459,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           );
         }
       })
-      .catch(() => {});
+      .catch((err) => console.error('🚨 [API /api/driver/all_cities Error]:', err));
   }, []);
 
   // סעיף 3: בדיקת סטטוס שוטפת מול הבוט כל 4 שניות לסנכרון מיידי בין מקלדת הטלגרם לאפליקציה

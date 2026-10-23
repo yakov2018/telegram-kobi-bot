@@ -17,14 +17,15 @@ export const AppContent: React.FC = () => {
 
   // סנכרון כרטיסיית ברירת המחדל לפי תפקיד המשתמש
   useEffect(() => {
-    if (currentUser.role === 'admin') {
+    if (currentUser?.role === 'admin') {
       setActiveTab('admin');
-    } else if (currentUser.role === 'dispatcher' || currentUser.role === 'station_manager') {
+    } else if (currentUser?.role === 'dispatcher' || currentUser?.role === 'station_manager') {
       setActiveTab('dispatcher');
     } else {
       setActiveTab('driver');
     }
-  }, [currentUser.role]);
+  }, [currentUser?.role]);
+
 
   // 1. מסך טעינה מהשרת
   if (isAuthLoading) {
@@ -66,8 +67,8 @@ export const AppContent: React.FC = () => {
   }
 
   // אבטחה קפדנית על ניווט בין כרטיסיות (Protected Tabs)
-  const isDispatcherAllowed = currentUser.role === 'dispatcher' || currentUser.role === 'station_manager' || currentUser.role === 'admin';
-  const isAdminAllowed = currentUser.role === 'admin';
+  const isDispatcherAllowed = currentUser?.role === 'dispatcher' || currentUser?.role === 'station_manager' || currentUser?.role === 'admin';
+  const isAdminAllowed = currentUser?.role === 'admin';
 
   // חישוב הכרטיסייה הבטוחה: אם נהג רגיל מנסה להפעיל כרטיסיית סדרן או אדמין - נכפה מיד 'driver'
   const safeTab: 'driver' | 'dispatcher' | 'admin' =
@@ -99,7 +100,7 @@ export const AppContent: React.FC = () => {
         {safeTab === 'dispatcher' && isDispatcherAllowed && (
           <div className="space-y-4">
             {/* עבור מנהל תחנה או סופר אדמין, מאפשר מעבר בין עמדת שיגור לבין פאנל סטטיסטיקות תחנה */}
-            {(currentUser.role === 'station_manager' || currentUser.role === 'admin') && (
+            {(currentUser?.role === 'station_manager' || currentUser?.role === 'admin') && (
               <div className="flex items-center justify-between bg-slate-900 border border-slate-800 p-2.5 rounded-2xl">
                 <span className="text-xs font-bold text-white px-2">תצוגת סדרן / תחנה:</span>
                 <div className="flex gap-1.5">
@@ -123,7 +124,7 @@ export const AppContent: React.FC = () => {
               </div>
             )}
 
-            {dispatcherSubTab === 'analytics' && (currentUser.role === 'station_manager' || currentUser.role === 'admin') ? (
+            {dispatcherSubTab === 'analytics' && (currentUser?.role === 'station_manager' || currentUser?.role === 'admin') ? (
               <StationManagerDashboard />
             ) : (
               <DispatcherPanel />

@@ -34,32 +34,33 @@ export const StationManagerDashboard: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [feedback, setFeedback] = useState<string | null>(null);
 
-  const myStationId = currentUser.station_id || 1;
-  const currentStation = stations.find((s) => s.station_id === myStationId) || {
+  const myStationId = currentUser?.station_id || 1;
+  const currentStation = (stations || []).find((s) => s.station_id === myStationId) || {
     station_id: myStationId,
     name: `תחנה #${myStationId}`,
     commission_percent: 10.0,
   };
 
   // Strictly filter data to this manager's station only!
-  const stationOrders = orders.filter((o) => o.station_id === myStationId);
-  const stationDebts = debts.filter((d) => d.station_id === myStationId);
-  const stationDispatchers = users.filter(
-    (u) => u.station_id === myStationId && (u.role === 'dispatcher' || u.role === 'station_manager')
+  const stationOrders = (orders || []).filter((o) => o?.station_id === myStationId);
+  const stationDebts = (debts || []).filter((d) => d?.station_id === myStationId);
+  const stationDispatchers = (users || []).filter(
+    (u) => u?.station_id === myStationId && (u?.role === 'dispatcher' || u?.role === 'station_manager')
   );
 
   // Compute station statistics
-  const openCount = stationOrders.filter((o) => o.status === 'open').length;
-  const assignedCount = stationOrders.filter((o) => o.status === 'assigned').length;
-  const closedCount = stationOrders.filter((o) => o.status === 'closed').length;
-  const cancelledCount = stationOrders.filter((o) => o.status === 'cancelled').length;
+  const openCount = stationOrders.filter((o) => o?.status === 'open').length;
+  const assignedCount = stationOrders.filter((o) => o?.status === 'assigned').length;
+  const closedCount = stationOrders.filter((o) => o?.status === 'closed').length;
+  const cancelledCount = stationOrders.filter((o) => o?.status === 'cancelled').length;
   const totalRevenue = stationOrders
-    .filter((o) => o.status === 'closed')
-    .reduce((acc, o) => acc + (o.price || 0), 0);
+    .filter((o) => o?.status === 'closed')
+    .reduce((acc, o) => acc + (o?.price || 0), 0);
   const totalCommission = stationDebts
-    .filter((d) => d.status !== 'cancelled')
-    .reduce((acc, d) => acc + (d.amount || 0), 0);
-  const pendingAppealsCount = stationDebts.filter((d) => d.appeal_status === 'pending').length;
+    .filter((d) => d?.status !== 'cancelled')
+    .reduce((acc, d) => acc + (d?.amount || 0), 0);
+  const pendingAppealsCount = stationDebts.filter((d) => d?.appeal_status === 'pending').length;
+
 
   const showNotification = (msg: string) => {
     setFeedback(msg);
@@ -133,7 +134,7 @@ export const StationManagerDashboard: React.FC = () => {
         <div className="flex items-center gap-3 w-full md:w-auto">
           <div className="bg-slate-950/80 px-4 py-2 rounded-xl border border-slate-800 text-center flex-1 md:flex-initial">
             <span className="text-[11px] text-slate-400 block font-medium">עמלות שנצברו לתחנה</span>
-            <span className="text-lg font-black text-emerald-400">₪{totalCommission.toFixed(2)}</span>
+            <span className="text-lg font-black text-emerald-400">₪{Number(totalCommission || 0).toFixed(2)}</span>
           </div>
         </div>
       </div>
@@ -469,7 +470,7 @@ export const StationManagerDashboard: React.FC = () => {
                       <td className="p-3 font-bold text-white">
                         {driver ? driver.full_name : `נהג #${d.driver_id}`}
                       </td>
-                      <td className="p-3 font-extrabold text-amber-400">₪{d.amount.toFixed(2)} (🍓)</td>
+                      <td className="p-3 font-extrabold text-amber-400">₪{Number(d?.amount || 0).toFixed(2)} (🍓)</td>
                       <td className="p-3">
                         <span
                           className={`px-2 py-0.5 rounded-full text-[11px] font-bold ${

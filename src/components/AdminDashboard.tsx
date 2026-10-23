@@ -48,13 +48,14 @@ export const AdminDashboard: React.FC = () => {
   } = useApp();
 
   // סעיף אבטחה קשיחה: אם המשתמש אינו מנהל מערכת, הקומפוננטה חוסמת גישה מיידית
-  if (currentUser.role !== 'admin') {
+  if (currentUser?.role !== 'admin') {
     return (
       <div className="bg-red-500/10 border border-red-500/30 rounded-2xl p-6 text-center text-red-300 font-bold my-8">
         ⛔ גישה חסומה: פאנל ניהול המערכת מיועד אך ורק למנהלי מערכת מורשים (Super Admin).
       </div>
     );
   }
+
 
   const [activeTab, setActiveTab] = useState<'users' | 'system' | 'subscriptions' | 'stations' | 'appeals' | 'broadcast'>('users');
   const [simulationView, setSimulationView] = useState<'none' | 'dispatcher' | 'driver'>('none');
@@ -139,17 +140,18 @@ export const AdminDashboard: React.FC = () => {
   // Aliases list in memory for display
   const [customAliases, setCustomAliases] = useState<Array<{ alias: string; standard: string }>>([]);
 
-  const pendingAppeals = debts.filter((d) => d.appeal_status === 'pending');
-  const openOrdersCount = orders.filter((o) => o.status === 'open').length;
-  const activeDriversCount = users.filter((u) => u.role === 'user' && u.status === 'free' && !u.is_blocked).length;
-  const totalDebtsSum = users.reduce((sum, u) => sum + (u.debt_balance || 0), 0);
+  const pendingAppeals = (debts || []).filter((d) => d?.appeal_status === 'pending');
+  const openOrdersCount = (orders || []).filter((o) => o?.status === 'open').length;
+  const activeDriversCount = (users || []).filter((u) => u?.role === 'user' && u?.status === 'free' && !u?.is_blocked).length;
+  const totalDebtsSum = (users || []).reduce((sum, u) => sum + Number(u?.debt_balance || 0), 0);
 
-  const filteredUsers = users.filter(
+  const filteredUsers = (users || []).filter(
     (u) =>
-      u.full_name.includes(searchUser) ||
-      u.phone.includes(searchUser) ||
-      u.user_id.toString().includes(searchUser)
+      (u?.full_name || '').includes(searchUser) ||
+      (u?.phone || '').includes(searchUser) ||
+      String(u?.user_id || '').includes(searchUser)
   );
+
 
   const handleCreateStation = (e: React.FormEvent) => {
     e.preventDefault();
@@ -208,9 +210,9 @@ export const AdminDashboard: React.FC = () => {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans" dir="rtl">
-      {/* Top Admin Sticky Bar */}
-      <header className="sticky top-0 z-50 bg-slate-900/95 backdrop-blur-md border-b border-amber-500/30 p-3.5 shadow-lg shadow-amber-500/5">
+    <div className="space-y-6 animate-fade-in" dir="rtl">
+      {/* Top Admin Summary Bar */}
+      <div className="bg-slate-900/95 border border-amber-500/30 p-4 rounded-2xl shadow-lg shadow-amber-500/5">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-amber-500 via-amber-400 to-amber-600 flex items-center justify-center text-slate-950 font-black text-xl shadow-md">
@@ -229,7 +231,7 @@ export const AdminDashboard: React.FC = () => {
                 </span>
               </div>
               <p className="text-xs text-slate-400">
-                מחובר: <strong className="text-amber-300">{currentUser.full_name}</strong> (מזהה טלגרם: <span className="font-mono">{currentUser.user_id}</span>)
+                מחובר: <strong className="text-amber-300">{currentUser?.full_name}</strong> (מזהה טלגרם: <span className="font-mono">{currentUser?.user_id}</span>)
               </p>
             </div>
           </div>
@@ -240,7 +242,7 @@ export const AdminDashboard: React.FC = () => {
             <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs">
               <button
                 onClick={() => setSimulationView('none')}
-                className={`px-3 py-1 rounded-lg font-bold transition ${
+                className={`px-3 py-1 rounded-lg font-bold transition cursor-pointer ${
                   simulationView === 'none' ? 'bg-amber-500 text-slate-950' : 'text-slate-300 hover:text-white'
                 }`}
               >
@@ -248,7 +250,7 @@ export const AdminDashboard: React.FC = () => {
               </button>
               <button
                 onClick={() => setSimulationView('dispatcher')}
-                className={`px-3 py-1 rounded-lg font-bold transition ${
+                className={`px-3 py-1 rounded-lg font-bold transition cursor-pointer ${
                   simulationView === 'dispatcher' ? 'bg-blue-600 text-white' : 'text-slate-300 hover:text-white'
                 }`}
               >
@@ -256,7 +258,7 @@ export const AdminDashboard: React.FC = () => {
               </button>
               <button
                 onClick={() => setSimulationView('driver')}
-                className={`px-3 py-1 rounded-lg font-bold transition ${
+                className={`px-3 py-1 rounded-lg font-bold transition cursor-pointer ${
                   simulationView === 'driver' ? 'bg-emerald-600 text-white' : 'text-slate-300 hover:text-white'
                 }`}
               >
@@ -265,14 +267,15 @@ export const AdminDashboard: React.FC = () => {
             </div>
           </div>
         </div>
-      </header>
+      </div>
 
-      {/* Main Admin Container */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 space-y-6">
+      {/* Main Admin Content */}
+      <div className="space-y-6">
         {/* If simulating Dispatcher or Driver, render them with back button */}
         {simulationView === 'dispatcher' && (
           <div className="space-y-4">
             <div className="flex items-center justify-between bg-blue-950/40 border border-blue-800/60 p-3 rounded-2xl text-xs text-blue-200">
+
               <span>תצוגת סימולציית סדרן (שיגור קריאות, חלוקה לנהגים ומעקב)</span>
               <button
                 onClick={() => setSimulationView('none')}
@@ -309,7 +312,7 @@ export const AdminDashboard: React.FC = () => {
               <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 shadow-sm flex items-center justify-between">
                 <div>
                   <span className="text-xs text-slate-400 block font-medium">סך הכל משתמשים ונהגים</span>
-                  <span className="text-2xl font-black text-amber-400 mt-1 block">{users.length}</span>
+                  <span className="text-2xl font-black text-amber-400 mt-1 block">{(users || []).length}</span>
                   <span className="text-[11px] text-emerald-400 mt-0.5 block">{activeDriversCount} פנויים לעבודה</span>
                 </div>
                 <div className="w-12 h-12 rounded-xl bg-amber-500/10 text-amber-400 flex items-center justify-center text-2xl font-bold border border-amber-500/20">
@@ -321,7 +324,7 @@ export const AdminDashboard: React.FC = () => {
                 <div>
                   <span className="text-xs text-slate-400 block font-medium">קריאות פתוחות כעת</span>
                   <span className="text-2xl font-black text-sky-400 mt-1 block">{openOrdersCount}</span>
-                  <span className="text-[11px] text-slate-400 mt-0.5 block">סך הכל נסיעות: {users.reduce((acc, u) => acc + u.total_trips, 0)}</span>
+                  <span className="text-[11px] text-slate-400 mt-0.5 block">סך הכל נסיעות: {(users || []).reduce((acc, u) => acc + Number(u?.total_trips || 0), 0)}</span>
                 </div>
                 <div className="w-12 h-12 rounded-xl bg-sky-500/10 text-sky-400 flex items-center justify-center text-2xl font-bold border border-sky-500/20">
                   🎫
@@ -331,7 +334,7 @@ export const AdminDashboard: React.FC = () => {
               <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 shadow-sm flex items-center justify-between">
                 <div>
                   <span className="text-xs text-slate-400 block font-medium">תחנות מורשות</span>
-                  <span className="text-2xl font-black text-purple-400 mt-1 block">{stations.length}</span>
+                  <span className="text-2xl font-black text-purple-400 mt-1 block">{(stations || []).length}</span>
                   <span className="text-[11px] text-purple-300 mt-0.5 block">עמלה ממוצעת: 10%</span>
                 </div>
                 <div className="w-12 h-12 rounded-xl bg-purple-500/10 text-purple-400 flex items-center justify-center text-2xl font-bold border border-purple-500/20">
@@ -500,7 +503,7 @@ export const AdminDashboard: React.FC = () => {
                             תחנה #{u.station_id}
                           </td>
                           <td className="py-3 px-3 font-mono font-bold text-amber-400">
-                            ₪{u.debt_balance.toFixed(2)}
+                            ₪{Number(u?.debt_balance || 0).toFixed(2)}
                           </td>
                           <td className="py-3 px-3">
                             <div className="flex items-center justify-center gap-1.5 flex-wrap">
@@ -915,7 +918,7 @@ export const AdminDashboard: React.FC = () => {
                                 <span className="text-slate-400 font-mono text-[11px]">(קריאה #{d.order_id})</span>
                               ) : null}
                               <span className="font-mono font-bold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/30">
-                                ₪{d.amount.toFixed(2)} (🍓)
+                                ₪{Number(d?.amount || 0).toFixed(2)} (🍓)
                               </span>
                               <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
                                 d.status === 'unpaid' ? 'bg-red-500/20 text-red-300 border border-red-500/30' : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
@@ -1020,7 +1023,7 @@ export const AdminDashboard: React.FC = () => {
             )}
           </>
         )}
-      </main>
+      </div>
 
       {/* 1. Modal: עריכת תחנה קיימת (שם ועמלה) */}
       {editStationModal.isOpen && (
