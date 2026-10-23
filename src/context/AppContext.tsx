@@ -1,19 +1,8 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import { User, Station, Order, Debt, DriverCity, BotGroup, BroadcastMessage, Role } from '../types';
-import {
-  INITIAL_STATIONS,
-  INITIAL_USERS,
-  INITIAL_DRIVER_CITIES,
-  INITIAL_ORDERS,
-  INITIAL_DEBTS,
-  INITIAL_BOT_GROUPS,
-} from '../mockData';
-import {
-  cleanOrderText,
-  extractOrderPrice,
-  calculateCommission,
-  calculateNewRating,
-} from '../utils/orderUtils';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { User, Station, Order, Debt, DriverCity, BotGroup, BroadcastMessage, Role, DriverBid } from '../types';
+import { calculateCommission } from '../utils/orderUtils';
+
+export const ADMIN_IDS = [8644923212, 552821474];
 
 interface AppContextType {
   currentUser: User;
@@ -34,31 +23,47 @@ interface AppContextType {
     car_year: number;
     car_seats: number;
   }) => User;
-  toggleDriverStatus: (userId?: number) => { success: boolean; message: string; newStatus?: 'free' | 'busy' };
-  addDriverCity: (userId: number, cityName: string) => void;
-  removeDriverCity: (userId: number, cityName: string) => void;
-  clearDriverCities: (userId: number) => void;
+  toggleDriverStatus: (userId?: number) => Promise<{ success: boolean; message: string; newStatus?: 'free' | 'busy' }>;
+  addDriverCity: (userId: number, cityName: string) => Promise<void>;
+  removeDriverCity: (userId: number, cityName: string) => Promise<void>;
+  clearDriverCities: (userId: number) => Promise<void>;
   getDriverCities: (userId: number) => string[];
-  publishOrder: (
-    rawText: string,
-    destinationType: 'private' | 'groups',
-    customPrice?: number
-  ) => Promise<{ order: Order; eligibleDriversCount: number }>;
+  publishOrder: (payload: {
+    rawText: string;
+    price: number;
+    destinationType?: 'private' | 'groups' | 'all' | 'zone_and_groups' | 'groups_only' | 'zone_only' | 'manual';
+    requiresEta?: boolean;
+    originCity?: string;
+    destCity?: string;
+    clientPhone?: string;
+  }) => Promise<{ success: boolean; orderId?: number; eligibleDriversCount?: number; error?: string }>;
   submitOrderBid: (orderId: number, driverId: number, etaMinutes: number) => { success: boolean; message: string };
-  approveDriverOrder: (orderId: number, driverId: number) => { success: boolean; debtAmount: number };
-  denyDriverOrder: (orderId: number, driverId: number) => void;
+  approveDriverOrder: (orderId: number, driverId: number) => { success: boolean; debtAmount: number; clientPhone?: string; message: string };
+  closeAndChargeOrder: (orderId: number, driverId: number, customCommission?: number) => { success: boolean; debtAmount: number };
+  republishOrder: (orderId: number) => void;
+  cancelOrder: (orderId: number) => void;
+  manualCloseOrder: (payload: {
+    text: string;
+    price: number;
+    driverId: number;
+    stationId: number;
+    clientPhone?: string;
+    commissionPercent?: number;
+  }) => Promise<{ success: boolean; orderId?: number; debtAmount?: number; error?: string }>;
   rateDriver: (driverId: number, stars: number) => void;
   deleteOrder: (orderId: number) => void;
+  acknowledgeDebt: (debtId: number) => void;
   submitDebtAppeal: (debtId: number, reason: string) => boolean;
-  resolveDebtAppeal: (debtId: number, approve: boolean) => void;
-  createStation: (name: string, commissionPercent: number) => Station;
-  updateStation: (stationId: number, name: string, commissionPercent: number) => void;
-  updateUserRoleAndStation: (targetId: number, newRole: Role | 'blocked', stationId: number, subscriptionPlan?: string) => void;
-  chargeDriverDebt: (driverId: number, amount: number, reason: string, stationId: number, orderId?: number) => void;
-  updateDebt: (debtId: number, updates: { amount?: number; reason?: string; station_id?: number; status?: 'unpaid' | 'paid' | 'cancelled' }) => void;
-  deleteDebt: (debtId: number) => void;
-  sendBroadcast: (text: string) => number;
-  resetToInitialData: () => void;
+  resolveDebtAppeal: (debtId: number, approve: boolean) => Promise<boolean>;
+  createStation: (name: string, commissionPercent: number) => Promise<Station | null>;
+  updateStation: (stationId: number, name: string, commissionPercent: number) => Promise<boolean>;
+  updateUserRoleAndStation: (targetId: number, newRole: Role | 'blocked', stationId: number, subscriptionPlan?: string) => Promise<void>;
+  chargeDriverDebt: (driverId: number, amount: number, reason: string, stationId: number, orderId?: number) => Promise<void>;
+  updateDebt: (debtId: number, updates: { amount?: number; reason?: string; station_id?: number; status?: 'unpaid' | 'paid' | 'cancelled' }) => Promise<void>;
+  deleteDebt: (debtId: number) => Promise<void>;
+  sendBroadcast: (text: string) => Promise<number>;
+  refreshAllData: () => Promise<void>;
+  resetToInitialData: () => Promise<void>;
   isTelegramWebApp: boolean;
   isAuthLoading: boolean;
   isAuthenticated: boolean;
@@ -67,154 +72,147 @@ interface AppContextType {
 
 const AppContext = createContext<AppContextType | null>(null);
 
-const STORAGE_PREFIX = 'kobi_erp_bot_';
-export const ADMIN_IDS = [8644923212, 552821474];
+const GUEST_USER: User = {
+  user_id: 0,
+  full_name: 'טוען נתונים...',
+  phone: '',
+  birth_year: 2000,
+  car_brand: '',
+  car_model: '',
+  car_year: 2024,
+  car_seats: 4,
+  status: 'busy',
+  role: 'user',
+  station_id: 1,
+  rating: 5.0,
+  total_trips: 0,
+  is_blocked: 0,
+  debt_balance: 0.0,
+  subscription_plan: 'free',
+};
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Purge any stale mock data from localStorage
-  const [users, setUsers] = useState<User[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_PREFIX + 'users');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          return parsed.filter((u: any) => ![101, 201, 301, 302, 303, 304].includes(Number(u.user_id)));
-        }
-      }
-    } catch {}
-    return INITIAL_USERS;
-  });
-
-  const [currentUserId, setCurrentUserId] = useState<number>(() => {
-    try {
-      const tg = (window as any).Telegram?.WebApp;
-      const tgId = tg?.initDataUnsafe?.user?.id;
-      if (tgId) return Number(tgId);
-    } catch {}
-    try {
-      const qId = new URLSearchParams(window.location.search).get('user_id');
-      if (qId && !isNaN(Number(qId))) return Number(qId);
-    } catch {}
-    const saved = localStorage.getItem(STORAGE_PREFIX + 'current_user_id');
-    const parsed = saved ? JSON.parse(saved) : 0;
-    if (ADMIN_IDS.includes(Number(parsed))) {
-      return 0;
-    }
-    return parsed;
-  });
-
-  const [authenticatedUser, setAuthenticatedUser] = useState<User | null>(null);
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
-  const [authError, setAuthError] = useState<string | null>(null);
-  const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
-
-  const [stations, setStations] = useState<Station[]>(() => {
-    const saved = localStorage.getItem(STORAGE_PREFIX + 'stations');
-    return saved ? JSON.parse(saved) : INITIAL_STATIONS;
-  });
-
-  const [orders, setOrders] = useState<Order[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_PREFIX + 'orders');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          return parsed.filter((o: any) => ![1000, 1001, 1002].includes(Number(o.order_id)));
-        }
-      }
-    } catch {}
-    return INITIAL_ORDERS;
-  });
-
-  const [debts, setDebts] = useState<Debt[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_PREFIX + 'debts');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          return parsed.filter((d: any) => ![501, 502, 503].includes(Number(d.debt_id)));
-        }
-      }
-    } catch {}
-    return INITIAL_DEBTS;
-  });
-
-  const [driverCities, setDriverCities] = useState<DriverCity[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_PREFIX + 'driver_cities');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          return parsed.filter((dc: any) => ![101, 201, 301, 302, 303, 304].includes(Number(dc.user_id)));
-        }
-      }
-    } catch {}
-    return INITIAL_DRIVER_CITIES;
-  });
-
-  const [botGroups] = useState<BotGroup[]>(INITIAL_BOT_GROUPS);
-
-  const [broadcasts, setBroadcasts] = useState<BroadcastMessage[]>(() => {
-    const saved = localStorage.getItem(STORAGE_PREFIX + 'broadcasts');
-    return saved
-      ? JSON.parse(saved)
-      : [
-          {
-            id: 'b1',
-            text: 'ברוכים הבאים למערכת ה-ERP המתקדמת לניהול תחנות מוניות ומשלוחים!',
-            sender_name: 'הנהלת המערכת',
-            created_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
-          },
-        ];
-  });
-
-  // Sync to localStorage
-  useEffect(() => {
-    localStorage.setItem(STORAGE_PREFIX + 'users', JSON.stringify(users));
-  }, [users]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_PREFIX + 'current_user_id', JSON.stringify(currentUserId));
-  }, [currentUserId]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_PREFIX + 'stations', JSON.stringify(stations));
-  }, [stations]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_PREFIX + 'orders', JSON.stringify(orders));
-  }, [orders]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_PREFIX + 'debts', JSON.stringify(debts));
-  }, [debts]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_PREFIX + 'driver_cities', JSON.stringify(driverCities));
-  }, [driverCities]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_PREFIX + 'broadcasts', JSON.stringify(broadcasts));
-  }, [broadcasts]);
+  const [currentUser, setCurrentUser] = useState<User>(GUEST_USER);
+  const [users, setUsers] = useState<User[]>([]);
+  const [stations, setStations] = useState<Station[]>([]);
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [debts, setDebts] = useState<Debt[]>([]);
+  const [driverCities, setDriverCities] = useState<DriverCity[]>([]);
+  const [botGroups, setBotGroups] = useState<BotGroup[]>([]);
+  const [broadcasts, setBroadcasts] = useState<BroadcastMessage[]>([]);
 
   const [isTelegramWebApp, setIsTelegramWebApp] = useState<boolean>(false);
+  const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [authError, setAuthError] = useState<string | null>(null);
 
-  // וידוא מוחלט שרשומות מנהלי המערכת מקבלות תמיד תפקיד admin
-  useEffect(() => {
-    setUsers((prev) => {
-      let changed = false;
-      const updated = prev.map((u) => {
-        if (ADMIN_IDS.includes(u.user_id) && u.role !== 'admin') {
-          changed = true;
-          return { ...u, role: 'admin' as Role, is_blocked: 0 };
-        }
-        return u;
-      });
-      return changed ? updated : prev;
-    });
+  // מרענן את כלל נתוני המערכת מה-Backend
+  const refreshAllData = useCallback(async () => {
+    try {
+      const [resStations, resOrders, resDebts, resUsers, resCities] = await Promise.all([
+        fetch('/api/stations').then((r) => r.json()).catch((e) => {
+          console.error('🚨 [API /api/stations Fetch Error]:', e);
+          return { ok: true, stations: [] };
+        }),
+        fetch('/api/orders').then((r) => r.json()).catch((e) => {
+          console.error('🚨 [API /api/orders Fetch Error]:', e);
+          return { ok: true, orders: [] };
+        }),
+        fetch('/api/debts').then((r) => r.json()).catch((e) => {
+          console.error('🚨 [API /api/debts Fetch Error]:', e);
+          return { ok: true, debts: [] };
+        }),
+        fetch('/api/users').then((r) => r.json()).catch((e) => {
+          console.error('🚨 [API /api/users Fetch Error]:', e);
+          return { ok: true, users: [] };
+        }),
+        fetch('/api/driver/all_cities').then((r) => r.json()).catch((e) => {
+          console.error('🚨 [API /api/driver/all_cities Fetch Error]:', e);
+          return { ok: true, cities: [] };
+        }),
+      ]);
+
+      if (resStations.ok && Array.isArray(resStations.stations)) {
+        setStations(resStations.stations.map((s: any) => ({
+          station_id: Number(s.station_id),
+          name: s.name,
+          commission_percent: Number(s.commission_percent || 10.0),
+          is_active: s.is_active !== undefined ? Boolean(s.is_active) : true,
+        })));
+      }
+
+      if (resOrders.ok && Array.isArray(resOrders.orders)) {
+        setOrders(resOrders.orders.map((o: any) => ({
+          order_id: Number(o.order_id),
+          text: o.text || '',
+          raw_text: o.raw_text || o.text || '',
+          price: Number(o.price || 0),
+          publisher_id: Number(o.publisher_id || 0),
+          station_id: Number(o.station_id || 1),
+          driver_id: o.driver_id ? Number(o.driver_id) : null,
+          status: o.status || 'open',
+          created_at: o.created_at || new Date().toISOString(),
+          destination_type: o.destination_type || 'all',
+          requires_eta: Boolean(o.requires_eta),
+          origin_city: o.origin_city || '',
+          dest_city: o.dest_city || '',
+          client_phone: o.client_phone || '',
+          bids: Array.isArray(o.bids) ? o.bids : [],
+        })));
+      }
+
+      if (resDebts.ok && Array.isArray(resDebts.debts)) {
+        setDebts(resDebts.debts.map((d: any) => ({
+          debt_id: Number(d.debt_id),
+          order_id: Number(d.order_id || 0),
+          driver_id: Number(d.driver_id),
+          station_id: Number(d.station_id || 1),
+          amount: Number(d.amount || 0),
+          status: d.status || 'unpaid',
+          reason: d.reason || '',
+          appeal_status: d.appeal_status || 'none',
+          appeal_reason: d.appeal_reason || '',
+          publisher_username: d.publisher_username || '',
+          is_locked: Number(d.is_locked || 0),
+          created_at: d.created_at,
+        })));
+      }
+
+      if (resUsers.ok && Array.isArray(resUsers.users)) {
+        const parsedUsers: User[] = resUsers.users.map((u: any) => ({
+          user_id: Number(u.user_id),
+          full_name: u.full_name || 'משתמש',
+          telegram_username: u.telegram_username || '',
+          phone: u.phone || '',
+          birth_year: Number(u.birth_year || 1995),
+          car_brand: u.car_brand || '',
+          car_model: u.car_model || '',
+          car_year: Number(u.car_year || 0),
+          car_seats: Number(u.car_seats || 4),
+          status: u.status || 'busy',
+          role: ADMIN_IDS.includes(Number(u.user_id)) ? 'admin' : (u.role === 'admin' ? 'user' : (u.role || 'user')),
+          station_id: Number(u.station_id || 1),
+          rating: Number(u.rating || 5.0),
+          total_trips: Number(u.total_trips || 0),
+          is_blocked: ADMIN_IDS.includes(Number(u.user_id)) ? 0 : (u.is_blocked ? 1 : 0),
+          debt_balance: Number(u.debt_balance || 0),
+          subscription_plan: u.subscription_plan || 'free',
+        }));
+        setUsers(parsedUsers);
+      }
+
+      if (resCities.ok && Array.isArray(resCities.cities)) {
+        setDriverCities(resCities.cities.map((c: any) => ({
+          user_id: Number(c.user_id),
+          city_name: String(c.city_name),
+        })));
+      }
+    } catch (err) {
+      console.error('🚨 [refreshAllData Global Error]:', err);
+    }
   }, []);
 
-  // Auto-detect Telegram WebApp environment & Authenticate via REST API
+  // אימות מול שרת ה-API עם initData של טלגרם
   useEffect(() => {
     let initDataStr = '';
     let tgUser: any = null;
@@ -226,7 +224,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         initDataStr = tg.initData || '';
         tgUser = tg.initDataUnsafe?.user || null;
       } catch (err) {
-        console.error('🚨 [Telegram WebApp pre-init error]:', err);
+        console.error('🚨 [Telegram WebApp Init Error]:', err);
       }
     }
 
@@ -238,7 +236,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const payloadUserId = tgUser?.id ? Number(tgUser.id) : urlUserId;
 
-    // שליחת אימות קריפטוגרפי מחמיר לשרת ה-API (HMAC מול BOT_TOKEN)
     fetch('/api/auth', {
       method: 'POST',
       headers: {
@@ -256,7 +253,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const incomingUser = data.user_data || data.user;
         if (res.ok && data.ok && incomingUser) {
           const isServerAdmin = ADMIN_IDS.includes(Number(incomingUser.user_id)) || data.role === 'admin' || incomingUser.role === 'admin';
-          // סעיף אבטחה מוחלטת: רק מי שמופיע ב-ADMIN_IDS מקבל תפקיד admin! כל משתמש אחר מקבל את תפקידו האמיתי
           const userRole: Role = isServerAdmin
             ? 'admin'
             : (incomingUser.role === 'admin' ? 'user' : (incomingUser.role || data.role || 'user'));
@@ -264,15 +260,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           const serverUser: User = {
             user_id: Number(incomingUser.user_id),
             full_name: incomingUser.full_name || 'משתמש',
+            telegram_username: incomingUser.telegram_username || tgUser?.username || '',
             phone: incomingUser.phone || '',
-            birth_year: incomingUser.birth_year || 1995,
+            birth_year: Number(incomingUser.birth_year || 1995),
             car_brand: incomingUser.car_brand || '',
             car_model: incomingUser.car_model || '',
-            car_year: incomingUser.car_year || 0,
-            car_seats: incomingUser.car_seats || 4,
+            car_year: Number(incomingUser.car_year || 0),
+            car_seats: Number(incomingUser.car_seats || 4),
             status: incomingUser.status || 'busy',
             role: userRole,
-            station_id: incomingUser.station_id || 1,
+            station_id: Number(incomingUser.station_id || 1),
             rating: Number(incomingUser.rating || 5.0),
             total_trips: Number(incomingUser.total_trips || 0),
             is_blocked: isServerAdmin ? 0 : (incomingUser.is_blocked ? 1 : 0),
@@ -280,20 +277,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             subscription_plan: incomingUser.subscription_plan || 'free',
           };
 
-          setAuthenticatedUser(serverUser);
+          setCurrentUser(serverUser);
           setIsAuthenticated(true);
           setAuthError(null);
-          setCurrentUserId(serverUser.user_id);
-          setUsers((prev) => [serverUser, ...prev.filter((u) => u.user_id !== serverUser.user_id)]);
 
-          if (data.stations && Array.isArray(data.stations) && data.stations.length > 0) {
-            setStations(
-              data.stations.map((s: any) => ({
-                station_id: Number(s.station_id),
-                name: s.name,
-                commission_percent: Number(s.commission_percent),
-              }))
-            );
+          if (data.stations && Array.isArray(data.stations)) {
+            setStations(data.stations.map((s: any) => ({
+              station_id: Number(s.station_id),
+              name: s.name,
+              commission_percent: Number(s.commission_percent || 10.0),
+            })));
           }
 
           if (Array.isArray(data.cities)) {
@@ -306,21 +299,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               ...freshCities,
             ]);
           }
+
+          // מרעננים את שאר הנתונים
+          refreshAllData();
         } else {
-          setAuthenticatedUser(null);
           setIsAuthenticated(false);
-          setAuthError(data.error || 'אימות ה-Telegram WebApp נכשל. הגישה מותרת אך ורק מתוך הבוט בטלגרם.');
+          setAuthError(data.error || 'אימות ה-Mini App נכשל מול הבוט בטלגרם.');
         }
       })
       .catch((err) => {
-        console.error('🚨 [API /api/auth Error]:', err);
-        setAuthenticatedUser(null);
+        console.error('🚨 [Auth API Exception]:', err);
         setIsAuthenticated(false);
-        setAuthError('שגיאת תקשורת באימות מול השרת. אנא פתח מחדש מתוך הטלגרם.');
+        setAuthError('שגיאת תקשורת באימות מול השרת. פתח מחדש מתוך הטלגרם.');
       })
       .finally(() => {
         setIsAuthLoading(false);
-        // שחרור האפליקציה בטלגרם: קריאה ל-ready() ו-expand() רק לאחר סיום הטעינה והרינדור הראשוני!
+        // שחרור האפליקציה בטלגרם רק לאחר סיום כל הטעינות והרינדור!
         try {
           const tgObj = (window as any).Telegram?.WebApp;
           if (tgObj) {
@@ -331,193 +325,105 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           console.error('🚨 [Telegram WebApp ready error]:', e);
         }
       });
-  }, []);
+  }, [refreshAllData]);
 
-  // סנכרון חי ועדכני של ערי הנהג האמיתיות ממסד הנתונים בכל שינוי משתמש
-  useEffect(() => {
-    if (currentUserId) {
-      fetch(`/api/driver/cities?user_id=${currentUserId}`)
-        .then((res) => res.json())
-        .then((data) => {
-          if (data.ok && Array.isArray(data.cities)) {
-            const freshCities = data.cities.map((cityName: string) => ({
-              user_id: currentUserId,
-              city_name: cityName,
-            }));
-            setDriverCities((prev) => {
-              const others = prev.filter((dc) => dc.user_id !== currentUserId);
-              return [...others, ...freshCities];
-            });
-          }
-        })
-        .catch((err) => console.error('🚨 [API /api/driver/cities Error]:', err));
-    }
-  }, [currentUserId]);
-
-  // סנכרון תחנות, קריאות ויומן חיובים מהשרת
-  useEffect(() => {
-    fetch('/api/stations')
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.ok && Array.isArray(data.stations) && data.stations.length > 0) {
-          setStations(
-            data.stations.map((s: any) => ({
-              station_id: Number(s.station_id),
-              name: s.name,
-              commission_percent: Number(s.commission_percent),
-            }))
-          );
-        }
-      })
-      .catch((err) => console.error('🚨 [API /api/stations Error]:', err));
-
-    fetch('/api/orders')
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.ok && Array.isArray(data.orders)) {
-          setOrders(
-            data.orders.map((o: any) => ({
-              order_id: Number(o.order_id),
-              text: o.text,
-              price: Number(o.price),
-              publisher_id: Number(o.publisher_id),
-              station_id: Number(o.station_id || 1),
-              driver_id: o.driver_id ? Number(o.driver_id) : null,
-              status: o.status || 'open',
-              created_at: o.created_at || new Date().toISOString(),
-              destination_type: 'private',
-              bids: [],
-            }))
-          );
-        }
-      })
-      .catch((err) => console.error('🚨 [API /api/orders Error]:', err));
-
-    fetch('/api/debts')
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.ok && Array.isArray(data.debts)) {
-          setDebts(
-            data.debts.map((d: any) => ({
-              debt_id: Number(d.debt_id),
-              order_id: d.order_id ? Number(d.order_id) : 0,
-              driver_id: Number(d.driver_id),
-              station_id: Number(d.station_id || 1),
-              amount: Number(d.amount),
-              status: d.status || 'unpaid',
-              reason: d.reason || '',
-              appeal_status: d.appeal_status || 'none',
-              appeal_reason: d.appeal_reason,
-            }))
-          );
-        }
-      })
-      .catch((err) => console.error('🚨 [API /api/debts Error]:', err));
-
-    // סנכרון כל המשתמשים האמיתיים ממסד הנתונים בענן
-    fetch('/api/users')
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.ok && Array.isArray(data.users)) {
-          setUsers((prev) => {
-            const serverUsers: User[] = data.users.map((u: any) => ({
-              user_id: Number(u.user_id),
-              full_name: u.full_name,
-              phone: u.phone || '',
-              birth_year: u.birth_year || 1995,
-              car_brand: u.car_brand || '',
-              car_model: u.car_model || '',
-              car_year: u.car_year || 0,
-              car_seats: u.car_seats || 4,
-              status: u.status || 'busy',
-              role: ADMIN_IDS.includes(Number(u.user_id)) ? 'admin' : (u.role === 'admin' ? 'user' : (u.role || 'user')),
-              station_id: Number(u.station_id || 1),
-              rating: Number(u.rating || 5.0),
-              total_trips: Number(u.total_trips || 0),
-              is_blocked: ADMIN_IDS.includes(Number(u.user_id)) ? 0 : (u.is_blocked ? 1 : 0),
-              debt_balance: Number(u.debt_balance || 0.0),
-              subscription_plan: u.subscription_plan || 'free',
-            }));
-            const serverIds = new Set(serverUsers.map((su) => su.user_id));
-            const remaining = prev.filter((u) => !serverIds.has(u.user_id));
-            return [...serverUsers, ...remaining];
-          });
-        }
-      })
-      .catch((err) => console.error('🚨 [API /api/users Error]:', err));
-
-    // סנכרון כל ערי הנהגים מ-deliveries_driver_cities
-    fetch('/api/driver/all_cities')
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.ok && Array.isArray(data.cities)) {
-          setDriverCities(
-            data.cities.map((c: any) => ({
-              user_id: Number(c.user_id),
-              city_name: c.city_name,
-            }))
-          );
-        }
-      })
-      .catch((err) => console.error('🚨 [API /api/driver/all_cities Error]:', err));
-  }, []);
-
-  // סעיף 3: בדיקת סטטוס שוטפת מול הבוט כל 4 שניות לסנכרון מיידי בין מקלדת הטלגרם לאפליקציה
-  useEffect(() => {
-    if (!currentUserId || currentUserId === 0) return;
-    const interval = setInterval(() => {
-      fetch(`/api/driver/status_check?user_id=${currentUserId}`)
-        .then((res) => res.json())
-        .then((data) => {
-          if (data.ok && data.status) {
-            setUsers((prev) =>
-              prev.map((u) =>
-                u.user_id === currentUserId && u.status !== data.status
-                  ? { ...u, status: data.status, debt_balance: data.debt_balance ?? u.debt_balance }
-                  : u
-              )
-            );
-          }
-        })
-        .catch(() => {});
-    }, 4000);
-    return () => clearInterval(interval);
-  }, [currentUserId]);
-
-  // משתמש אורח בטוח - לעולם אינו מקבל תפקיד admin כברירת מחדל!
-  const GUEST_USER: User = {
-    user_id: 0,
-    full_name: 'טוען נתונים...',
-    phone: '',
-    birth_year: 2000,
-    car_brand: '',
-    car_model: '',
-    car_year: 2024,
-    car_seats: 4,
-    status: 'busy',
-    role: 'user', // NEVER ADMIN!
-    station_id: 1,
-    rating: 5.0,
-    total_trips: 0,
-    is_blocked: 0,
-    debt_balance: 0.0,
+  // סנכרון ערי נהג מקומיות
+  const getDriverCities = (userId: number): string[] => {
+    return driverCities.filter((dc) => dc.user_id === userId).map((dc) => dc.city_name);
   };
 
-  // סעיף 1: משתמש נוכחי - אך ורק המשתמש המאומת קריפטוגרפית מול השרת! לעולם לא נופל ל-users[0]
-  const currentUser = authenticatedUser || GUEST_USER;
-
-  const switchUser = (userId: number) => {
-    // אבטחה קשיחה: רק מנהל מערכת (Super Admin) מורשה לבצע החלפת משתמש בממשק!
-    if (currentUser.role !== 'admin') {
-      console.warn('החלפת משתמש נחסמה: אין הרשאת מנהל מערכת.');
-      return;
+  const addDriverCity = async (userId: number, cityName: string) => {
+    try {
+      const res = await fetch('/api/driver/cities/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: userId, city_name: cityName }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setDriverCities((prev) => [...prev.filter((c) => !(c.user_id === userId && c.city_name === cityName)), { user_id: userId, city_name: cityName }]);
+      }
+    } catch (err) {
+      console.error('🚨 [addDriverCity Error]:', err);
     }
+  };
+
+  const removeDriverCity = async (userId: number, cityName: string) => {
+    try {
+      const res = await fetch('/api/driver/cities/remove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: userId, city_name: cityName }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setDriverCities((prev) => prev.filter((c) => !(c.user_id === userId && c.city_name === cityName)));
+      }
+    } catch (err) {
+      console.error('🚨 [removeDriverCity Error]:', err);
+    }
+  };
+
+  const clearDriverCities = async (userId: number) => {
+    try {
+      const res = await fetch('/api/driver/cities/clear', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: userId }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setDriverCities((prev) => prev.filter((c) => c.user_id !== userId));
+      }
+    } catch (err) {
+      console.error('🚨 [clearDriverCities Error]:', err);
+    }
+  };
+
+  // Toggle driver status
+  const toggleDriverStatus = async (userId?: number) => {
+    const targetId = userId ?? currentUser.user_id;
+    const targetUser = users.find((u) => u.user_id === targetId) || currentUser;
+    const newStatus = targetUser.status === 'free' ? 'busy' : 'free';
+
+    if (newStatus === 'free' && Number(targetUser.debt_balance || 0) > 500) {
+      return { success: false, message: '🚫 חשבונך מוקפא עקב חוב מעל 500 ש"ח! הסדר חוב מול התחנה.' };
+    }
+
+    try {
+      const res = await fetch('/api/driver/status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: targetId, status: newStatus }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setCurrentUser((prev) => (prev.user_id === targetId ? { ...prev, status: newStatus } : prev));
+        setUsers((prev) => prev.map((u) => (u.user_id === targetId ? { ...u, status: newStatus } : u)));
+        return {
+          success: true,
+          newStatus,
+          message: newStatus === 'free' ? '🟢 סטטוס עודכן ל-פנוי לקריאות' : '🔴 סטטוס עודכן ל-תפוס (עצור קריאות)',
+        };
+      } else {
+        return { success: false, message: data.error || 'שגיאה בעדכון סטטוס' };
+      }
+    } catch (err) {
+      console.error('🚨 [toggleDriverStatus Error]:', err);
+      return { success: false, message: 'שגיאת תקשורת עם השרת' };
+    }
+  };
+
+  // Switch user (available only to admin)
+  const switchUser = (userId: number) => {
+    if (currentUser.role !== 'admin') return;
     const found = users.find((u) => u.user_id === userId);
     if (found) {
-      setCurrentUserId(userId);
+      setCurrentUser(found);
     }
   };
 
+  // Register user fallback
   const registerUser = (data: {
     full_name: string;
     phone: string;
@@ -544,215 +450,77 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       total_trips: 0,
       is_blocked: 0,
       debt_balance: 0.0,
+      subscription_plan: 'free',
     };
-
     setUsers((prev) => [...prev, newUser]);
-    setCurrentUserId(newId);
     return newUser;
   };
 
-  // Toggle driver free/busy status with Auto-Freeze debt check (bot.py line 276)
-  const toggleDriverStatus = (userId?: number) => {
-    const targetId = userId ?? currentUserId;
-    const user = users.find((u) => u.user_id === targetId);
-
-    if (!user) {
-      return { success: false, message: 'משתמש לא נמצא.' };
-    }
-
-    if (user.is_blocked) {
-      return { success: false, message: '❌ חשבונך נחסם ע"י הנהלת המערכת.' };
-    }
-
-    // Auto-Freeze rule: Debt balance > 500 NIS
-    if (user.debt_balance > 500.0) {
-      return {
-        success: false,
-        message: '🚫 חשבונך מוקפא עקב חובות (מעל 500 ש"ח)! לא תוכל לקבל קריאות עד הסדרת החוב.',
-      };
-    }
-
-    const newStatus: 'free' | 'busy' = user.status === 'free' ? 'busy' : 'free';
-
-    setUsers((prev) =>
-      prev.map((u) => (u.user_id === targetId ? { ...u, status: newStatus } : u))
-    );
-
-    // סעיף 3: שליחת API מיידית ל-bot.py לסנכרון מסד הנתונים ועדכון מקלדת הטלגרם בצ'אט
-    fetch('/api/driver/status', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user_id: targetId, status: newStatus }),
-    }).catch((err) => console.warn('toggleDriverStatus API sync note:', err));
-
-    const message =
-      newStatus === 'free'
-        ? '🟢 אתה כעת פנוי לעבודה (קריאות באזורים שלך יקפצו)!'
-        : '🔴 עצרת קריאות (סטטוס תפוס).';
-
-    return { success: true, message, newStatus };
-  };
-
-  const getDriverCities = (userId: number): string[] => {
-    return driverCities.filter((dc) => dc.user_id === userId).map((dc) => dc.city_name);
-  };
-
-  const addDriverCity = (userId: number, cityName: string) => {
-    const trimmed = cityName.trim();
-    if (!trimmed) return;
-    setDriverCities((prev) => {
-      if (prev.some((dc) => dc.user_id === userId && dc.city_name === trimmed)) {
-        return prev;
-      }
-      return [...prev, { user_id: userId, city_name: trimmed }];
-    });
-
-    fetch('/api/driver/cities/add', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user_id: userId, city_name: trimmed }),
-    }).catch((err) => console.warn('addDriverCity sync note:', err));
-  };
-
-  const removeDriverCity = (userId: number, cityName: string) => {
-    setDriverCities((prev) =>
-      prev.filter((dc) => !(dc.user_id === userId && dc.city_name === cityName))
-    );
-
-    fetch('/api/driver/cities/remove', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user_id: userId, city_name: cityName }),
-    }).catch((err) => console.warn('removeDriverCity sync note:', err));
-  };
-
-  const clearDriverCities = (userId: number) => {
-    setDriverCities((prev) => prev.filter((dc) => dc.user_id !== userId));
-
-    fetch('/api/driver/cities/clear', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user_id: userId }),
-    }).catch((err) => console.warn('clearDriverCities sync note:', err));
-  };
-
-  // Publish order with text cleaning, driver matching and real server broadcasting
-  const publishOrder = async (
-    rawText: string,
-    destinationType: 'private' | 'groups',
-    customPrice?: number
-  ): Promise<{ order: Order; eligibleDriversCount: number }> => {
-    const cleaned = cleanOrderText(rawText);
-    const price = customPrice !== undefined ? customPrice : extractOrderPrice(cleaned);
-    const tempOrderId = Math.max(1000, ...orders.map((o) => o.order_id)) + 1;
-
-    const newOrder: Order = {
-      order_id: tempOrderId,
-      text: cleaned,
-      price: price,
-      publisher_id: currentUser.user_id,
-      station_id: currentUser.station_id || 1,
-      driver_id: null,
-      status: 'open',
-      created_at: new Date().toISOString(),
-      destination_type: destinationType,
-      bids: [],
-    };
-
-    setOrders((prev) => [newOrder, ...prev]);
-
-    let finalEligibleCount = 0;
-    let finalOrderId = tempOrderId;
-
-    // סעיף 2: שידור ושמירה אמיתיים ב-PostgreSQL דרך ה-API של הבוט
+  // Publish order with routing options
+  const publishOrder = async (payload: {
+    rawText: string;
+    price: number;
+    destinationType?: 'private' | 'groups' | 'all' | 'zone_and_groups' | 'groups_only' | 'zone_only' | 'manual';
+    requiresEta?: boolean;
+    originCity?: string;
+    destCity?: string;
+    clientPhone?: string;
+  }) => {
     try {
       const res = await fetch('/api/orders/publish', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          text: cleaned,
-          raw_text: rawText,
-          price,
+          raw_text: payload.rawText,
+          price: payload.price,
           publisher_id: currentUser.user_id,
           station_id: currentUser.station_id || 1,
-          destination_type: destinationType,
-          requires_eta: false,
+          destination_type: payload.destinationType || 'all',
+          requires_eta: payload.requiresEta ? 1 : 0,
+          origin_city: payload.originCity || '',
+          dest_city: payload.destCity || '',
+          client_phone: payload.clientPhone || '',
         }),
       });
       const data = await res.json();
       if (data.ok) {
-        if (data.order_id) {
-          finalOrderId = data.order_id;
-          newOrder.order_id = data.order_id;
-          setOrders((prev) =>
-            prev.map((o) => (o.order_id === tempOrderId ? { ...o, order_id: data.order_id } : o))
-          );
-        }
-        if (typeof data.eligible_drivers === 'number') {
-          finalEligibleCount = data.eligible_drivers;
-        }
+        refreshAllData();
+        return {
+          success: true,
+          orderId: data.order_id,
+          eligibleDriversCount: data.eligible_drivers || 0,
+        };
       }
-    } catch (err) {
-      console.warn('publishOrder API sync note:', err);
+      return { success: false, error: data.error || 'שגיאה בפרסום' };
+    } catch (err: any) {
+      console.error('🚨 [publishOrder Error]:', err);
+      return { success: false, error: 'שגיאת תקשורת עם השרת' };
     }
-
-    // אם הקריאה לא הצליחה לקבל תשובה מהשרת, נשתמש בחישוב המקומי
-    if (finalEligibleCount === 0 && destinationType === 'private') {
-      const freeDrivers = users.filter(
-        (u) =>
-          u.status === 'free' &&
-          !u.is_blocked &&
-          (u.debt_balance || 0) <= 500
-      );
-      const localCount = freeDrivers.filter((driver) => {
-        const userCities = driverCities
-          .filter((dc) => dc.user_id === driver.user_id)
-          .map((dc) => dc.city_name);
-        if (userCities.length === 0) return true;
-        return userCities.some((c) => cleaned.includes(c) || rawText.includes(c));
-      }).length;
-      if (localCount > 0) finalEligibleCount = localCount;
-    }
-
-    return { order: { ...newOrder, order_id: finalOrderId }, eligibleDriversCount: finalEligibleCount };
   };
 
-  // Driver submits ETA bid for an order
+  // Bidding and order interactions
   const submitOrderBid = (orderId: number, driverId: number, etaMinutes: number) => {
-    const order = orders.find((o) => o.order_id === orderId);
-    const driver = users.find((u) => u.user_id === driverId);
-
-    if (!order || order.status !== 'open') {
-      return { success: false, message: '❌ איחרת! הקריאה כבר נתפסה או בוטלה.' };
-    }
-
-    if (!driver) {
-      return { success: false, message: 'נהג לא נמצא.' };
-    }
-
-    if (driver.status !== 'free') {
-      return { success: false, message: '⚠️ אתה בסטטוס תפוס! העבר ל-פנוי קודם.' };
-    }
-
-    const newBid = {
-      driver_id: driver.user_id,
-      driver_name: driver.full_name,
-      rating: driver.rating,
-      car_brand: driver.car_brand,
-      car_model: driver.car_model,
-      car_seats: driver.car_seats,
+    const driver = users.find((u) => u.user_id === driverId) || currentUser;
+    const newBid: DriverBid = {
+      driver_id: driverId,
+      driver_name: driver.full_name || 'נהג',
+      telegram_username: driver.telegram_username,
+      driver_phone: driver.phone,
+      rating: driver.rating || 5.0,
+      car_brand: driver.car_brand || '',
+      car_model: driver.car_model || '',
+      car_year: driver.car_year,
+      car_seats: driver.car_seats || 4,
       eta_minutes: etaMinutes,
       submitted_at: new Date().toISOString(),
+      status: 'pending',
     };
 
     setOrders((prev) =>
       prev.map((o) => {
         if (o.order_id === orderId) {
-          const currentBids = o.bids || [];
-          const exists = currentBids.some((b) => b.driver_id === driverId);
-          const updatedBids = exists
-            ? currentBids.map((b) => (b.driver_id === driverId ? newBid : b))
-            : [...currentBids, newBid];
+          const existingBids = o.bids || [];
+          const updatedBids = [...existingBids.filter((b) => b.driver_id !== driverId), newBid];
           return { ...o, bids: updatedBids };
         }
         return o;
@@ -761,367 +529,356 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     return {
       success: true,
-      message: '⏳ הבקשה וזמן ההגעה נשלחו בהצלחה לסדרן. ממתין לאישור...',
+      message: `✅ בקשתך לקריאה #${orderId} עם זמן הגעה של ${etaMinutes} דק' נשלחה לסדרן!`,
     };
   };
 
-  // Dispatcher approves driver for order
   const approveDriverOrder = (orderId: number, driverId: number) => {
     const order = orders.find((o) => o.order_id === orderId);
-    if (!order || order.status !== 'open') {
-      return { success: false, debtAmount: 0 };
-    }
+    const station = stations.find((s) => s.station_id === (order?.station_id || currentUser.station_id)) || {
+      station_id: 1,
+      name: 'תחנה ראשית',
+      commission_percent: 10.0,
+    };
+    const debtAmount = calculateCommission(order?.price || 0, station.commission_percent);
 
-    const station = stations.find((s) => s.station_id === order.station_id) || stations[0];
-    const commPercent = station ? station.commission_percent : 10.0;
-    const debtAmount = calculateCommission(order.price, commPercent);
-
-    // 1. Close order
     setOrders((prev) =>
-      prev.map((o) =>
-        o.order_id === orderId ? { ...o, status: 'closed', driver_id: driverId } : o
-      )
-    );
-
-    // 2. Add debt record if commission > 0
-    if (debtAmount > 0) {
-      const newDebtId = Math.max(500, ...debts.map((d) => d.debt_id)) + 1;
-      const newDebt: Debt = {
-        debt_id: newDebtId,
-        order_id: orderId,
-        driver_id: driverId,
-        station_id: order.station_id,
-        amount: debtAmount,
-        status: 'unpaid',
-        reason: `עמלה ${commPercent}%`,
-        appeal_status: 'none',
-      };
-      setDebts((prev) => [newDebt, ...prev]);
-    }
-
-    // 3. Update driver debt_balance and total_trips
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (u.user_id === driverId) {
+      prev.map((o) => {
+        if (o.order_id === orderId) {
           return {
-            ...u,
-            debt_balance: Math.round((u.debt_balance + debtAmount) * 100) / 100,
-            total_trips: u.total_trips + 1,
+            ...o,
+            status: 'assigned',
+            driver_id: driverId,
+            bids: (o.bids || []).map((b) => ({
+              ...b,
+              status: b.driver_id === driverId ? 'accepted' : 'rejected',
+            })),
           };
         }
-        return u;
+        return o;
       })
+    );
+
+    return {
+      success: true,
+      debtAmount,
+      clientPhone: order?.client_phone,
+      message: `✅ הנסיעה ננעלה על הנהג! פרטי הלקוח מוכנים להעברה.`,
+    };
+  };
+
+  const closeAndChargeOrder = (orderId: number, driverId: number, customCommission?: number) => {
+    const order = orders.find((o) => o.order_id === orderId);
+    const station = stations.find((s) => s.station_id === (order?.station_id || currentUser.station_id)) || {
+      station_id: 1,
+      name: 'תחנה ראשית',
+      commission_percent: 10.0,
+    };
+    const debtAmount = customCommission !== undefined ? customCommission : calculateCommission(order?.price || 0, station.commission_percent);
+
+    // Charge debt on backend
+    chargeDriverDebt(driverId, debtAmount, `עמלת נסיעה #${orderId} (${station.name})`, station.station_id, orderId);
+
+    setOrders((prev) =>
+      prev.map((o) => (o.order_id === orderId ? { ...o, status: 'closed', driver_id: driverId } : o))
     );
 
     return { success: true, debtAmount };
   };
 
-  // Dispatcher denies driver bid
-  const denyDriverOrder = (orderId: number, driverId: number) => {
+  const republishOrder = (orderId: number) => {
     setOrders((prev) =>
-      prev.map((o) => {
-        if (o.order_id === orderId && o.bids) {
-          return { ...o, bids: o.bids.filter((b) => b.driver_id !== driverId) };
-        }
-        return o;
-      })
+      prev.map((o) => (o.order_id === orderId ? { ...o, status: 'open', driver_id: null, bids: [] } : o))
     );
   };
 
-  // Dispatcher rates driver (1-5 stars)
+  const cancelOrder = (orderId: number) => {
+    setOrders((prev) =>
+      prev.map((o) => (o.order_id === orderId ? { ...o, status: 'cancelled' } : o))
+    );
+  };
+
+  // Manual close directly on driver
+  const manualCloseOrder = async (payload: {
+    text: string;
+    price: number;
+    driverId: number;
+    stationId: number;
+    clientPhone?: string;
+    commissionPercent?: number;
+  }) => {
+    try {
+      const commRate = payload.commissionPercent || 10.0;
+      const debtAmount = calculateCommission(payload.price, commRate);
+
+      // Create closed order on server
+      const res = await fetch('/api/orders/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          raw_text: payload.text,
+          price: payload.price,
+          publisher_id: currentUser.user_id,
+          station_id: payload.stationId,
+          destination_type: 'manual',
+          client_phone: payload.clientPhone || '',
+        }),
+      });
+      const data = await res.json();
+      const orderId = data.order_id || Math.floor(2000 + Math.random() * 5000);
+
+      // Charge driver
+      await chargeDriverDebt(payload.driverId, debtAmount, `סגירה ידנית קריאה #${orderId}`, payload.stationId, orderId);
+
+      refreshAllData();
+      return { success: true, orderId, debtAmount };
+    } catch (err: any) {
+      console.error('🚨 [manualCloseOrder Error]:', err);
+      return { success: false, error: 'שגיאה בסגירה ידנית' };
+    }
+  };
+
   const rateDriver = (driverId: number, stars: number) => {
     setUsers((prev) =>
       prev.map((u) => {
         if (u.user_id === driverId) {
-          const newRating = calculateNewRating(u.rating, u.total_trips, stars);
-          return { ...u, rating: newRating };
+          const trips = (u.total_trips || 0) + 1;
+          const newRating = Number((((u.rating || 5.0) * (trips - 1) + stars) / trips).toFixed(1));
+          return { ...u, rating: newRating, total_trips: trips };
         }
         return u;
       })
     );
   };
 
-  // Dispatcher deletes open order
   const deleteOrder = (orderId: number) => {
-    setOrders((prev) =>
-      prev.map((o) => (o.order_id === orderId ? { ...o, status: 'deleted' } : o))
+    setOrders((prev) => prev.filter((o) => o.order_id !== orderId));
+  };
+
+  // Debt operations
+  const acknowledgeDebt = (debtId: number) => {
+    setDebts((prev) =>
+      prev.map((d) => (d.debt_id === debtId ? { ...d, is_locked: 1, appeal_status: 'confirmed' } : d))
     );
   };
 
-  // Driver submits appeal on debt
-  const submitDebtAppeal = (debtId: number, reason: string) => {
+  const submitDebtAppeal = (debtId: number, reason: string): boolean => {
     setDebts((prev) =>
-      prev.map((d) => {
-        if (d.debt_id === debtId) {
-          return {
-            ...d,
-            appeal_reason: reason,
-            appeal_status: 'pending',
-          };
-        }
-        return d;
-      })
+      prev.map((d) =>
+        d.debt_id === debtId
+          ? { ...d, appeal_status: 'pending', appeal_reason: reason }
+          : d
+      )
     );
     return true;
   };
 
-  // Admin resolves appeal
-  const resolveDebtAppeal = (debtId: number, approve: boolean) => {
-    const debt = debts.find((d) => d.debt_id === debtId);
-    if (!debt) return;
-
-    if (approve && debt.status === 'unpaid') {
-      // Cancel debt and deduct from driver balance
-      setDebts((prev) =>
-        prev.map((d) =>
-          d.debt_id === debtId
-            ? { ...d, status: 'cancelled', appeal_status: 'approved' }
-            : d
-        )
-      );
-
-      setUsers((prev) =>
-        prev.map((u) => {
-          if (u.user_id === debt.driver_id) {
-            const newBal = Math.max(0, Math.round((u.debt_balance - debt.amount) * 100) / 100);
-            return { ...u, debt_balance: newBal };
-          }
-          return u;
-        })
-      );
-    } else {
-      // Reject appeal - debt remains
-      setDebts((prev) =>
-        prev.map((d) =>
-          d.debt_id === debtId ? { ...d, appeal_status: 'rejected' } : d
-        )
-      );
+  const resolveDebtAppeal = async (debtId: number, approve: boolean): Promise<boolean> => {
+    try {
+      const res = await fetch('/api/debts/resolve_appeal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          debt_id: debtId,
+          approved: approve,
+          manager_id: currentUser.user_id,
+        }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setDebts((prev) =>
+          prev.map((d) => {
+            if (d.debt_id === debtId) {
+              return {
+                ...d,
+                status: approve ? 'cancelled' : d.status,
+                appeal_status: approve ? 'approved' : 'rejected',
+              };
+            }
+            return d;
+          })
+        );
+        refreshAllData();
+        return true;
+      }
+      return false;
+    } catch (err) {
+      console.error('🚨 [resolveDebtAppeal Error]:', err);
+      return false;
     }
   };
 
-  // Admin creates new station
-  const createStation = (name: string, commissionPercent: number): Station => {
-    const newStationId = Math.max(1, ...stations.map((s) => s.station_id)) + 1;
-    const newStation: Station = {
-      station_id: newStationId,
-      name,
-      commission_percent: commissionPercent,
-    };
-    setStations((prev) => [...prev, newStation]);
-    return newStation;
-  };
-
-  // Admin updates existing station (name & commission_percent)
-  const updateStation = (stationId: number, name: string, commissionPercent: number) => {
-    setStations((prev) =>
-      prev.map((s) =>
-        s.station_id === stationId
-          ? { ...s, name, commission_percent: commissionPercent }
-          : s
-      )
-    );
-
-    fetch('/api/stations/update', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        station_id: stationId,
-        name,
-        commission_percent: commissionPercent,
-      }),
-    }).catch((err) => console.warn('updateStation sync note:', err));
-  };
-
-  // Admin God Mode: Update user role, station assignment and optional subscription
-  const updateUserRoleAndStation = (
-    targetId: number,
-    newRole: Role | 'blocked',
-    stationId: number,
-    subscriptionPlan?: string
-  ) => {
-    const isBlocked = newRole === 'blocked' ? 1 : 0;
-    const roleToSave: Role = newRole === 'blocked' ? 'user' : newRole;
-
-    setUsers((prev) =>
-      prev.map((u) =>
-        u.user_id === targetId
-          ? {
-              ...u,
-              role: roleToSave,
-              station_id: stationId,
-              is_blocked: isBlocked,
-              ...(subscriptionPlan ? { subscription_plan: subscriptionPlan as any } : {}),
-            }
-          : u
-      )
-    );
-
-    fetch('/api/users/update', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        user_id: targetId,
-        role: roleToSave,
-        station_id: stationId,
-        is_blocked: isBlocked,
-        ...(subscriptionPlan ? { subscription_plan: subscriptionPlan } : {}),
-      }),
-    }).catch((err) => console.warn('updateUserRoleAndStation sync note:', err));
-  };
-
-  // Admin / Dispatcher charges a driver debt manually
-  const chargeDriverDebt = (
+  const chargeDriverDebt = async (
     driverId: number,
     amount: number,
     reason: string,
     stationId: number,
     orderId?: number
   ) => {
-    const newDebtId = Math.max(500, ...debts.map((d) => d.debt_id)) + 1;
-    const newDebt: Debt = {
-      debt_id: newDebtId,
-      order_id: orderId || 0,
-      driver_id: driverId,
-      station_id: stationId,
-      amount: amount,
-      status: 'unpaid',
-      reason: reason,
-      appeal_status: 'none',
-    };
-    setDebts((prev) => [newDebt, ...prev]);
-    setUsers((prev) =>
-      prev.map((u) =>
-        u.user_id === driverId
-          ? { ...u, debt_balance: Math.round((u.debt_balance + amount) * 100) / 100 }
-          : u
-      )
-    );
-
-    fetch('/api/debts/charge', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        driver_id: driverId,
-        amount: amount,
-        reason: reason,
-        station_id: stationId,
-        order_id: orderId,
-      }),
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.ok && data.debt_id) {
-          setDebts((prev) =>
-            prev.map((d) => (d.debt_id === newDebtId ? { ...d, debt_id: data.debt_id } : d))
-          );
-        }
-      })
-      .catch((err) => console.warn('chargeDriverDebt sync note:', err));
+    try {
+      const res = await fetch('/api/debts/charge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          driver_id: driverId,
+          amount,
+          reason,
+          station_id: stationId,
+          order_id: orderId,
+        }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        refreshAllData();
+      }
+    } catch (err) {
+      console.error('🚨 [chargeDriverDebt Error]:', err);
+    }
   };
 
-  // Admin / Dispatcher edits existing debt (CRUD)
-  const updateDebt = (
-    debtId: number,
-    updates: {
-      amount?: number;
-      reason?: string;
-      station_id?: number;
-      status?: 'unpaid' | 'paid' | 'cancelled';
+  const updateDebt = async (debtId: number, updates: { amount?: number; reason?: string; station_id?: number; status?: 'unpaid' | 'paid' | 'cancelled' }) => {
+    try {
+      await fetch('/api/debts/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ debt_id: debtId, ...updates }),
+      });
+      refreshAllData();
+    } catch (err) {
+      console.error('🚨 [updateDebt Error]:', err);
     }
+  };
+
+  const deleteDebt = async (debtId: number) => {
+    try {
+      await fetch('/api/debts/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ debt_id: debtId }),
+      });
+      refreshAllData();
+    } catch (err) {
+      console.error('🚨 [deleteDebt Error]:', err);
+    }
+  };
+
+  // Station CRUD
+  const createStation = async (name: string, commissionPercent: number): Promise<Station | null> => {
+    try {
+      const res = await fetch('/api/stations/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, commission_percent: commissionPercent }),
+      });
+      const data = await res.json();
+      if (data.ok && data.station_id) {
+        const newStation: Station = {
+          station_id: data.station_id,
+          name,
+          commission_percent: commissionPercent,
+          is_active: true,
+        };
+        setStations((prev) => [...prev, newStation]);
+        return newStation;
+      }
+      return null;
+    } catch (err) {
+      console.error('🚨 [createStation Error]:', err);
+      return null;
+    }
+  };
+
+  const updateStation = async (stationId: number, name: string, commissionPercent: number): Promise<boolean> => {
+    try {
+      const res = await fetch('/api/stations/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ station_id: stationId, name, commission_percent: commissionPercent }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setStations((prev) =>
+          prev.map((s) =>
+            s.station_id === stationId ? { ...s, name, commission_percent: commissionPercent } : s
+          )
+        );
+        return true;
+      }
+      return false;
+    } catch (err) {
+      console.error('🚨 [updateStation Error]:', err);
+      return false;
+    }
+  };
+
+  // User management
+  const updateUserRoleAndStation = async (
+    targetId: number,
+    newRole: Role | 'blocked',
+    stationId: number,
+    subscriptionPlan?: string
   ) => {
-    const target = debts.find((d) => d.debt_id === debtId);
-    if (!target) return;
-
-    const oldAmount = target.amount;
-    const oldStatus = target.status;
-    const driverId = target.driver_id;
-
-    const newAmount = updates.amount !== undefined ? updates.amount : oldAmount;
-    const newStatus = updates.status !== undefined ? updates.status : oldStatus;
-
-    const effectiveOld = oldStatus === 'unpaid' ? oldAmount : 0;
-    const effectiveNew = newStatus === 'unpaid' ? newAmount : 0;
-    const diff = effectiveNew - effectiveOld;
-
-    setDebts((prev) =>
-      prev.map((d) =>
-        d.debt_id === debtId
-          ? {
-              ...d,
-              ...(updates.amount !== undefined ? { amount: updates.amount } : {}),
-              ...(updates.reason !== undefined ? { reason: updates.reason } : {}),
-              ...(updates.station_id !== undefined ? { station_id: updates.station_id } : {}),
-              ...(updates.status !== undefined ? { status: updates.status } : {}),
-            }
-          : d
-      )
-    );
-
-    if (diff !== 0) {
+    try {
+      await fetch('/api/users/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user_id: targetId,
+          role: newRole,
+          station_id: stationId,
+          subscription_plan: subscriptionPlan,
+        }),
+      });
       setUsers((prev) =>
-        prev.map((u) =>
-          u.user_id === driverId
-            ? { ...u, debt_balance: Math.max(0, Math.round((u.debt_balance + diff) * 100) / 100) }
-            : u
-        )
+        prev.map((u) => {
+          if (u.user_id === targetId) {
+            const actualRole = newRole === 'blocked' ? u.role : newRole;
+            const isBlocked = newRole === 'blocked' ? 1 : 0;
+            return {
+              ...u,
+              role: actualRole,
+              is_blocked: isBlocked,
+              station_id: stationId,
+              subscription_plan: subscriptionPlan || u.subscription_plan,
+            };
+          }
+          return u;
+        })
       );
+      if (currentUser.user_id === targetId) {
+        setCurrentUser((prev) => ({
+          ...prev,
+          role: newRole === 'blocked' ? prev.role : newRole,
+          is_blocked: newRole === 'blocked' ? 1 : 0,
+          station_id: stationId,
+          subscription_plan: subscriptionPlan || prev.subscription_plan,
+        }));
+      }
+    } catch (err) {
+      console.error('🚨 [updateUserRoleAndStation Error]:', err);
     }
-
-    fetch('/api/debts/update', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        debt_id: debtId,
-        ...updates,
-      }),
-    }).catch((err) => console.warn('updateDebt sync note:', err));
   };
 
-  // Admin deletes debt record
-  const deleteDebt = (debtId: number) => {
-    const target = debts.find((d) => d.debt_id === debtId);
-    if (!target) return;
-
-    if (target.status === 'unpaid') {
-      setUsers((prev) =>
-        prev.map((u) =>
-          u.user_id === target.driver_id
-            ? { ...u, debt_balance: Math.max(0, Math.round((u.debt_balance - target.amount) * 100) / 100) }
-            : u
-        )
-      );
+  const sendBroadcast = async (text: string): Promise<number> => {
+    try {
+      const res = await fetch('/api/broadcast', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      const data = await res.json();
+      const newB: BroadcastMessage = {
+        id: 'bc_' + Date.now(),
+        text,
+        sender_name: currentUser.full_name || 'מנהל מערכת',
+        created_at: new Date().toISOString(),
+      };
+      setBroadcasts((prev) => [newB, ...prev]);
+      return data.count || users.length;
+    } catch (err) {
+      console.error('🚨 [sendBroadcast Error]:', err);
+      return 0;
     }
-
-    setDebts((prev) => prev.filter((d) => d.debt_id !== debtId));
-
-    fetch('/api/debts/delete', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ debt_id: debtId }),
-    }).catch((err) => console.warn('deleteDebt sync note:', err));
-  };
-
-  // Admin broadcast to all users
-  const sendBroadcast = (text: string): number => {
-    const newMsg: BroadcastMessage = {
-      id: 'b_' + Date.now(),
-      text,
-      sender_name: currentUser.full_name,
-      created_at: new Date().toISOString(),
-    };
-    setBroadcasts((prev) => [newMsg, ...prev]);
-    return users.length;
-  };
-
-  // Reset to initial mock data
-  const resetToInitialData = () => {
-    localStorage.clear();
-    setUsers(INITIAL_USERS);
-    setCurrentUserId(8644923212);
-    setStations(INITIAL_STATIONS);
-    setOrders(INITIAL_ORDERS);
-    setDebts(INITIAL_DEBTS);
-    setDriverCities(INITIAL_DRIVER_CITIES);
   };
 
   return (
@@ -1145,9 +902,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         publishOrder,
         submitOrderBid,
         approveDriverOrder,
-        denyDriverOrder,
+        closeAndChargeOrder,
+        republishOrder,
+        cancelOrder,
+        manualCloseOrder,
         rateDriver,
         deleteOrder,
+        acknowledgeDebt,
         submitDebtAppeal,
         resolveDebtAppeal,
         createStation,
@@ -1157,7 +918,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateDebt,
         deleteDebt,
         sendBroadcast,
-        resetToInitialData,
+        refreshAllData,
+        resetToInitialData: refreshAllData,
         isTelegramWebApp,
         isAuthLoading,
         isAuthenticated,

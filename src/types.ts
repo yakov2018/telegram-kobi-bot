@@ -78,7 +78,7 @@ export interface Order {
   assigned_driver_name?: string;
   status: 'open' | 'assigned' | 'closed' | 'cancelled' | 'deleted';
   created_at: string;
-  destination_type?: 'private' | 'groups' | 'all';
+  destination_type?: 'private' | 'groups' | 'all' | 'zone_and_groups' | 'groups_only' | 'zone_only' | 'manual';
   requires_eta?: boolean;
   origin_city?: string;
   dest_city?: string;
@@ -101,6 +101,7 @@ export interface Debt {
   appeal_reason?: string;
   appeal_status?: 'none' | 'pending' | 'approved' | 'rejected' | 'confirmed';
   publisher_username?: string;
+  is_locked?: number;
   created_at?: string;
 }
 

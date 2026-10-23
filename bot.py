@@ -48,6 +48,14 @@ if not BOT_TOKEN:
     logging.warning("⚠️ לא הוגדר משתנה סביבה BOT_TOKEN! יש להגדיר אותו בהגדרות השרת ב-Render (Environment).")
 
 ADMIN_IDS = [8644923212, 552821474]
+env_admin_ids = os.environ.get("ADMIN_IDS", "").strip()
+if env_admin_ids:
+    for aid in env_admin_ids.split(","):
+        aid = aid.strip()
+        if aid.isdigit():
+            val = int(aid)
+            if val not in ADMIN_IDS:
+                ADMIN_IDS.append(val)
 
 # מסד נתונים מרוחק דרך DATABASE_URL (למשל PostgreSQL ב-Render)
 RAW_DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
@@ -466,6 +474,22 @@ def _init_db_sync():
             except Exception as e:
                 logging.warning(f"Note on TRUNCATE deliveries_users: {e}")
 
+        # איפוס נתוני משתמשים לבקשת המשתמש לבדיקת מודל הרשאות חדש (שימור מנהלי מערכת בלבד)
+        cur.execute("SELECT setting_value FROM deliveries_system_settings WHERE setting_key = 'wipe_rbac_reset_v4'")
+        wipe_rbac = cur.fetchone()
+        if not wipe_rbac:
+            try:
+                admin_tuple = tuple(ADMIN_IDS)
+                cur.execute(f"DELETE FROM deliveries_users WHERE user_id NOT IN {admin_tuple}")
+                cur.execute(f"DELETE FROM deliveries_driver_cities WHERE user_id NOT IN {admin_tuple}")
+                cur.execute("DELETE FROM deliveries_order_bids")
+                cur.execute("""INSERT INTO deliveries_system_settings (setting_key, setting_value) 
+                               VALUES ('wipe_rbac_reset_v4', 'completed') 
+                               ON CONFLICT (setting_key) DO UPDATE SET setting_value = 'completed'""")
+                logging.info("🧹 טבלת המשתמשים אופסה בהצלחה עבור כל המשתמשים הרגילים (מנהלי המערכת נשמרו)!")
+            except Exception as e:
+                logging.warning(f"Note on wipe_rbac_reset_v4: {e}")
+
         # תחנת ברירת מחדל
         cur.execute('''INSERT INTO deliveries_stations (station_id, name, commission_percent) 
                        VALUES (1, 'תחנה ראשית', 10.0) 
@@ -561,6 +585,17 @@ async def init_db():
                 await db.execute("DELETE FROM deliveries_driver_cities")
                 await db.execute("INSERT OR REPLACE INTO deliveries_system_settings (setting_key, setting_value) VALUES ('wipe_stage_b', 'completed')")
                 logging.info("🧹 בוצע ניקוי שולחן (SQLite) לאכיפת שלב ב'!")
+
+            # איפוס נתוני משתמשים (SQLite) לבדיקת מודל הרשאות חדש (שימור מנהלי מערכת בלבד)
+            c_rbac = await db.execute("SELECT setting_value FROM deliveries_system_settings WHERE setting_key = 'wipe_rbac_reset_v4'")
+            wipe_rbac = await c_rbac.fetchone()
+            if not wipe_rbac:
+                admin_ids_str = ",".join(str(aid) for aid in ADMIN_IDS)
+                await db.execute(f"DELETE FROM deliveries_users WHERE user_id NOT IN ({admin_ids_str})")
+                await db.execute(f"DELETE FROM deliveries_driver_cities WHERE user_id NOT IN ({admin_ids_str})")
+                await db.execute("DELETE FROM deliveries_order_bids")
+                await db.execute("INSERT OR REPLACE INTO deliveries_system_settings (setting_key, setting_value) VALUES ('wipe_rbac_reset_v4', 'completed')")
+                logging.info("🧹 בוצע איפוס משתמשים (SQLite) לבדיקת מודל הרשאות חדש!")
 
             await db.execute('INSERT OR IGNORE INTO deliveries_stations (station_id, name, commission_percent) VALUES (1, "תחנה ראשית", 10.0)')
 
@@ -3582,19 +3617,21 @@ async def finalize_onboarding(message: Message, state: FSMContext, user_id: int 
     has_custom_cities = bool(data.get('selected_cities'))
     cities = data.get('selected_cities', [])
 
+    assigned_role = 'admin' if int(uid) in ADMIN_IDS else 'user'
+
     if USE_POSTGRES:
         def _save_driver_sync():
             with get_pg_cursor() as cur:
                 cur.execute('''INSERT INTO deliveries_users 
                                (user_id, telegram_username, full_name, phone, is_phone_verified, birth_year, terms_accepted_at,
                                 car_brand, car_model, car_year, car_seats, role, status, is_blocked, subscription_plan)
-                               VALUES (%s, %s, %s, %s, 1, %s, %s, %s, %s, %s, %s, 'user', 'busy', 0, 'free')
+                               VALUES (%s, %s, %s, %s, 1, %s, %s, %s, %s, %s, %s, %s, 'busy', 0, 'free')
                                ON CONFLICT (user_id) DO UPDATE SET 
                                telegram_username = EXCLUDED.telegram_username, full_name = EXCLUDED.full_name, phone = EXCLUDED.phone, 
                                is_phone_verified = 1, birth_year = EXCLUDED.birth_year, terms_accepted_at = EXCLUDED.terms_accepted_at,
                                car_brand = EXCLUDED.car_brand, car_model = EXCLUDED.car_model, car_year = EXCLUDED.car_year, 
-                               car_seats = EXCLUDED.car_seats, role = 'user', is_blocked = 0''',
-                            (uid, uname, full_name, phone, birth_year, terms_at, car_brand, car_model, car_year, car_seats))
+                               car_seats = EXCLUDED.car_seats, role = EXCLUDED.role, is_blocked = 0''',
+                            (uid, uname, full_name, phone, birth_year, terms_at, car_brand, car_model, car_year, car_seats, assigned_role))
                 
                 if has_custom_cities:
                     cur.execute("DELETE FROM deliveries_driver_cities WHERE user_id = %s", (uid,))
@@ -3614,13 +3651,13 @@ async def finalize_onboarding(message: Message, state: FSMContext, user_id: int 
             await db.execute('''INSERT INTO deliveries_users 
                                (user_id, telegram_username, full_name, phone, is_phone_verified, birth_year, terms_accepted_at,
                                 car_brand, car_model, car_year, car_seats, role, status, is_blocked, subscription_plan)
-                               VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 'user', 'busy', 0, 'free')
+                               VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 'busy', 0, 'free')
                                ON CONFLICT (user_id) DO UPDATE SET 
                                telegram_username = excluded.telegram_username, full_name = excluded.full_name, phone = excluded.phone, 
                                is_phone_verified = 1, birth_year = excluded.birth_year, terms_accepted_at = excluded.terms_accepted_at,
                                car_brand = excluded.car_brand, car_model = excluded.car_model, car_year = excluded.car_year, 
-                               car_seats = excluded.car_seats, role = 'user', is_blocked = 0''',
-                            (uid, uname, full_name, phone, birth_year, terms_at, car_brand, car_model, car_year, car_seats))
+                               car_seats = excluded.car_seats, role = excluded.role, is_blocked = 0''',
+                            (uid, uname, full_name, phone, birth_year, terms_at, car_brand, car_model, car_year, car_seats, assigned_role))
             if has_custom_cities:
                 await db.execute("DELETE FROM deliveries_driver_cities WHERE user_id = ?", (uid,))
                 for c in cities:
