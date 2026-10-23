@@ -16,15 +16,15 @@ import {
 } from 'lucide-react';
 
 interface HeaderProps {
-  viewMode: 'erp' | 'driver' | 'telegram';
-  setViewMode: (mode: 'erp' | 'driver' | 'telegram') => void;
+  activeTab: 'driver' | 'dispatcher' | 'admin';
+  setActiveTab: (tab: 'driver' | 'dispatcher' | 'admin') => void;
   onOpenRegister: () => void;
   onOpenGuide: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
-  viewMode,
-  setViewMode,
+  activeTab,
+  setActiveTab,
   onOpenRegister,
   onOpenGuide,
 }) => {
@@ -82,44 +82,51 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           </div>
 
-          {/* View Mode Tabs - מוגבל הרמטית אך ורק למנהל מערכת (Super Admin) - אינו קיים כלל ב-DOM עבור שאר המשתמשים! */}
-          {currentUser.role === 'admin' && (
-            <div className="flex items-center bg-slate-950/70 p-1 rounded-xl border border-slate-800">
+          {/* Conditional Navigation Tabs - מידור קפדני לפי Role */}
+          <div className="flex items-center bg-slate-950/80 p-1 rounded-xl border border-slate-800 text-xs">
+            {/* 1. כרטיסיית הנהג - פתוחה לכל המשתמשים */}
+            <button
+              onClick={() => setActiveTab('driver')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold transition-all ${
+                activeTab === 'driver'
+                  ? 'bg-amber-500 text-slate-950 shadow-sm'
+                  : 'text-slate-300 hover:text-white hover:bg-slate-800/60'
+              }`}
+            >
+              <Car className="w-3.5 h-3.5" />
+              <span>עמדת נהג</span>
+            </button>
+
+            {/* 2. כרטיסיית סדרן - נהג רגיל לא רואה ב-DOM! רק סדרן, מנהל תחנה ומנהל מערכת */}
+            {(currentUser.role === 'dispatcher' || currentUser.role === 'station_manager' || currentUser.role === 'admin') && (
               <button
-                onClick={() => setViewMode('erp')}
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                  viewMode === 'erp'
-                    ? 'bg-amber-500 text-slate-950 font-bold shadow'
+                onClick={() => setActiveTab('dispatcher')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold transition-all ${
+                  activeTab === 'dispatcher'
+                    ? 'bg-blue-600 text-white shadow-sm'
                     : 'text-slate-300 hover:text-white hover:bg-slate-800/60'
                 }`}
               >
-                <LayoutDashboard className="w-3.5 h-3.5" />
-                <span>פאנל ניהול ERP</span>
+                <Radio className="w-3.5 h-3.5" />
+                <span>עמדת סדרן</span>
               </button>
+            )}
+
+            {/* 3. כרטיסיית ניהול מערכת - אך ורק מנהל מערכת (Super Admin) רואה ב-DOM! */}
+            {currentUser.role === 'admin' && (
               <button
-                onClick={() => setViewMode('driver')}
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                  viewMode === 'driver'
-                    ? 'bg-amber-500 text-slate-950 font-bold shadow'
-                    : 'text-slate-300 hover:text-white hover:bg-slate-800/60'
+                onClick={() => setActiveTab('admin')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-black transition-all ${
+                  activeTab === 'admin'
+                    ? 'bg-gradient-to-r from-amber-500 to-amber-600 text-slate-950 shadow-sm'
+                    : 'text-amber-400 hover:text-amber-300 hover:bg-slate-800/60'
                 }`}
               >
-                <Smartphone className="w-3.5 h-3.5" />
-                <span>עמדת נהג</span>
+                <Shield className="w-3.5 h-3.5" />
+                <span>ניהול מערכת (God Mode)</span>
               </button>
-              <button
-                onClick={() => setViewMode('telegram')}
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                  viewMode === 'telegram'
-                    ? 'bg-blue-600 text-white font-bold shadow'
-                    : 'text-slate-300 hover:text-white hover:bg-slate-800/60'
-                }`}
-              >
-                <Bot className="w-3.5 h-3.5" />
-                <span>בוט טלגרם (Live)</span>
-              </button>
-            </div>
-          )}
+            )}
+          </div>
 
           {/* User Profile Switcher & Actions */}
           <div className="flex items-center gap-3">
