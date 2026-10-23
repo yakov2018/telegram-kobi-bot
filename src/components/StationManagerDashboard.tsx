@@ -81,6 +81,21 @@ export const StationManagerDashboard: React.FC = () => {
     }
   };
 
+  // אבטחה קשיחה (Protected Component): חסימת כל מי שאינו מנהל תחנה או מנהל מערכת
+  if (currentUser.role !== 'station_manager' && currentUser.role !== 'admin') {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-6 text-center font-sans" dir="rtl">
+        <div className="w-16 h-16 rounded-2xl bg-red-500/10 border border-red-500/30 flex items-center justify-center text-3xl mb-4 text-red-400">
+          🚫
+        </div>
+        <h2 className="text-xl font-extrabold text-white mb-2">גישה חסומה</h2>
+        <p className="text-sm text-slate-400 max-w-sm mb-6">
+          פאנל ניהול התחנה מיועד למנהלי תחנות מורשים בלבד.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6 animate-fade-in text-slate-100">
       {/* Station Header */}

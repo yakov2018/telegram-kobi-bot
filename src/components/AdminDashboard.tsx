@@ -191,6 +191,21 @@ export const AdminDashboard: React.FC = () => {
     setTimeout(() => setSettingsSuccess(null), 3000);
   };
 
+  // אבטחה קשיחה (Protected Component): חסימת כל משתמש שאינו מנהל מערכת (Super Admin)
+  if (currentUser.role !== 'admin') {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-6 text-center font-sans" dir="rtl">
+        <div className="w-16 h-16 rounded-2xl bg-red-500/10 border border-red-500/30 flex items-center justify-center text-3xl mb-4 text-red-400">
+          🚫
+        </div>
+        <h2 className="text-xl font-extrabold text-white mb-2">גישה חסומה</h2>
+        <p className="text-sm text-slate-400 max-w-sm mb-6">
+          פאנל ניהול המערכת (Super Admin) מוגבל למנהלי מערכת בלבד. אין לך הרשאות לצפות בדף זה.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans" dir="rtl">
       {/* Top Admin Sticky Bar */}

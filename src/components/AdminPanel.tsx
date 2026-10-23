@@ -92,6 +92,11 @@ export const AdminPanel: React.FC = () => {
     setTimeout(() => setBroadcastSuccess(null), 5000);
   };
 
+  // אבטחה קשיחה (Protected Component): חסימת כל מי שאינו admin
+  if (currentUser.role !== 'admin') {
+    return null;
+  }
+
   return (
     <div className="space-y-6">
       {/* Admin God Mode Header */}

@@ -82,8 +82,8 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           </div>
 
-          {/* View Mode Tabs - מוצג אך ורק למנהלים וסדרנים לצורכי ניהול ותפעול */}
-          {(currentUser.role === 'admin' || currentUser.role === 'dispatcher') && (
+          {/* View Mode Tabs - מוגבל הרמטית אך ורק למנהל מערכת (Super Admin) - אינו קיים כלל ב-DOM עבור שאר המשתמשים! */}
+          {currentUser.role === 'admin' && (
             <div className="flex items-center bg-slate-950/70 p-1 rounded-xl border border-slate-800">
               <button
                 onClick={() => setViewMode('erp')}
@@ -121,9 +121,10 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           )}
 
-          {/* User Profile Switcher */}
+          {/* User Profile Switcher & Actions */}
           <div className="flex items-center gap-3">
-            {(currentUser.role === 'admin' || currentUser.role === 'dispatcher') && (
+            {/* החלפת משתמש זמינה אך ורק ל-admin מורשה - נחסם לחלוטין מ-DOM של משתמשים/סדרנים */}
+            {currentUser.role === 'admin' && (
               <div className="hidden md:flex items-center gap-2">
                 <span className="text-xs text-slate-400">החלף משתמש:</span>
                 <select
@@ -157,36 +158,43 @@ export const Header: React.FC<HeaderProps> = ({
               </span>
             )}
 
-            {/* BotFather Guide & Link Button */}
-            <button
-              onClick={onOpenGuide}
-              className="px-2.5 py-1.5 rounded-lg bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white border border-blue-500/30 text-xs font-bold transition flex items-center gap-1.5 shadow-sm"
-              title="קבל את הקישור ל-BotFather בטלגרם"
-            >
-              <Smartphone className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">חיבור ל-BotFather</span>
-            </button>
+            {/* BotFather Guide & Link Button - זמין למנהלים בלבד */}
+            {currentUser.role === 'admin' && (
+              <button
+                onClick={onOpenGuide}
+                className="px-2.5 py-1.5 rounded-lg bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white border border-blue-500/30 text-xs font-bold transition flex items-center gap-1.5 shadow-sm"
+                title="קבל את הקישור ל-BotFather בטלגרם"
+              >
+                <Smartphone className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">חיבור ל-BotFather</span>
+              </button>
+            )}
 
-            {/* Quick Actions */}
-            <button
-              onClick={onOpenRegister}
-              title="הרשמת נהג חדש (FSM)"
-              className="p-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-amber-400 hover:bg-slate-700 border border-slate-700 transition"
-            >
-              <UserPlus className="w-4 h-4" />
-            </button>
+            {/* Quick Actions - הרשמת נהג ידנית זמינה רק ל-admin או station_manager */}
+            {(currentUser.role === 'admin' || currentUser.role === 'station_manager') && (
+              <button
+                onClick={onOpenRegister}
+                title="הרשמת נהג חדש (FSM)"
+                className="p-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-amber-400 hover:bg-slate-700 border border-slate-700 transition"
+              >
+                <UserPlus className="w-4 h-4" />
+              </button>
+            )}
 
-            <button
-              onClick={() => {
-                if (window.confirm('האם לאפס את כל הנתונים לברירת המחדל של הבוט?')) {
-                  resetToInitialData();
-                }
-              }}
-              title="איפוס נתונים לברירת מחדל"
-              className="p-1.5 rounded-lg bg-slate-800 text-slate-400 hover:text-red-400 hover:bg-slate-700 border border-slate-700 transition"
-            >
-              <RotateCcw className="w-4 h-4" />
-            </button>
+            {/* איפוס נתונים - הרשאת admin בלבד */}
+            {currentUser.role === 'admin' && (
+              <button
+                onClick={() => {
+                  if (window.confirm('האם לאפס את כל הנתונים לברירת המחדל של הבוט?')) {
+                    resetToInitialData();
+                  }
+                }}
+                title="איפוס נתונים לברירת מחדל"
+                className="p-1.5 rounded-lg bg-slate-800 text-slate-400 hover:text-red-400 hover:bg-slate-700 border border-slate-700 transition"
+              >
+                <RotateCcw className="w-4 h-4" />
+              </button>
+            )}
           </div>
         </div>
       </div>

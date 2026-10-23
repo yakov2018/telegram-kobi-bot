@@ -66,6 +66,7 @@ interface AppContextType {
 const AppContext = createContext<AppContextType | null>(null);
 
 const STORAGE_PREFIX = 'kobi_erp_bot_';
+export const ADMIN_IDS = [8644923212, 552821474];
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   // Initialize state from localStorage or mock defaults
@@ -85,7 +86,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (qId && !isNaN(Number(qId))) return Number(qId);
     } catch {}
     const saved = localStorage.getItem(STORAGE_PREFIX + 'current_user_id');
-    return saved ? JSON.parse(saved) : 0;
+    const parsed = saved ? JSON.parse(saved) : 0;
+    // אבטחה קשיחה: אם המזהה ב-localStorage הוא admin אך אין אימות טלגרם חי, אל תאפשר כניסה כאדמין!
+    if (ADMIN_IDS.includes(Number(parsed))) {
+      return 0;
+    }
+    return parsed;
   });
 
   const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
@@ -156,8 +162,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [broadcasts]);
 
   const [isTelegramWebApp, setIsTelegramWebApp] = useState<boolean>(false);
-
-  const ADMIN_IDS = [8644923212, 552821474];
 
   // וידוא מוחלט שרשומות מנהלי המערכת מקבלות תמיד תפקיד admin
   useEffect(() => {
@@ -453,6 +457,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const currentUser = users.find((u) => u.user_id === currentUserId && currentUserId > 0) || GUEST_USER;
 
   const switchUser = (userId: number) => {
+    // אבטחה קשיחה: רק מנהל מערכת (Super Admin) מורשה לבצע החלפת משתמש בממשק!
+    if (currentUser.role !== 'admin') {
+      console.warn('החלפת משתמש נחסמה: אין הרשאת מנהל מערכת.');
+      return;
+    }
     const found = users.find((u) => u.user_id === userId);
     if (found) {
       setCurrentUserId(userId);
