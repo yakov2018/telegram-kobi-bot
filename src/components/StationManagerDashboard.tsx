@@ -21,6 +21,15 @@ import {
 
 export const StationManagerDashboard: React.FC = () => {
   const { currentUser, stations, orders, debts, users } = useApp();
+
+  if (currentUser.role !== 'station_manager' && currentUser.role !== 'admin') {
+    return (
+      <div className="bg-red-500/10 border border-red-500/30 rounded-2xl p-6 text-center text-red-300 font-bold my-8">
+        ⛔ גישה חסומה: פאנל ניהול תחנה מיועד אך ורק למנהלי תחנה מורשים.
+      </div>
+    );
+  }
+
   const [activeTab, setActiveTab] = useState<'overview' | 'dispatchers' | 'orders' | 'debts'>('overview');
   const [searchTerm, setSearchTerm] = useState('');
   const [feedback, setFeedback] = useState<string | null>(null);

@@ -31,6 +31,14 @@ export const DispatcherPanel: React.FC = () => {
     deleteOrder,
   } = useApp();
 
+  if (currentUser.role !== 'dispatcher' && currentUser.role !== 'station_manager' && currentUser.role !== 'admin') {
+    return (
+      <div className="bg-red-500/10 border border-red-500/30 rounded-2xl p-6 text-center text-red-300 font-bold my-8">
+        ⛔ גישה חסומה: עמדת הסדרן מיועדת אך ורק לסדרנים ומנהלי תחנות מורשים.
+      </div>
+    );
+  }
+
   const [rawText, setRawText] = useState('');
   const [destType, setDestType] = useState<'private' | 'groups'>('private');
   const [feedbackMsg, setFeedbackMsg] = useState<string | null>(null);

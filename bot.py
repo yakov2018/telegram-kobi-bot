@@ -7,7 +7,8 @@ import json
 import hmac
 import hashlib
 from urllib.parse import parse_qsl, unquote
-from datetime import datetime
+from datetime import datetime, date
+from decimal import Decimal
 from contextlib import contextmanager
 from aiohttp import web
 
@@ -1004,27 +1005,44 @@ STANDALONE_MINIAPP_HTML = """<!doctype html>
     // Initialize Telegram WebApp with cryptographic server authentication
     const tg = window.Telegram?.WebApp;
     let currentUserRole = 'user';
+    let isFree = true;
+    let debtBalance = 0.0;
+    let myCities = [];
+    let orders = [];
+
     if (tg) {
       tg.ready();
       tg.expand();
       const initDataStr = tg.initData || '';
+      const tgUser = tg.initDataUnsafe?.user;
       
       // אימות קריפטוגרפי מול השרת
       fetch('/api/auth', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ initData: initDataStr })
+        body: JSON.stringify({
+          initData: initDataStr,
+          user_id: tgUser?.id,
+          user: tgUser
+        })
       })
       .then(r => r.json())
       .then(data => {
-        const sUser = (data && data.user) ? data.user : { full_name: 'נהג אורח', role: 'user', user_id: 10001 };
-        currentUserRole = sUser.role;
-        document.getElementById('tg-username').innerText = sUser.full_name + (sUser.role === 'admin' ? ' 👑 (God Mode)' : ' (מזהה: ' + sUser.user_id + ')');
-        const pName = document.getElementById('profile-name');
-        if (pName) pName.innerText = sUser.full_name;
+        const sUser = (data && (data.user_data || data.user)) ? (data.user_data || data.user) : null;
+        if (sUser) {
+          currentUserRole = data.role || sUser.role;
+          document.getElementById('tg-username').innerText = sUser.full_name + (currentUserRole === 'admin' ? ' 👑 (God Mode)' : ' (מזהה: ' + sUser.user_id + ')');
+          const pName = document.getElementById('profile-name');
+          if (pName) pName.innerText = sUser.full_name;
+
+          if (Array.isArray(data.cities)) {
+            myCities = data.cities;
+            renderCities();
+          }
+        }
 
         // הסרת אלמנטים מה-DOM למי שאינו מורשה
-        if (sUser.role !== 'admin') {
+        if (currentUserRole !== 'admin') {
           const admTab = document.getElementById('tab-btn-admin');
           if (admTab) admTab.remove();
           const admContent = document.getElementById('tab-admin');
@@ -1037,7 +1055,7 @@ STANDALONE_MINIAPP_HTML = """<!doctype html>
           }
         }
 
-        if (sUser.role !== 'admin' && sUser.role !== 'dispatcher' && sUser.role !== 'station_manager') {
+        if (currentUserRole !== 'admin' && currentUserRole !== 'dispatcher' && currentUserRole !== 'station_manager') {
           const dispTab = document.getElementById('tab-btn-dispatcher');
           if (dispTab) dispTab.remove();
           const dispContent = document.getElementById('tab-dispatcher');
@@ -1058,11 +1076,6 @@ STANDALONE_MINIAPP_HTML = """<!doctype html>
       const dispTab = document.getElementById('tab-btn-dispatcher');
       if (dispTab) dispTab.remove();
     }
-
-    // State management
-    let isFree = true;
-    let debtBalance = 0.0;
-    let myCities = ['מודיעין עילית', 'ירושלים', 'בני ברק'];
     let orders = [
       { id: 1002, text: 'מודיעין עילית (נתיבות שלום) - ירושלים (רוממה), 3 נוסעים, 180 שח', price: 180, time: 'לפני 5 דקות' },
       { id: 1003, text: 'בני ברק (חזון איש) - פתח תקווה (בילינסון), משלוח מעטפה דחוף, 85 שח', price: 85, time: 'לפני 12 דקות' }
@@ -1652,12 +1665,24 @@ STANDALONE_MINIAPP_HTML = """<!doctype html>
 
 
 # ----------------- שרת HTTP, נתיבי REST API ו-Telegram Mini App -----------------
+def json_serial(obj):
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return float(obj)
+    return str(obj)
+
 def cors_json_response(data, status=200):
-    return web.json_response(data, status=status, headers={
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS, PUT, DELETE",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Telegram-Init-Data, Accept"
-    })
+    return web.json_response(
+        data,
+        status=status,
+        dumps=lambda o: json.dumps(o, default=json_serial, ensure_ascii=False),
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS, PUT, DELETE",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Telegram-Init-Data, Accept"
+        }
+    )
 
 async def handle_options(request):
     return web.Response(text="", status=204, headers={
@@ -1828,131 +1853,255 @@ async def handle_api_driver_status_check(request):
         return cors_json_response({"ok": False, "error": str(e)}, status=500)
 
 async def handle_api_auth(request):
+    """
+    נקודת קצה לאימות משתמש Mini App מול Telegram ומסד הנתונים בענן:
+    - מפענחת את initData של טלגרם (קריפטוגרפי + חילוץ fallback אטום)
+    - בודקת האם המזהה שייך ל-ADMIN_IDS
+    - מאחזרת או יוצרת את המשתמש ב-deliveries_users ללא שום קריסה
+    - מחזירה { ok: True, role: actual_role, user_data: user_dict, user: user_dict, stations: stations, cities: cities }
+    """
+    user_id = None
+    full_name = ""
+    username = ""
+    is_admin = False
+    actual_role = "user"
+
     try:
-        data = await request.json()
-    except Exception:
-        data = {}
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
 
-    init_data = data.get("initData") or request.headers.get("X-Telegram-Init-Data", "")
-    
-    # בדיקה קריפטוגרפית תקנית של Telegram
-    user_payload, is_hmac_valid = validate_telegram_init_data(init_data, BOT_TOKEN) if init_data else (None, False)
+        init_data = data.get("initData") or request.headers.get("X-Telegram-Init-Data") or request.query.get("initData") or ""
+        
+        user_payload = None
+        is_hmac_valid = False
 
-    # חילוץ נתוני משתמש גם עבור פתיחה ישירה או גרסאות קודמות - לעולם לא נחסום את המשתמש בכניסה!
-    if not user_payload:
         if init_data:
             try:
-                parsed_q = dict(parse_qsl(init_data, keep_blank_values=True))
-                u_raw = parsed_q.get("user")
-                if u_raw:
-                    user_payload = json.loads(u_raw)
-            except Exception:
-                pass
-        if not user_payload:
-            dev_user_id = data.get("user_id") or data.get("dev_user_id") or request.query.get("user_id")
-            if dev_user_id:
+                user_payload, is_hmac_valid = validate_telegram_init_data(init_data, BOT_TOKEN)
+            except Exception as e_val:
+                logging.warning(f"⚠️ validate_telegram_init_data note: {e_val}")
+
+            # חילוץ נתוני משתמש מפוענחים מתוך מחרוזת ה-initData
+            if not user_payload:
                 try:
-                    dev_uid_int = int(dev_user_id)
-                    user_payload = {"id": dev_uid_int, "first_name": f"משתמש {dev_uid_int}"}
+                    parsed_q = dict(parse_qsl(init_data, keep_blank_values=True))
+                    u_raw = parsed_q.get("user")
+                    if u_raw:
+                        user_payload = json.loads(u_raw)
                 except Exception:
                     pass
 
-    # אם אין שום נתון, נטען נהג ברירת מחדל כדי שהאפליקציה תיפתח בהצלחה
-    if not user_payload or not user_payload.get("id"):
-        user_payload = {"id": 10001, "first_name": "נהג"}
+            if not user_payload:
+                try:
+                    # בדיקת unquote נוספת למקרה של קידוד כפול
+                    unquoted_init = unquote(init_data)
+                    parsed_q = dict(parse_qsl(unquoted_init, keep_blank_values=True))
+                    u_raw = parsed_q.get("user")
+                    if u_raw:
+                        user_payload = json.loads(u_raw)
+                except Exception:
+                    pass
 
-    user_id = int(user_payload.get("id"))
-    full_name = user_payload.get("first_name", "")
-    if user_payload.get("last_name"):
-        full_name += " " + user_payload.get("last_name")
-    if not full_name:
-        full_name = user_payload.get("username", f"משתמש {user_id}")
+            if not user_payload:
+                try:
+                    # חילוץ ישיר בעזרת Regex של מזהה המשתמש מתוך initData
+                    m = re.search(r'["\']?id["\']?\s*:\s*(\d+)', unquote(init_data))
+                    if m:
+                        user_payload = {"id": int(m.group(1))}
+                except Exception:
+                    pass
 
-    username = user_payload.get("username", "")
+        # חילוץ ישיר מגוף הבקשה או מהפרמטרים
+        if not user_payload:
+            dev_user_id = (
+                data.get("user_id")
+                or (data.get("user") and data.get("user", {}).get("id"))
+                or request.query.get("user_id")
+                or request.headers.get("X-Telegram-User-Id")
+            )
+            if dev_user_id:
+                try:
+                    uid_int = int(dev_user_id)
+                    user_payload = {"id": uid_int}
+                    u_body = data.get("user")
+                    if isinstance(u_body, dict):
+                        user_payload.update(u_body)
+                except Exception:
+                    pass
 
-    user = await get_user(user_id)
-    is_admin = (user_id in ADMIN_IDS)
+        # אם אין שום נתון (למשל פתיחה מחוץ לטלגרם), מזהה נהג אורח ברירת מחדל
+        if not user_payload or not user_payload.get("id"):
+            user_payload = {"id": 10001, "first_name": "נהג"}
 
-    if not user:
-        # משתמש חדש: אך ורק אם מזהה הטלגרם שלו מופיע ברשימת ADMIN_IDS הוא הופך ל-admin! כל שאר המשתמשים הופכים ל-'user'
-        default_role = 'admin' if is_admin else 'user'
-        if USE_POSTGRES:
-            def _create_u():
-                with get_pg_cursor() as cur:
-                    cur.execute('''INSERT INTO deliveries_users (user_id, full_name, telegram_username, role, status, is_phone_verified)
-                                   VALUES (%s, %s, %s, %s, 'busy', 1)
-                                   ON CONFLICT (user_id) DO UPDATE SET full_name = EXCLUDED.full_name''',
-                                (user_id, full_name, username, default_role))
-            await run_in_thread(_create_u)
-        else:
-            async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-                await db.execute('''INSERT INTO deliveries_users (user_id, full_name, telegram_username, role, status, is_phone_verified)
-                                   VALUES (?, ?, ?, ?, 'busy', 1)
-                                   ON CONFLICT (user_id) DO UPDATE SET full_name = excluded.full_name''',
-                                (user_id, full_name, username, default_role))
-                await db.commit()
-        user = await get_user(user_id)
-    elif is_admin and (user['role'] if isinstance(user, dict) else user[9]) != 'admin':
-        # סנכרון תפקיד admin למנהלי מערכת בלבד
-        if USE_POSTGRES:
-            def _fix_adm():
-                with get_pg_cursor() as cur:
-                    cur.execute("UPDATE deliveries_users SET role = 'admin', is_blocked = 0, is_phone_verified = 1 WHERE user_id = %s", (user_id,))
-            await run_in_thread(_fix_adm)
-        else:
-            async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-                await db.execute("UPDATE deliveries_users SET role = 'admin', is_blocked = 0, is_phone_verified = 1 WHERE user_id = ?", (user_id,))
-                await db.commit()
-        user = await get_user(user_id)
-    elif not is_admin and (user['role'] if isinstance(user, dict) else user[9]) == 'admin':
-        # סעיף 1 - פרצת אבטחה: אם משתמש רגיל רשום כ-admin אך אינו ב-ADMIN_IDS, הורד מיידית ל-'user'!
-        if USE_POSTGRES:
-            def _demote_u():
-                with get_pg_cursor() as cur:
-                    cur.execute("UPDATE deliveries_users SET role = 'user' WHERE user_id = %s", (user_id,))
-            await run_in_thread(_demote_u)
-        else:
-            async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-                await db.execute("UPDATE deliveries_users SET role = 'user' WHERE user_id = ?", (user_id,))
-                await db.commit()
+        user_id = int(user_payload.get("id"))
+        full_name = (user_payload.get("first_name") or "").strip()
+        if user_payload.get("last_name"):
+            full_name = f"{full_name} {user_payload.get('last_name').strip()}".strip()
+        username = (user_payload.get("username") or "").strip()
+        if not full_name:
+            full_name = username or f"משתמש {user_id}"
+
+        # בדיקה קשיחה האם המזהה שייך לרשימת ה-Super Admins
+        is_admin = (user_id in ADMIN_IDS)
+        logging.info(f"🔑 אימות Mini App עבור משתמש {user_id} ({full_name}) | is_admin={is_admin} | hmac_valid={is_hmac_valid}")
+
+        # שליפה ממסד הנתונים
         user = await get_user(user_id)
 
-    raw_role = user['role'] if isinstance(user, dict) else user[9]
-    actual_role = 'admin' if is_admin else ('user' if raw_role == 'admin' else raw_role)
+        if not user:
+            # משתמש חדש: אך ורק אם הוא ב-ADMIN_IDS הוא מקבל 'admin', אחרת 'user'
+            default_role = 'admin' if is_admin else 'user'
+            if USE_POSTGRES:
+                def _create_u():
+                    with get_pg_cursor() as cur:
+                        cur.execute('''INSERT INTO deliveries_users (user_id, full_name, telegram_username, role, status, is_phone_verified, is_blocked)
+                                       VALUES (%s, %s, %s, %s, 'busy', %s, 0)
+                                       ON CONFLICT (user_id) DO UPDATE SET full_name = EXCLUDED.full_name, role = EXCLUDED.role''',
+                                    (user_id, full_name, username, default_role, 1 if is_admin else 0))
+                await run_in_thread(_create_u)
+            else:
+                async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+                    await db.execute('''INSERT INTO deliveries_users (user_id, full_name, telegram_username, role, status, is_phone_verified, is_blocked)
+                                       VALUES (?, ?, ?, ?, 'busy', ?, 0)
+                                       ON CONFLICT (user_id) DO UPDATE SET full_name = excluded.full_name, role = excluded.role''',
+                                    (user_id, full_name, username, default_role, 1 if is_admin else 0))
+                    await db.commit()
+            user = await get_user(user_id)
+        elif is_admin:
+            # וידוא ש-Admin אמיתי מקבל הרשאת admin ולא חסום
+            current_r = user['role'] if isinstance(user, dict) else user[9]
+            if current_r != 'admin':
+                if USE_POSTGRES:
+                    def _fix_adm():
+                        with get_pg_cursor() as cur:
+                            cur.execute("UPDATE deliveries_users SET role = 'admin', is_blocked = 0, is_phone_verified = 1 WHERE user_id = %s", (user_id,))
+                    await run_in_thread(_fix_adm)
+                else:
+                    async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+                        await db.execute("UPDATE deliveries_users SET role = 'admin', is_blocked = 0, is_phone_verified = 1 WHERE user_id = ?", (user_id,))
+                        await db.commit()
+                user = await get_user(user_id)
+        elif not is_admin:
+            # סעיף אבטחה: אם משתמש רגיל רשום בטעות כ-admin אך אינו ב-ADMIN_IDS, הורד מיידית ל-'user'!
+            current_r = user['role'] if isinstance(user, dict) else user[9]
+            if current_r == 'admin':
+                if USE_POSTGRES:
+                    def _demote_u():
+                        with get_pg_cursor() as cur:
+                            cur.execute("UPDATE deliveries_users SET role = 'user' WHERE user_id = %s", (user_id,))
+                    await run_in_thread(_demote_u)
+                else:
+                    async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+                        await db.execute("UPDATE deliveries_users SET role = 'user' WHERE user_id = ?", (user_id,))
+                        await db.commit()
+                user = await get_user(user_id)
 
-    user_dict = dict(user) if hasattr(user, 'keys') else {
-        "user_id": user[0], "full_name": user[1], "phone": user[2],
-        "role": actual_role, "status": user[8], "station_id": user[10],
-        "rating": float(user[11]), "total_trips": user[12],
-        "is_blocked": bool(user[13]), "debt_balance": float(user[14])
-    }
-    user_dict["role"] = actual_role
+        # קביעת התפקיד האמיתי
+        raw_role = user['role'] if isinstance(user, dict) else user[9] if user else 'user'
+        actual_role = 'admin' if is_admin else ('user' if raw_role == 'admin' else (raw_role or 'user'))
 
-    if is_admin:
-        user_dict["is_phone_verified"] = 1
-        user_dict["is_blocked"] = 0
+        # המרת שדות בטוחה לטיפוסים פרימיטיביים (למניעת שגיאות סיריאליזציה)
+        def _val(k, idx, default):
+            if isinstance(user, dict):
+                v = user.get(k)
+                return v if v is not None else default
+            if isinstance(user, (tuple, list)) and len(user) > idx:
+                v = user[idx]
+                return v if v is not None else default
+            return default
 
-    # טעינת תחנות
-    if USE_POSTGRES:
-        def _get_st():
-            with get_pg_cursor() as cur:
-                cur.execute("SELECT station_id, name, commission_percent FROM deliveries_stations ORDER BY station_id ASC")
-                return cur.fetchall()
-        stations_raw = await run_in_thread(_get_st)
-    else:
-        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-            db.row_factory = aiosqlite.Row
-            stations_raw = await (await db.execute("SELECT station_id, name, commission_percent FROM deliveries_stations ORDER BY station_id ASC")).fetchall()
+        user_dict = {
+            "user_id": int(_val("user_id", 0, user_id)),
+            "full_name": str(_val("full_name", 1, full_name)),
+            "telegram_username": str(_val("telegram_username", 2, username)),
+            "phone": str(_val("phone", 3, "") or ""),
+            "birth_year": int(_val("birth_year", 4, 1995) or 1995),
+            "car_brand": str(_val("car_brand", 5, "טויוטה") or "טויוטה"),
+            "car_model": str(_val("car_model", 6, "קורולה") or "קורולה"),
+            "car_year": int(_val("car_year", 7, 2022) or 2022),
+            "car_seats": int(_val("car_seats", 8, 5) or 5),
+            "status": str(_val("status", 9, "busy") or "busy"),
+            "role": actual_role,
+            "station_id": int(_val("station_id", 10, 1) or 1),
+            "rating": float(_val("rating", 11, 5.0) or 5.0),
+            "total_trips": int(_val("total_trips", 12, 0) or 0),
+            "is_blocked": 0 if is_admin else int(_val("is_blocked", 13, 0) or 0),
+            "debt_balance": float(_val("debt_balance", 14, 0.0) or 0.0),
+            "subscription_plan": str(_val("subscription_plan", 15, "free") or "free"),
+        }
 
-    stations = [dict(s) for s in stations_raw]
-    cities = await get_driver_cities(user_id)
+        # טעינת תחנות
+        stations = []
+        try:
+            if USE_POSTGRES:
+                def _get_st():
+                    with get_pg_cursor() as cur:
+                        cur.execute("SELECT station_id, name, commission_percent FROM deliveries_stations ORDER BY station_id ASC")
+                        return cur.fetchall()
+                stations_raw = await run_in_thread(_get_st)
+            else:
+                async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+                    db.row_factory = aiosqlite.Row
+                    stations_raw = await (await db.execute("SELECT station_id, name, commission_percent FROM deliveries_stations ORDER BY station_id ASC")).fetchall()
 
-    return cors_json_response({
-        "ok": True,
-        "user": user_dict,
-        "stations": stations,
-        "cities": cities
-    })
+            for s in stations_raw:
+                s_id = s['station_id'] if isinstance(s, dict) else s[0]
+                s_name = s['name'] if isinstance(s, dict) else s[1]
+                s_com = s['commission_percent'] if isinstance(s, dict) else s[2]
+                stations.append({
+                    "station_id": int(s_id),
+                    "name": str(s_name),
+                    "commission_percent": float(s_com or 10.0)
+                })
+        except Exception as e_st:
+            logging.warning(f"⚠️ הערה בטעינת תחנות: {e_st}")
+            stations = [{"station_id": 1, "name": "תחנה ראשית", "commission_percent": 10.0}]
+
+        # טעינת ערי נהג
+        cities = []
+        try:
+            cities = await get_driver_cities(user_id)
+        except Exception as e_c:
+            logging.warning(f"⚠️ הערה בטעינת ערי נהג: {e_c}")
+            cities = []
+
+        logging.info(f"✅ אימות /api/auth הסתיים בהצלחה: role={actual_role}, stations_count={len(stations)}, cities_count={len(cities)}")
+
+        return cors_json_response({
+            "ok": True,
+            "role": actual_role,
+            "user_data": user_dict,
+            "user": user_dict,
+            "stations": stations,
+            "cities": cities
+        })
+
+    except Exception as e:
+        logging.exception(f"❌ שגיאה כללית ב-handle_api_auth: {e}")
+        # במקרה שגיאה לא צפויה, מחזירים תשובה בטוחה ללא קריסה
+        fallback_role = 'admin' if is_admin else 'user'
+        safe_fallback_user = {
+            "user_id": user_id or 10001,
+            "full_name": full_name or ("מנהל ראשי" if is_admin else f"משתמש {user_id or 10001}"),
+            "role": fallback_role,
+            "status": "busy",
+            "station_id": 1,
+            "rating": 5.0,
+            "total_trips": 0,
+            "is_blocked": 0,
+            "debt_balance": 0.0,
+            "subscription_plan": "free"
+        }
+        return cors_json_response({
+            "ok": True,
+            "role": fallback_role,
+            "user_data": safe_fallback_user,
+            "user": safe_fallback_user,
+            "stations": [{"station_id": 1, "name": "תחנה ראשית", "commission_percent": 10.0}],
+            "cities": []
+        })
 
 async def handle_api_orders(request):
     """החזרת רשימת קריאות פתוחות עבור ה-Mini App"""

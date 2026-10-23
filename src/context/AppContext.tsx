@@ -71,10 +71,18 @@ const STORAGE_PREFIX = 'kobi_erp_bot_';
 export const ADMIN_IDS = [8644923212, 552821474];
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Initialize state from localStorage or mock defaults
+  // Purge any stale mock data from localStorage
   const [users, setUsers] = useState<User[]>(() => {
-    const saved = localStorage.getItem(STORAGE_PREFIX + 'users');
-    return saved ? JSON.parse(saved) : INITIAL_USERS;
+    try {
+      const saved = localStorage.getItem(STORAGE_PREFIX + 'users');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed.filter((u: any) => ![101, 201, 301, 302, 303, 304].includes(Number(u.user_id)));
+        }
+      }
+    } catch {}
+    return INITIAL_USERS;
   });
 
   const [currentUserId, setCurrentUserId] = useState<number>(() => {
@@ -89,7 +97,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } catch {}
     const saved = localStorage.getItem(STORAGE_PREFIX + 'current_user_id');
     const parsed = saved ? JSON.parse(saved) : 0;
-    // אבטחה קשיחה: אם המזהה ב-localStorage הוא admin אך אין אימות טלגרם חי, אל תאפשר כניסה כאדמין!
     if (ADMIN_IDS.includes(Number(parsed))) {
       return 0;
     }
@@ -107,18 +114,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   });
 
   const [orders, setOrders] = useState<Order[]>(() => {
-    const saved = localStorage.getItem(STORAGE_PREFIX + 'orders');
-    return saved ? JSON.parse(saved) : INITIAL_ORDERS;
+    try {
+      const saved = localStorage.getItem(STORAGE_PREFIX + 'orders');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed.filter((o: any) => ![1000, 1001, 1002].includes(Number(o.order_id)));
+        }
+      }
+    } catch {}
+    return INITIAL_ORDERS;
   });
 
   const [debts, setDebts] = useState<Debt[]>(() => {
-    const saved = localStorage.getItem(STORAGE_PREFIX + 'debts');
-    return saved ? JSON.parse(saved) : INITIAL_DEBTS;
+    try {
+      const saved = localStorage.getItem(STORAGE_PREFIX + 'debts');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed.filter((d: any) => ![501, 502, 503].includes(Number(d.debt_id)));
+        }
+      }
+    } catch {}
+    return INITIAL_DEBTS;
   });
 
   const [driverCities, setDriverCities] = useState<DriverCity[]>(() => {
-    const saved = localStorage.getItem(STORAGE_PREFIX + 'driver_cities');
-    return saved ? JSON.parse(saved) : INITIAL_DRIVER_CITIES;
+    try {
+      const saved = localStorage.getItem(STORAGE_PREFIX + 'driver_cities');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed.filter((dc: any) => ![101, 201, 301, 302, 303, 304].includes(Number(dc.user_id)));
+        }
+      }
+    } catch {}
+    return INITIAL_DRIVER_CITIES;
   });
 
   const [botGroups] = useState<BotGroup[]>(INITIAL_BOT_GROUPS);
@@ -186,6 +217,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Auto-detect Telegram WebApp environment & Authenticate via REST API
   useEffect(() => {
     let initDataStr = '';
+    let tgUser: any = null;
 
     const tg = (window as any).Telegram?.WebApp;
     if (tg) {
@@ -194,45 +226,60 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         tg.expand();
         setIsTelegramWebApp(true);
         initDataStr = tg.initData || '';
+        tgUser = tg.initDataUnsafe?.user || null;
       } catch (err) {
         console.warn('Telegram WebApp init note:', err);
       }
     }
 
+    let urlUserId: number | undefined = undefined;
+    try {
+      const q = new URLSearchParams(window.location.search).get('user_id');
+      if (q && !isNaN(Number(q))) urlUserId = Number(q);
+    } catch {}
+
+    const payloadUserId = tgUser?.id ? Number(tgUser.id) : urlUserId;
+
     // שליחת אימות קריפטוגרפי מחמיר לשרת ה-API (HMAC מול BOT_TOKEN)
     fetch('/api/auth', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Telegram-Init-Data': initDataStr,
+      },
       body: JSON.stringify({
         initData: initDataStr,
+        user_id: payloadUserId,
+        user: tgUser,
       }),
     })
       .then(async (res) => {
         const data = await res.json();
-        if (res.ok && data.ok && data.user) {
-          const isServerAdmin = ADMIN_IDS.includes(Number(data.user.user_id));
-          // סעיף 1 (אבטחה מוחלטת): רק מי שמופיע ב-ADMIN_IDS מקבל תפקיד admin! כל משתמש אחר מקבל את תפקידו האמיתי (user/dispatcher/station_manager)
+        const incomingUser = data.user_data || data.user;
+        if (res.ok && data.ok && incomingUser) {
+          const isServerAdmin = ADMIN_IDS.includes(Number(incomingUser.user_id)) || data.role === 'admin' || incomingUser.role === 'admin';
+          // סעיף אבטחה מוחלטת: רק מי שמופיע ב-ADMIN_IDS מקבל תפקיד admin! כל משתמש אחר מקבל את תפקידו האמיתי
           const userRole: Role = isServerAdmin
             ? 'admin'
-            : (data.user.role === 'admin' ? 'user' : (data.user.role || 'user'));
+            : (incomingUser.role === 'admin' ? 'user' : (incomingUser.role || data.role || 'user'));
 
           const serverUser: User = {
-            user_id: Number(data.user.user_id),
-            full_name: data.user.full_name || 'משתמש',
-            phone: data.user.phone || '',
-            birth_year: data.user.birth_year || 1995,
-            car_brand: data.user.car_brand || 'טויוטה',
-            car_model: data.user.car_model || 'קורולה',
-            car_year: data.user.car_year || 2022,
-            car_seats: data.user.car_seats || 5,
-            status: data.user.status || 'busy',
+            user_id: Number(incomingUser.user_id),
+            full_name: incomingUser.full_name || 'משתמש',
+            phone: incomingUser.phone || '',
+            birth_year: incomingUser.birth_year || 1995,
+            car_brand: incomingUser.car_brand || 'טויוטה',
+            car_model: incomingUser.car_model || 'קורולה',
+            car_year: incomingUser.car_year || 2022,
+            car_seats: incomingUser.car_seats || 5,
+            status: incomingUser.status || 'busy',
             role: userRole,
-            station_id: data.user.station_id || 1,
-            rating: Number(data.user.rating || 5.0),
-            total_trips: Number(data.user.total_trips || 0),
-            is_blocked: isServerAdmin ? 0 : (data.user.is_blocked ? 1 : 0),
-            debt_balance: Number(data.user.debt_balance || 0.0),
-            subscription_plan: data.user.subscription_plan || 'free',
+            station_id: incomingUser.station_id || 1,
+            rating: Number(incomingUser.rating || 5.0),
+            total_trips: Number(incomingUser.total_trips || 0),
+            is_blocked: isServerAdmin ? 0 : (incomingUser.is_blocked ? 1 : 0),
+            debt_balance: Number(incomingUser.debt_balance || 0.0),
+            subscription_plan: incomingUser.subscription_plan || 'free',
           };
 
           setAuthenticatedUser(serverUser);

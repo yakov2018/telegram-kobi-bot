@@ -47,6 +47,15 @@ export const AdminDashboard: React.FC = () => {
     resetToInitialData,
   } = useApp();
 
+  // סעיף אבטחה קשיחה: אם המשתמש אינו מנהל מערכת, הקומפוננטה חוסמת גישה מיידית
+  if (currentUser.role !== 'admin') {
+    return (
+      <div className="bg-red-500/10 border border-red-500/30 rounded-2xl p-6 text-center text-red-300 font-bold my-8">
+        ⛔ גישה חסומה: פאנל ניהול המערכת מיועד אך ורק למנהלי מערכת מורשים (Super Admin).
+      </div>
+    );
+  }
+
   const [activeTab, setActiveTab] = useState<'users' | 'system' | 'subscriptions' | 'stations' | 'appeals' | 'broadcast'>('users');
   const [simulationView, setSimulationView] = useState<'none' | 'dispatcher' | 'driver'>('none');
   const [searchUser, setSearchUser] = useState('');
