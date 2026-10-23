@@ -9,7 +9,7 @@ import { RegistrationModal } from './components/RegistrationModal';
 import { MiniAppGuideModal } from './components/MiniAppGuideModal';
 
 export const AppContent: React.FC = () => {
-  const { currentUser, isAuthLoading } = useApp();
+  const { currentUser, isAuthLoading, isAuthenticated, authError } = useApp();
   const [activeTab, setActiveTab] = useState<'driver' | 'dispatcher' | 'admin'>('driver');
   const [isRegisterOpen, setIsRegisterOpen] = useState(false);
   const [isGuideOpen, setIsGuideOpen] = useState(false);
@@ -26,20 +26,41 @@ export const AppContent: React.FC = () => {
     }
   }, [currentUser.role]);
 
-  // מסך טעינה מהיר בזמן שליפת הרשאות
+  // 1. מסך טעינה מהשרת
   if (isAuthLoading) {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-6 text-center font-sans" dir="rtl">
         <div className="w-16 h-16 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-3xl mb-4 animate-bounce">
           🚖
         </div>
-        <h2 className="text-xl font-extrabold text-white mb-2">מתחבר למערכת...</h2>
+        <h2 className="text-xl font-extrabold text-white mb-2">טוען נתונים מהשרת...</h2>
         <p className="text-xs text-slate-400 max-w-sm mb-6">
-          טוען נתונים וערי עבודה מול מסד הנתונים בענן
+          מאמת משתמש מול מסד הנתונים בענן
         </p>
         <div className="w-56 h-1.5 bg-slate-800 rounded-full overflow-hidden">
           <div className="w-full h-full bg-gradient-to-r from-amber-500 to-amber-300 animate-pulse" />
         </div>
+      </div>
+    );
+  }
+
+  // 2. קריטי: אם האימות או ה-API נכשל, מציגים שגיאה ברורה ללא נפילה לנתוני דמה
+  if (authError || !isAuthenticated || !currentUser || currentUser.user_id === 0) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-6 text-center font-sans" dir="rtl">
+        <div className="w-16 h-16 rounded-2xl bg-red-500/10 border border-red-500/30 flex items-center justify-center text-3xl mb-4">
+          ⚠️
+        </div>
+        <h2 className="text-xl font-extrabold text-red-400 mb-2">שגיאה בטעינת נתונים מהשרת</h2>
+        <p className="text-xs text-slate-300 max-w-md mb-6 leading-relaxed">
+          {authError || 'אימות ה-Mini App נכשל מול מסד הנתונים. נא לפתוח את האפליקציה ישירות מכפתור התפריט בבוט הטלגרם.'}
+        </p>
+        <button
+          onClick={() => window.location.reload()}
+          className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition shadow-md"
+        >
+          🔄 נסה שוב
+        </button>
       </div>
     );
   }

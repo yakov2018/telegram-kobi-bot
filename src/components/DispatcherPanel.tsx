@@ -124,14 +124,6 @@ export const DispatcherPanel: React.FC = () => {
     setTimeout(() => setFeedbackMsg(null), 4000);
   };
 
-  // Sample quick templates
-  const sampleTemplates = [
-    'מודיעין עילית (נתיבות שלום) -> ירושלים (רוממה) 180',
-    'פת -> בני ברק (חזון איש) 85 שח',
-    'ים (גאולה) -> ספר (ברכפלד) 210',
-    'תל אביב (מרכז) -> נתב"ג 160',
-  ];
-
   return (
     <div className="space-y-6">
       {/* Station Banner */}
@@ -186,23 +178,6 @@ export const DispatcherPanel: React.FC = () => {
               <span className="text-[11px] text-slate-400 bg-slate-900 px-2 py-1 rounded-md border border-slate-700">
                 ניקוי חצים וקיצורים אוטומטי
               </span>
-            </div>
-
-            {/* Quick Templates */}
-            <div className="mb-3">
-              <span className="text-xs text-slate-400 block mb-1.5 font-medium">קריאה מהירה בלחיצה:</span>
-              <div className="flex flex-wrap gap-1.5">
-                {sampleTemplates.map((tmpl, idx) => (
-                  <button
-                    key={idx}
-                    type="button"
-                    onClick={() => setRawText(tmpl)}
-                    className="text-xs bg-slate-900/80 hover:bg-slate-700 text-slate-300 px-2.5 py-1 rounded-lg border border-slate-700 transition truncate max-w-full"
-                  >
-                    {tmpl}
-                  </button>
-                ))}
-              </div>
             </div>
 
             <form onSubmit={handlePublish} className="space-y-4">

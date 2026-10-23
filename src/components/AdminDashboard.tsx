@@ -137,15 +137,7 @@ export const AdminDashboard: React.FC = () => {
   const [settingsSuccess, setSettingsSuccess] = useState<string | null>(null);
 
   // Aliases list in memory for display
-  const [customAliases, setCustomAliases] = useState<Array<{ alias: string; standard: string }>>([
-    { alias: 'ים', standard: 'ירושלים' },
-    { alias: 'בב', standard: 'בני ברק' },
-    { alias: 'פת', standard: 'פתח תקווה' },
-    { alias: 'תא', standard: 'תל אביב' },
-    { alias: 'קס', standard: 'מודיעין עילית' },
-    { alias: 'אשד', standard: 'אשדוד' },
-    { alias: 'ב"ש', standard: 'בית שמש' },
-  ]);
+  const [customAliases, setCustomAliases] = useState<Array<{ alias: string; standard: string }>>([]);
 
   const pendingAppeals = debts.filter((d) => d.appeal_status === 'pending');
   const openOrdersCount = orders.filter((o) => o.status === 'open').length;

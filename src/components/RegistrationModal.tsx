@@ -16,11 +16,11 @@ export const RegistrationModal: React.FC<RegistrationModalProps> = ({ isOpen, on
     name: '',
     birth_year: '',
     phone: '',
-    brand: 'טויוטה',
+    brand: '',
     custom_brand: '',
     model: '',
-    year: '2021',
-    seats: 5,
+    year: '',
+    seats: 4,
   });
   const [error, setError] = useState<string | null>(null);
 

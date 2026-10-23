@@ -50,10 +50,10 @@ export const DriverPanel: React.FC = () => {
   // Vehicle Profile Modal state
   const [isVehicleModalOpen, setIsVehicleModalOpen] = useState(false);
   const [vehicleForm, setVehicleForm] = useState({
-    car_brand: currentUser.car_brand || 'טויוטה',
-    car_model: currentUser.car_model || 'קורולה',
-    car_year: currentUser.car_year || 2022,
-    car_seats: currentUser.car_seats || 5,
+    car_brand: currentUser.car_brand || '',
+    car_model: currentUser.car_model || '',
+    car_year: currentUser.car_year || new Date().getFullYear(),
+    car_seats: currentUser.car_seats || 4,
   });
   const [isSavingProfile, setIsSavingProfile] = useState(false);
 
@@ -123,18 +123,6 @@ export const DriverPanel: React.FC = () => {
     setFeedback('✅ הערעור נשלח להנהלת המערכת לבדיקה. תקבל עדכון בקרוב.');
     setTimeout(() => setFeedback(null), 5000);
   };
-
-  const popularCities = [
-    'מודיעין עילית',
-    'ירושלים',
-    'בני ברק',
-    'פתח תקווה',
-    'תל אביב',
-    'אלעד',
-    'בית שמש',
-    'רמת גן',
-    'אשדוד',
-  ];
 
   return (
     <div className="space-y-6">
@@ -275,31 +263,6 @@ export const DriverPanel: React.FC = () => {
                 <Plus className="w-3.5 h-3.5" />
                 <span>הוסף</span>
               </button>
-            </div>
-
-            {/* Quick Suggestions */}
-            <div>
-              <span className="text-[11px] text-slate-400 block mb-1.5 font-medium">ערים פופולריות להוספה מהירה:</span>
-              <div className="flex flex-wrap gap-1.5">
-                {popularCities.map((c) => {
-                  const isAdded = driverCities.includes(c);
-                  return (
-                    <button
-                      key={c}
-                      type="button"
-                      disabled={isAdded}
-                      onClick={() => handleAddCity(c)}
-                      className={`text-[11px] px-2 py-1 rounded-lg border transition ${
-                        isAdded
-                          ? 'bg-slate-900 text-slate-600 border-slate-800 cursor-not-allowed'
-                          : 'bg-slate-900 hover:bg-slate-800 text-slate-300 border-slate-700 hover:text-white'
-                      }`}
-                    >
-                      + {c}
-                    </button>
-                  );
-                })}
-              </div>
             </div>
           </div>
 

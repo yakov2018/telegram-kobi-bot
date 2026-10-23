@@ -1076,10 +1076,7 @@ STANDALONE_MINIAPP_HTML = """<!doctype html>
       const dispTab = document.getElementById('tab-btn-dispatcher');
       if (dispTab) dispTab.remove();
     }
-    let orders = [
-      { id: 1002, text: 'מודיעין עילית (נתיבות שלום) - ירושלים (רוממה), 3 נוסעים, 180 שח', price: 180, time: 'לפני 5 דקות' },
-      { id: 1003, text: 'בני ברק (חזון איש) - פתח תקווה (בילינסון), משלוח מעטפה דחוף, 85 שח', price: 85, time: 'לפני 12 דקות' }
-    ];
+    let orders = [];
 
     let cachedAdminUsers = [];
     let cachedAdminStations = [];
@@ -1931,9 +1928,12 @@ async def handle_api_auth(request):
                 except Exception:
                     pass
 
-        # אם אין שום נתון (למשל פתיחה מחוץ לטלגרם), מזהה נהג אורח ברירת מחדל
+        # אם אין שום נתון מזהה משתמש
         if not user_payload or not user_payload.get("id"):
-            user_payload = {"id": 10001, "first_name": "נהג"}
+            return cors_json_response({
+                "ok": False,
+                "error": "אימות טלגרם נכשל: לא התקבלו נתוני משתמש (initData חסר). יש לפתוח את האפליקציה ישירות מכפתור התפריט בבוט הטלגרם."
+            }, status=401)
 
         user_id = int(user_payload.get("id"))
         full_name = (user_payload.get("first_name") or "").strip()
@@ -2018,10 +2018,10 @@ async def handle_api_auth(request):
             "telegram_username": str(_val("telegram_username", 2, username)),
             "phone": str(_val("phone", 3, "") or ""),
             "birth_year": int(_val("birth_year", 4, 1995) or 1995),
-            "car_brand": str(_val("car_brand", 5, "טויוטה") or "טויוטה"),
-            "car_model": str(_val("car_model", 6, "קורולה") or "קורולה"),
-            "car_year": int(_val("car_year", 7, 2022) or 2022),
-            "car_seats": int(_val("car_seats", 8, 5) or 5),
+            "car_brand": str(_val("car_brand", 5, "") or ""),
+            "car_model": str(_val("car_model", 6, "") or ""),
+            "car_year": int(_val("car_year", 7, 0) or 0),
+            "car_seats": int(_val("car_seats", 8, 4) or 4),
             "status": str(_val("status", 9, "busy") or "busy"),
             "role": actual_role,
             "station_id": int(_val("station_id", 10, 1) or 1),
@@ -2057,7 +2057,7 @@ async def handle_api_auth(request):
                 })
         except Exception as e_st:
             logging.warning(f"⚠️ הערה בטעינת תחנות: {e_st}")
-            stations = [{"station_id": 1, "name": "תחנה ראשית", "commission_percent": 10.0}]
+            stations = []
 
         # טעינת ערי נהג
         cities = []
@@ -2080,28 +2080,10 @@ async def handle_api_auth(request):
 
     except Exception as e:
         logging.exception(f"❌ שגיאה כללית ב-handle_api_auth: {e}")
-        # במקרה שגיאה לא צפויה, מחזירים תשובה בטוחה ללא קריסה
-        fallback_role = 'admin' if is_admin else 'user'
-        safe_fallback_user = {
-            "user_id": user_id or 10001,
-            "full_name": full_name or ("מנהל ראשי" if is_admin else f"משתמש {user_id or 10001}"),
-            "role": fallback_role,
-            "status": "busy",
-            "station_id": 1,
-            "rating": 5.0,
-            "total_trips": 0,
-            "is_blocked": 0,
-            "debt_balance": 0.0,
-            "subscription_plan": "free"
-        }
         return cors_json_response({
-            "ok": True,
-            "role": fallback_role,
-            "user_data": safe_fallback_user,
-            "user": safe_fallback_user,
-            "stations": [{"station_id": 1, "name": "תחנה ראשית", "commission_percent": 10.0}],
-            "cities": []
-        })
+            "ok": False,
+            "error": f"שגיאת שרת פנימית בטעינת נתונים: {str(e)}"
+        }, status=500)
 
 async def handle_api_orders(request):
     """החזרת רשימת קריאות פתוחות עבור ה-Mini App"""
