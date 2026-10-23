@@ -8,20 +8,20 @@ import { RegistrationModal } from './components/RegistrationModal';
 import { MiniAppGuideModal } from './components/MiniAppGuideModal';
 
 export const AppContent: React.FC = () => {
-  const { currentUser, isAuthLoading } = useApp();
+  const { currentUser, isAuthLoading, isAuthenticated, authError } = useApp();
   const [isRegisterOpen, setIsRegisterOpen] = useState(false);
   const [isGuideOpen, setIsGuideOpen] = useState(false);
 
-  // סעיף 1 (פרצת אבטחה): המתנה מלאה לתשובה מהשרת לפני הצגת ממשק
+  // 1. חסימה מוחלטת בזמן טעינה: מסך Loading בלבד! שום Header, תפריט או קישור אינם מרונדרים
   if (isAuthLoading) {
     return (
-      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-6 text-center">
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-6 text-center font-sans" dir="rtl">
         <div className="w-16 h-16 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-3xl mb-4 animate-bounce">
           🚖
         </div>
-        <h2 className="text-xl font-extrabold text-white mb-2">מתחבר למערכת...</h2>
+        <h2 className="text-xl font-extrabold text-white mb-2">מאמת זהות והרשאות מול השרת...</h2>
         <p className="text-xs text-slate-400 max-w-sm mb-6">
-          מאמת הרשאות ומסנכרן נתונים וערי עבודה מול מסד הנתונים בענן
+          מבצע בדיקה קריפטוגרפית של נתוני הטלגרם (HMAC) ושולף הרשאות מאובטחות ממסד הנתונים בענן
         </p>
         <div className="w-56 h-1.5 bg-slate-800 rounded-full overflow-hidden">
           <div className="w-full h-full bg-gradient-to-r from-amber-500 to-amber-300 animate-pulse" />
@@ -30,7 +30,28 @@ export const AppContent: React.FC = () => {
     );
   }
 
-  // סעיף 1: מנהל מערכת (admin) - גישת God Mode מלאה!
+  // 2. נעילה מוחלטת: אם האימות הקריפטוגרפי נכשל, מוצגת הודעת שגיאה וחסימה בלבד ללא שום תפריט
+  if (!isAuthenticated || authError || !currentUser || currentUser.user_id === 0) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-6 text-center font-sans" dir="rtl">
+        <div className="w-16 h-16 rounded-2xl bg-red-500/10 border border-red-500/30 flex items-center justify-center text-3xl mb-4 text-red-400">
+          🚫
+        </div>
+        <h2 className="text-xl font-extrabold text-white mb-2">גישה חסומה</h2>
+        <p className="text-sm text-slate-400 max-w-sm mb-6">
+          {authError || 'אימות ה-Telegram WebApp נכשל. הגישה מותרת אך ורק מתוך כפתור הבוט הרשמי בטלגרם.'}
+        </p>
+        <button
+          onClick={() => window.location.reload()}
+          className="px-5 py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs transition shadow-md"
+        >
+          רענן ונסה שוב
+        </button>
+      </div>
+    );
+  }
+
+  // 3. Protected Route: מנהל מערכת ראשי (Super Admin) - גישת God Mode מלאה!
   if (currentUser.role === 'admin') {
     return <AdminDashboard />;
   }

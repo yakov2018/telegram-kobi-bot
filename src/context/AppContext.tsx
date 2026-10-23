@@ -61,6 +61,8 @@ interface AppContextType {
   resetToInitialData: () => void;
   isTelegramWebApp: boolean;
   isAuthLoading: boolean;
+  isAuthenticated: boolean;
+  authError: string | null;
 }
 
 const AppContext = createContext<AppContextType | null>(null);
@@ -94,6 +96,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return parsed;
   });
 
+  const [authenticatedUser, setAuthenticatedUser] = useState<User | null>(null);
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [authError, setAuthError] = useState<string | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
 
   const [stations, setStations] = useState<Station[]>(() => {
@@ -180,7 +185,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Auto-detect Telegram WebApp environment & Authenticate via REST API
   useEffect(() => {
-    let resolvedUid: number | null = null;
     let initDataStr = '';
 
     const tg = (window as any).Telegram?.WebApp;
@@ -190,68 +194,52 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         tg.expand();
         setIsTelegramWebApp(true);
         initDataStr = tg.initData || '';
-        const tgUser = tg.initDataUnsafe?.user;
-        if (tgUser?.id) {
-          resolvedUid = Number(tgUser.id);
-        }
       } catch (err) {
         console.warn('Telegram WebApp init note:', err);
       }
     }
 
-    if (!resolvedUid) {
-      try {
-        const qId = new URLSearchParams(window.location.search).get('user_id');
-        if (qId && !isNaN(Number(qId))) resolvedUid = Number(qId);
-      } catch {}
-    }
-
-    if (!resolvedUid) {
-      resolvedUid = currentUserId || 0;
-    }
-
-    // שליחת אימות לשרת ה-API לקבלת ה-role האמיתי ממסד הנתונים
+    // שליחת אימות קריפטוגרפי מחמיר לשרת ה-API (HMAC מול BOT_TOKEN)
     fetch('/api/auth', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         initData: initDataStr,
-        user_id: resolvedUid,
-        dev_user_id: resolvedUid,
       }),
     })
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.ok && data.user) {
+      .then(async (res) => {
+        const data = await res.json();
+        if (res.ok && data.ok && data.user) {
           const isServerAdmin = ADMIN_IDS.includes(Number(data.user.user_id));
-          // סעיף 1 (פרצת אבטחה): רק מי שמופיע ב-ADMIN_IDS מקבל תפקיד admin! כל משתמש רגיל מקבל את תפקידו האמיתי (user/dispatcher)
+          // סעיף 1 (אבטחה מוחלטת): רק מי שמופיע ב-ADMIN_IDS מקבל תפקיד admin! כל משתמש אחר מקבל את תפקידו האמיתי (user/dispatcher/station_manager)
           const userRole: Role = isServerAdmin
             ? 'admin'
             : (data.user.role === 'admin' ? 'user' : (data.user.role || 'user'));
 
           const serverUser: User = {
             user_id: Number(data.user.user_id),
-            full_name: data.user.full_name,
-            phone: data.user.phone || '0500000000',
+            full_name: data.user.full_name || 'משתמש',
+            phone: data.user.phone || '',
             birth_year: data.user.birth_year || 1995,
             car_brand: data.user.car_brand || 'טויוטה',
             car_model: data.user.car_model || 'קורולה',
             car_year: data.user.car_year || 2022,
             car_seats: data.user.car_seats || 5,
-            status: data.user.status || 'free',
+            status: data.user.status || 'busy',
             role: userRole,
             station_id: data.user.station_id || 1,
             rating: Number(data.user.rating || 5.0),
             total_trips: Number(data.user.total_trips || 0),
             is_blocked: isServerAdmin ? 0 : (data.user.is_blocked ? 1 : 0),
             debt_balance: Number(data.user.debt_balance || 0.0),
+            subscription_plan: data.user.subscription_plan || 'free',
           };
 
-          setUsers((prev) => {
-            const others = prev.filter((u) => u.user_id !== serverUser.user_id);
-            return [serverUser, ...others];
-          });
+          setAuthenticatedUser(serverUser);
+          setIsAuthenticated(true);
+          setAuthError(null);
           setCurrentUserId(serverUser.user_id);
+          setUsers((prev) => [serverUser, ...prev.filter((u) => u.user_id !== serverUser.user_id)]);
 
           if (data.stations && Array.isArray(data.stations) && data.stations.length > 0) {
             setStations(
@@ -268,15 +256,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               user_id: serverUser.user_id,
               city_name: cityName,
             }));
-            setDriverCities((prev) => {
-              const others = prev.filter((dc) => dc.user_id !== serverUser.user_id);
-              return [...others, ...freshCities];
-            });
+            setDriverCities((prev) => [
+              ...prev.filter((dc) => dc.user_id !== serverUser.user_id),
+              ...freshCities,
+            ]);
           }
+        } else {
+          setAuthenticatedUser(null);
+          setIsAuthenticated(false);
+          setAuthError(data.error || 'אימות ה-Telegram WebApp נכשל. הגישה מותרת אך ורק מתוך הבוט בטלגרם.');
         }
       })
       .catch((err) => {
         console.warn('API /api/auth sync note:', err);
+        setAuthenticatedUser(null);
+        setIsAuthenticated(false);
+        setAuthError('שגיאת תקשורת באימות מול השרת. אנא פתח מחדש מתוך הטלגרם.');
       })
       .finally(() => {
         setIsAuthLoading(false);
@@ -453,8 +448,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     debt_balance: 0.0,
   };
 
-  // סעיף 1: משתמש נוכחי - לעולם לא נופל ל-users[0] של המנהל!
-  const currentUser = users.find((u) => u.user_id === currentUserId && currentUserId > 0) || GUEST_USER;
+  // סעיף 1: משתמש נוכחי - אך ורק המשתמש המאומת קריפטוגרפית מול השרת! לעולם לא נופל ל-users[0]
+  const currentUser = authenticatedUser || GUEST_USER;
 
   const switchUser = (userId: number) => {
     // אבטחה קשיחה: רק מנהל מערכת (Super Admin) מורשה לבצע החלפת משתמש בממשק!
@@ -1110,6 +1105,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         resetToInitialData,
         isTelegramWebApp,
         isAuthLoading,
+        isAuthenticated,
+        authError,
       }}
     >
       {children}

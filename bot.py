@@ -977,30 +977,58 @@ STANDALONE_MINIAPP_HTML = """<!doctype html>
   <script>
     const ADMIN_IDS = [8644923212, 552821474];
 
-    // Initialize Telegram WebApp
+    // Initialize Telegram WebApp with cryptographic server authentication
     const tg = window.Telegram?.WebApp;
+    let currentUserRole = 'user';
     if (tg) {
       tg.ready();
       tg.expand();
-      const user = tg.initDataUnsafe?.user;
-      if (user) {
-        const name = [user.first_name, user.last_name].filter(Boolean).join(' ') || user.username || 'משתמש טלגרם';
-        const isAdmin = ADMIN_IDS.includes(Number(user.id));
-        document.getElementById('tg-username').innerText = name + (isAdmin ? ' 👑 (God Mode)' : ' (מזהה: ' + user.id + ')');
-        document.getElementById('profile-name').innerText = name;
-        
-        if (isAdmin) {
+      const initDataStr = tg.initData || '';
+      
+      // אימות קריפטוגרפי מול השרת
+      fetch('/api/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ initData: initDataStr })
+      })
+      .then(r => r.json())
+      .then(data => {
+        if (!data.ok || !data.user) {
+          document.body.innerHTML = '<div class="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-6 text-center font-sans" dir="rtl"><div class="w-16 h-16 rounded-2xl bg-red-500/10 border border-red-500/30 flex items-center justify-center text-3xl mb-4 text-red-400">🚫</div><h2 class="text-xl font-extrabold text-white mb-2">גישה חסומה</h2><p class="text-sm text-slate-400 max-w-sm">אימות ה-Telegram WebApp נכשל. יש לפתוח את האפליקציה אך ורק מתוך כפתור הבוט בטלגרם.</p></div>';
+          return;
+        }
+        const sUser = data.user;
+        currentUserRole = sUser.role;
+        document.getElementById('tg-username').innerText = sUser.full_name + (sUser.role === 'admin' ? ' 👑 (God Mode)' : ' (מזהה: ' + sUser.user_id + ')');
+        const pName = document.getElementById('profile-name');
+        if (pName) pName.innerText = sUser.full_name;
+
+        // הסרת אלמנטים מה-DOM למי שאינו מורשה
+        if (sUser.role !== 'admin') {
+          const admTab = document.getElementById('tab-btn-admin');
+          if (admTab) admTab.remove();
+          const admContent = document.getElementById('tab-admin');
+          if (admContent) admContent.remove();
+        } else {
           const admBtn = document.getElementById('tab-btn-admin');
           if (admBtn) {
             admBtn.classList.remove('hidden');
             setTimeout(() => switchTab('admin'), 50);
           }
         }
-      } else {
-        document.getElementById('tg-username').innerText = 'מחובר למערכת ה-ERP';
-      }
+
+        if (sUser.role !== 'admin' && sUser.role !== 'dispatcher') {
+          const dispTab = document.getElementById('tab-btn-dispatcher');
+          if (dispTab) dispTab.remove();
+          const dispContent = document.getElementById('tab-dispatcher');
+          if (dispContent) dispContent.remove();
+        }
+      })
+      .catch(() => {
+        document.body.innerHTML = '<div class="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-6 text-center" dir="rtl"><h2 class="text-xl font-bold text-red-400">שגיאת התחברות לשרת</h2></div>';
+      });
     } else {
-      document.getElementById('tg-username').innerText = 'מערכת ניהול מקוונת';
+      document.body.innerHTML = '<div class="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-6 text-center font-sans" dir="rtl"><div class="w-16 h-16 rounded-2xl bg-red-500/10 border border-red-500/30 flex items-center justify-center text-3xl mb-4 text-red-400">🚫</div><h2 class="text-xl font-extrabold text-white mb-2">גישה חסומה</h2><p class="text-sm text-slate-400 max-w-sm">האפליקציה ניתנת לפתיחה אך ורק מתוך אפליקציית טלגרם.</p></div>';
     }
 
     // State management
@@ -1778,20 +1806,15 @@ async def handle_api_auth(request):
         data = {}
 
     init_data = data.get("initData") or request.headers.get("X-Telegram-Init-Data", "")
-    user_payload = validate_telegram_init_data(init_data)
+    
+    # בדיקה קריפטוגרפית מחמירה של ה-Hash מול BOT_TOKEN (למניעת כל זיוף או התחזות)
+    user_payload = validate_telegram_init_data(init_data, BOT_TOKEN)
 
-    # חילוץ מאובטח: אם אימות HMAC לא עבר (למשל פתיחה מקישור ישיר או פיתוח), נחלץ את ה-user_id אך ורק לצורך שליפת הרשאות אמיתיות
-    if not user_payload:
-        if init_data:
-            try:
-                parsed_q = dict(parse_qsl(init_data, keep_blank_values=True))
-                u_raw = parsed_q.get("user")
-                if u_raw:
-                    user_payload = json.loads(u_raw)
-            except Exception:
-                pass
-        if not user_payload:
-            dev_user_id = data.get("dev_user_id") or data.get("user_id") or request.query.get("user_id")
+    # אם האימות הקריפטוגרפי נכשל, נחסום לחלוטין את הגישה (HTTP 401)
+    if not user_payload or not user_payload.get("id"):
+        # במצב פיתוח לוקאלי בלבד (כאשר אין BOT_TOKEN מוגדר בסביבה):
+        if not BOT_TOKEN or BOT_TOKEN == "DUMMY_TOKEN_PLEASE_SET_BOT_TOKEN":
+            dev_user_id = data.get("dev_user_id") or data.get("user_id")
             if dev_user_id:
                 try:
                     dev_uid_int = int(dev_user_id)
@@ -1799,8 +1822,13 @@ async def handle_api_auth(request):
                 except Exception:
                     pass
 
-    if not user_payload or not user_payload.get("id"):
-        return cors_json_response({"ok": False, "error": "אימות Telegram WebApp נכשל. פתח מתוך הבוט."}, status=401)
+        if not user_payload or not user_payload.get("id"):
+            logging.warning(f"⛔ ניסיון גישה ללא אימות קריפטוגרפי תקין ל-Mini App! initData: {init_data[:30] if init_data else 'ריקה'}")
+            return cors_json_response({
+                "ok": False, 
+                "error": "אימות טלגרם קריפטוגרפי נכשל (HMAC אינו תואם). הגישה מותרת מתוך כפתור הבוט בטלגרם בלבד.",
+                "auth_failed": True
+            }, status=401)
 
     user_id = int(user_payload.get("id"))
     full_name = user_payload.get("first_name", "")
