@@ -3075,9 +3075,8 @@ async def start_web_server():
 
     # פונקציית הגשת ה-Mini App: אם קיים dist/index.html מגיש אותו, ואם לא – מגיש את תבנית ה-HTML המשולבת המלאה!
     async def serve_webapp(request):
-        root_index = os.path.join(os.path.dirname(__file__), "index.html")
-        if os.path.exists(root_index):
-            return web.FileResponse(root_index)
+        if os.path.exists(dist_index):
+            return web.FileResponse(dist_index)
         return web.Response(text="מערכת בטעינה...", content_type="text/html", charset="utf-8")
 
     app.router.add_get("/", serve_webapp)
