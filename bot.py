@@ -125,6 +125,7 @@ class OrderFlow(StatesGroup):
     waiting_price_choice = State()
     waiting_edit_text = State()
     waiting_manual_driver = State()
+    waiting_edit_order_price = State()
 
 class DriverBidFlow(StatesGroup):
     waiting_eta = State()
@@ -139,15 +140,19 @@ class AdminFlow(StatesGroup):
     waiting_user_id_role = State()
     waiting_broadcast = State()
     waiting_search_user = State()
+    waiting_user_search = State()
     waiting_edit_st_comm = State()
     waiting_assign_st_mgr = State()
+    waiting_assign_station_mgr = State()
     waiting_quick_debt = State()
+    waiting_ticket_reply = State()
 
 class DriverFlow(StatesGroup):
     waiting_new_city = State()
 
 class ProfileFlow(StatesGroup):
     waiting_new_phone = State()
+    waiting_new_car = State()
     waiting_car_brand = State()
     waiting_car_model = State()
     waiting_car_year = State()
@@ -163,7 +168,13 @@ class StationManagerFlow(StatesGroup):
 class SupportFlow(StatesGroup):
     waiting_unblock_appeal = State()
     waiting_ticket_text = State()
+    waiting_ticket_message = State()
     waiting_admin_reply = State()
+
+def get_blocked_inline_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📝 הגש בקשה לשחרור חסימה / פנייה להנהלה", callback_data="unblock_req_start")
+    ]])
 
 
 # ----------------- אכיפה קשיחה של @username + חסימה הרמטית למשתמשים חסומים -----------------
@@ -3496,16 +3507,19 @@ async def handle_api_tickets_resolve(request):
     try: data = await request.json()
     except Exception: data = {}
     ticket_id = data.get("ticket_id")
-    action = data.get("action", "resolve")  # 'resolve', 'approve_unblock', 'reject_unblock'
+    action = data.get("action", "resolve")  # 'resolve', 'unblock'/'approve_unblock', 'reject'/'reject_unblock'
     if not ticket_id:
         return cors_json_response({"ok": False, "error": "ticket_id חובה"}, status=400)
     tid = int(ticket_id)
 
+    is_unblock_act = action in ('unblock', 'approve_unblock')
+    is_reject_act = action in ('reject', 'reject_unblock')
+
     ticket = None
-    new_status = 'resolved' if action != 'reject_unblock' else 'rejected'
+    new_status = 'rejected' if is_reject_act else 'resolved'
     default_reply = (
-        "בקשתך לשחרור חסימה אושרה על ידי ההנהלה." if action == 'approve_unblock'
-        else "בקשתך לשחרור חסימה נדחתה על ידי ההנהלה." if action == 'reject_unblock'
+        "בקשתך לשחרור חסימה אושרה על ידי ההנהלה." if is_unblock_act
+        else "בקשתך לשחרור חסימה נדחתה על ידי ההנהלה." if is_reject_act
         else "הפנייה סומנה כטופלה על ידי ההנהלה."
     )
 
@@ -3516,7 +3530,7 @@ async def handle_api_tickets_resolve(request):
                                SET status = %s, admin_reply = COALESCE(admin_reply, %s), resolved_at = CURRENT_TIMESTAMP
                                WHERE ticket_id = %s RETURNING *""", (new_status, default_reply, tid))
                 t = cur.fetchone()
-                if t and action == 'approve_unblock':
+                if t and is_unblock_act:
                     cur.execute("UPDATE deliveries_users SET is_blocked = 0, block_reason = NULL WHERE user_id = %s", (t['user_id'],))
                 return t
         ticket = await run_in_thread(_res_t)
@@ -3528,7 +3542,7 @@ async def handle_api_tickets_resolve(request):
                                 WHERE ticket_id = ?""", (new_status, default_reply, datetime.now().isoformat(), tid))
             t_row = await (await db.execute("SELECT * FROM deliveries_tickets WHERE ticket_id = ?", (tid,))).fetchone()
             ticket = dict(t_row) if t_row else None
-            if ticket and action == 'approve_unblock':
+            if ticket and is_unblock_act:
                 await db.execute("UPDATE deliveries_users SET is_blocked = 0, block_reason = NULL WHERE user_id = ?", (ticket['user_id'],))
             await db.commit()
 
@@ -3537,14 +3551,14 @@ async def handle_api_tickets_resolve(request):
         try:
             u = await get_user(target_uid)
             u_map = dict(u) if u else {}
-            if action == 'approve_unblock':
+            if is_unblock_act:
                 await bot.send_message(
                     target_uid,
                     f"🔓 **חשבונך שוחרר מחסימה על ידי ההנהלה! (פנייה #{tid})**\n"
                     f"מקלדת העבודה שלך פעילה כעת:",
                     reply_markup=get_main_kb(u_map.get('role', 'user'), u_map.get('status', 'busy'), 'private', target_uid)
                 )
-            elif action == 'reject_unblock':
+            elif is_reject_act:
                 await bot.send_message(
                     target_uid,
                     f"❌ **בקשתך לשחרור חסימה (#{tid}) נדחתה על ידי ההנהלה.**\n"
