@@ -138,9 +138,15 @@ function apiDevServerPlugin(): Plugin {
             return;
           }
 
-          // Generic response for state modifications (publish, charge, credit, update, delete)
+          if (pathname === '/api/tickets') {
+            res.statusCode = 200;
+            res.end(JSON.stringify({ ok: true, tickets: [] }));
+            return;
+          }
+
+          // Generic response for state modifications (publish, charge, credit, update, delete, tickets)
           res.statusCode = 200;
-          res.end(JSON.stringify({ ok: true, order_id: 101, debt_id: 201 }));
+          res.end(JSON.stringify({ ok: true, order_id: 101, debt_id: 201, ticket_id: 301 }));
         });
       });
     },

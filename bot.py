@@ -86,64 +86,6 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-# ----------------- סעיף 3: אכיפה קשיחה של שם משתמש (@username) -----------------
-class UsernameEnforcementMiddleware(BaseMiddleware):
-    """
-    חוסם כל פעולה של משתמש שאין לו שם משתמש בטלגרם (@username).
-    שולח הדרכה מפורטת להגדרת שם משתמש ומחייב לחיצה על /start מחדש.
-    זה קריטי עבור יצירת הקישורים הישירים (Deep Links) בין סדרנים לנהגים!
-    """
-    async def __call__(self, handler, event: TelegramObject, data: dict):
-        from_user = getattr(event, "from_user", None)
-        if from_user and not from_user.is_bot:
-            # אם יש שם משתמש - מסנכרנים אותו במסד הנתונים
-            if from_user.username:
-                uname = from_user.username
-                uid = from_user.id
-                if USE_POSTGRES:
-                    def _sync_uname():
-                        try:
-                            with get_pg_cursor() as cur:
-                                cur.execute("UPDATE deliveries_users SET telegram_username = %s WHERE user_id = %s AND (telegram_username IS NULL OR telegram_username != %s)", (uname, uid, uname))
-                        except Exception: pass
-                    asyncio.create_task(run_in_thread(_sync_uname))
-                else:
-                    async def _sync_uname_sqlite():
-                        try:
-                            async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-                                await db.execute("UPDATE deliveries_users SET telegram_username = ? WHERE user_id = ? AND (telegram_username IS NULL OR telegram_username != ?)", (uname, uid, uname))
-                                await db.commit()
-                        except Exception: pass
-                    asyncio.create_task(_sync_uname_sqlite())
-            else:
-                # חסימה מחמירה של משתמש ללא @username
-                guide_text = (
-                    "🚫 <b>חסום לשימוש: חובה להגדיר שם משתמש בטלגרם (@username)!</b>\n\n"
-                    "מערכת ה-ERP פועלת באמצעות קישורים ישירים ומאובטחים (Deep Links) לשיחה בין נהגים, סדרנים ומנהלים.\n\n"
-                    "⚙️ <b>כיצד מגדירים שם משתמש תוך 10 שניות?</b>\n"
-                    "1️⃣ היכנס ל<b>הגדרות</b> בטלגרם (Settings).\n"
-                    "2️⃣ לחץ על <b>הגדר שם משתמש</b> (Username).\n"
-                    "3️⃣ הקלד כינוי באנגלית (לדוגמה: <code>@driver_israel</code>) ולחץ שמור.\n"
-                    "4️⃣ חזור לכאן ולחץ <b>/start</b> מחדש כדי להמשיך!"
-                )
-                if isinstance(event, Message):
-                    chat_type = getattr(event.chat, 'type', 'private')
-                    if chat_type in ('group', 'supergroup'):
-                        await event.reply(
-                            f"⚠️ {from_user.full_name}, חובה להגדיר @username בהגדרות טלגרם כדי להשתמש בבוט!",
-                            reply_markup=ReplyKeyboardRemove()
-                        )
-                    else:
-                        await event.answer(guide_text, parse_mode=ParseMode.HTML)
-                elif isinstance(event, CallbackQuery):
-                    await event.answer("⚠️ חובה להגדיר שם משתמש (@username) בהגדרות טלגרם!", show_alert=True)
-                return
-        return await handler(event, data)
-
-dp.message.middleware(UsernameEnforcementMiddleware())
-dp.callback_query.middleware(UsernameEnforcementMiddleware())
-
-
 ROLE_NAMES = {
     "admin": "מנהל מערכת",
     "station_manager": "מנהל תחנה",
@@ -196,13 +138,149 @@ class AdminFlow(StatesGroup):
     waiting_station_comm = State()
     waiting_user_id_role = State()
     waiting_broadcast = State()
+    waiting_search_user = State()
+    waiting_edit_st_comm = State()
+    waiting_assign_st_mgr = State()
+    waiting_quick_debt = State()
 
 class DriverFlow(StatesGroup):
     waiting_new_city = State()
 
+class ProfileFlow(StatesGroup):
+    waiting_new_phone = State()
+    waiting_car_brand = State()
+    waiting_car_model = State()
+    waiting_car_year = State()
+    waiting_car_seats = State()
+
 class StationManagerFlow(StatesGroup):
     waiting_add_disp = State()
     waiting_charge_credit = State()
+    waiting_edit_order_price = State()
+    waiting_only_charge = State()
+    waiting_only_credit = State()
+
+class SupportFlow(StatesGroup):
+    waiting_unblock_appeal = State()
+    waiting_ticket_text = State()
+    waiting_admin_reply = State()
+
+
+# ----------------- אכיפה קשיחה של @username + חסימה הרמטית למשתמשים חסומים -----------------
+class UsernameEnforcementMiddleware(BaseMiddleware):
+    """
+    1. חוסם כל פעולה של משתמש שאין לו שם משתמש בטלגרם (@username).
+    2. חוסם הרמטית משתמשים עם is_blocked=1 מכל כפתור או פקודה בבוט (למעט הגשת בקשה לשחרור חסימה),
+       מסיר להם את המקלדת התחתונה ומציג כפתור ייעודי להגשת בקשת שחרור חסימה להנהלה.
+    """
+    async def __call__(self, handler, event: TelegramObject, data: dict):
+        from_user = getattr(event, "from_user", None)
+        if from_user and not from_user.is_bot:
+            # 1. בדיקת @username וסנכרון למסד
+            if from_user.username:
+                uname = from_user.username
+                uid = from_user.id
+                if USE_POSTGRES:
+                    def _sync_uname():
+                        try:
+                            with get_pg_cursor() as cur:
+                                cur.execute("UPDATE deliveries_users SET telegram_username = %s WHERE user_id = %s AND (telegram_username IS NULL OR telegram_username != %s)", (uname, uid, uname))
+                        except Exception:
+                            pass
+                    asyncio.create_task(run_in_thread(_sync_uname))
+                else:
+                    async def _sync_uname_sqlite():
+                        try:
+                            async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+                                await db.execute("UPDATE deliveries_users SET telegram_username = ? WHERE user_id = ? AND (telegram_username IS NULL OR telegram_username != ?)", (uname, uid, uname))
+                                await db.commit()
+                        except Exception:
+                            pass
+                    asyncio.create_task(_sync_uname_sqlite())
+            else:
+                guide_text = (
+                    "🚫 <b>חסום לשימוש: חובה להגדיר שם משתמש בטלגרם (@username)!</b>\n\n"
+                    "מערכת ה-ERP פועלת באמצעות קישורים ישירים ומאובטחים (Deep Links) לשיחה בין נהגים, סדרנים ומנהלים.\n\n"
+                    "⚙️ <b>כיצד מגדירים שם משתמש תוך 10 שניות?</b>\n"
+                    "1️⃣ היכנס ל<b>הגדרות</b> בטלגרם (Settings).\n"
+                    "2️⃣ לחץ על <b>הגדר שם משתמש</b> (Username).\n"
+                    "3️⃣ הקלד כינוי באנגלית (לדוגמה: <code>@driver_israel</code>) ולחץ שמור.\n"
+                    "4️⃣ חזור לכאן ולחץ <b>/start</b> מחדש כדי להמשיך!"
+                )
+                if isinstance(event, Message):
+                    chat_type = getattr(event.chat, 'type', 'private')
+                    if chat_type in ('group', 'supergroup'):
+                        await event.reply(
+                            f"⚠️ {from_user.full_name}, חובה להגדיר @username בהגדרות טלגרם כדי להשתמש בבוט!",
+                            reply_markup=ReplyKeyboardRemove()
+                        )
+                    else:
+                        await event.answer(guide_text, parse_mode=ParseMode.HTML)
+                elif isinstance(event, CallbackQuery):
+                    await event.answer("⚠️ חובה להגדיר שם משתמש (@username) בהגדרות טלגרם!", show_alert=True)
+                return
+
+            # 2. חסימה הרמטית של משתמשים חסומים (is_blocked == 1)
+            if from_user.id not in ADMIN_IDS:
+                try:
+                    u_row = await get_user(from_user.id)
+                except Exception:
+                    u_row = None
+
+                is_user_blocked = False
+                block_reason = ""
+                if u_row:
+                    raw_blk = u_row['is_blocked'] if isinstance(u_row, dict) else (u_row[13] if len(u_row) > 13 else 0)
+                    is_user_blocked = bool(int(raw_blk or 0) == 1)
+                    if isinstance(u_row, dict):
+                        block_reason = u_row.get('block_reason') or ""
+
+                if is_user_blocked:
+                    fsm_state: FSMContext = data.get("state")
+                    current_st = await fsm_state.get_state() if fsm_state else None
+
+                    # מתירים אך ורק לחיצה על כפתור הגשת בקשת שחרור חסימה או שליחת טקסט ההסבר במצב המתאים
+                    if isinstance(event, CallbackQuery) and event.data == "unblock_req_start":
+                        return await handler(event, data)
+                    if isinstance(event, Message) and current_st == SupportFlow.waiting_unblock_appeal.state:
+                        return await handler(event, data)
+
+                    if fsm_state:
+                        await fsm_state.clear()
+
+                    reason_line = f"📌 <b>סיבת החסימה:</b> {block_reason}\n" if block_reason else ""
+                    blocked_msg = (
+                        "❌ <b>חשבונך נחסם על ידי ההנהלה.</b>\n"
+                        "━━━━━━━━━━━━━━━━━━━━━━\n"
+                        "משתמש יקר, גישתך לפעולות בבוט ובמיני-אפליקציה הוגבלה על ידי הנהלת המערכת.\n"
+                        f"{reason_line}\n"
+                        "💡 <b>חושב שנפלה טעות או שברצונך להגיש ערעור להנהלה?</b>\n"
+                        "לחץ על הכפתור למטה כדי לשלוח בקשה מסודרת לשחרור חסימה ישירות למנהלי המערכת:"
+                    )
+                    unblock_kb = InlineKeyboardMarkup(inline_keyboard=[[
+                        InlineKeyboardButton(text="📝 הגש בקשה לשחרור חסימה / פנייה להנהלה", callback_data="unblock_req_start")
+                    ]])
+
+                    if isinstance(event, Message):
+                        chat_type = getattr(event.chat, 'type', 'private')
+                        if chat_type == 'private':
+                            try:
+                                await event.answer("🔒 מקלדת הפעולות הוסתרה עקב חסימת החשבון.", reply_markup=ReplyKeyboardRemove())
+                            except Exception:
+                                pass
+                            await event.answer(blocked_msg, parse_mode=ParseMode.HTML, reply_markup=unblock_kb)
+                    elif isinstance(event, CallbackQuery):
+                        await event.answer("🚫 חשבונך חסום במערכת! ניתן להגיש בקשה לשחרור חסימה.", show_alert=True)
+                        try:
+                            await event.message.answer(blocked_msg, parse_mode=ParseMode.HTML, reply_markup=unblock_kb)
+                        except Exception:
+                            pass
+                    return
+
+        return await handler(event, data)
+
+dp.message.middleware(UsernameEnforcementMiddleware())
+dp.callback_query.middleware(UsernameEnforcementMiddleware())
 
 # ----------------- מתאמי מסד נתונים מהירים (Connection Pooling + Non-blocking Thread) -----------------
 @contextmanager
@@ -458,11 +536,26 @@ def _init_db_sync():
         cur.execute('''CREATE TABLE IF NOT EXISTS deliveries_bot_groups (
             group_id BIGINT PRIMARY KEY, group_name TEXT)''')
 
+        # 10. טבלת פניות, משובים ובקשות שחרור חסימה (Tickets & Unblock Appeals)
+        cur.execute('''CREATE TABLE IF NOT EXISTS deliveries_tickets (
+            ticket_id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            user_name TEXT,
+            user_phone TEXT,
+            ticket_type TEXT DEFAULT 'support',
+            subject TEXT,
+            message TEXT NOT NULL,
+            status TEXT DEFAULT 'open',
+            admin_reply TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            resolved_at TIMESTAMP)''')
+
         # אינדקסים מהירים לביצועים מירביים
         cur.execute('''CREATE INDEX IF NOT EXISTS idx_deliveries_orders_status ON deliveries_orders(status)''')
         cur.execute('''CREATE INDEX IF NOT EXISTS idx_deliveries_driver_cities_user ON deliveries_driver_cities(user_id)''')
         cur.execute('''CREATE INDEX IF NOT EXISTS idx_deliveries_debts_driver ON deliveries_debts(driver_id, status)''')
         cur.execute('''CREATE INDEX IF NOT EXISTS idx_deliveries_users_role ON deliveries_users(role)''')
+        cur.execute('''CREATE INDEX IF NOT EXISTS idx_deliveries_tickets_status ON deliveries_tickets(status)''')
 
         # ניקוי שולחן (Wipe) שלב ב' - אכיפת רישום קפדני לכל המשתמשים הישנים
         cur.execute("SELECT setting_value FROM deliveries_system_settings WHERE setting_key = 'wipe_stage_b'")
@@ -583,6 +676,19 @@ async def init_db():
 
             await db.execute('''CREATE TABLE IF NOT EXISTS deliveries_bot_groups (
                 group_id INTEGER PRIMARY KEY, group_name TEXT)''')
+
+            await db.execute('''CREATE TABLE IF NOT EXISTS deliveries_tickets (
+                ticket_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                user_name TEXT,
+                user_phone TEXT,
+                ticket_type TEXT DEFAULT 'support',
+                subject TEXT,
+                message TEXT NOT NULL,
+                status TEXT DEFAULT 'open',
+                admin_reply TEXT,
+                created_at TEXT,
+                resolved_at TEXT)''')
                 
             # ניקוי שולחן (Wipe) שלב ב' עבור SQLite
             cursor = await db.execute("SELECT setting_value FROM deliveries_system_settings WHERE setting_key = 'wipe_stage_b'")
@@ -1879,13 +1985,16 @@ async def handle_api_driver_status_check(request):
         user = await get_user(uid)
         if not user:
             return cors_json_response({"ok": False, "error": "משתמש לא נמצא"}, status=404)
-        status = user['status'] if isinstance(user, dict) else user[8]
-        role = user['role'] if isinstance(user, dict) else user[9]
-        debt = user['debt_balance'] if isinstance(user, dict) else user[14]
+        u_dict = dict(user)
+        status = u_dict.get('status', 'busy')
+        role = u_dict.get('role', 'user')
+        debt = u_dict.get('debt_balance', 0.0)
+        is_blocked = 0 if uid in ADMIN_IDS else int(u_dict.get('is_blocked') or 0)
         return cors_json_response({
             "ok": True,
             "status": status,
             "role": role,
+            "is_blocked": is_blocked,
             "debt_balance": float(debt or 0)
         })
     except Exception as e:
@@ -2012,9 +2121,9 @@ async def handle_api_auth(request):
                     await db.commit()
             user = await get_user(user_id)
         elif is_admin:
-            # וידוא ש-Admin אמיתי מקבל הרשאת admin ולא חסום
-            current_r = user['role'] if isinstance(user, dict) else user[9]
-            if current_r != 'admin':
+            u_map = dict(user)
+            current_r = u_map.get('role', 'user')
+            if current_r != 'admin' or u_map.get('is_blocked'):
                 if USE_POSTGRES:
                     def _fix_adm():
                         with get_pg_cursor() as cur:
@@ -2027,7 +2136,8 @@ async def handle_api_auth(request):
                 user = await get_user(user_id)
         elif not is_admin:
             # סעיף אבטחה: אם משתמש רגיל רשום בטעות כ-admin אך אינו ב-ADMIN_IDS, הורד מיידית ל-'user'!
-            current_r = user['role'] if isinstance(user, dict) else user[9]
+            u_map = dict(user)
+            current_r = u_map.get('role', 'user')
             if current_r == 'admin':
                 if USE_POSTGRES:
                     def _demote_u():
@@ -2040,38 +2150,33 @@ async def handle_api_auth(request):
                         await db.commit()
                 user = await get_user(user_id)
 
-        # קביעת התפקיד האמיתי
-        raw_role = user['role'] if isinstance(user, dict) else user[9] if user else 'user'
+        u_data_map = dict(user) if user else {}
+        raw_role = u_data_map.get('role', 'user')
         actual_role = 'admin' if is_admin else ('user' if raw_role == 'admin' else (raw_role or 'user'))
 
-        # המרת שדות בטוחה לטיפוסים פרימיטיביים (למניעת שגיאות סיריאליזציה)
-        def _val(k, idx, default):
-            if isinstance(user, dict):
-                v = user.get(k)
-                return v if v is not None else default
-            if isinstance(user, (tuple, list)) and len(user) > idx:
-                v = user[idx]
-                return v if v is not None else default
-            return default
+        def _val(k, default):
+            v = u_data_map.get(k)
+            return v if v is not None else default
 
         user_dict = {
-            "user_id": int(_val("user_id", 0, user_id)),
-            "full_name": str(_val("full_name", 1, full_name)),
-            "telegram_username": str(_val("telegram_username", 2, username)),
-            "phone": str(_val("phone", 3, "") or ""),
-            "birth_year": int(_val("birth_year", 4, 1995) or 1995),
-            "car_brand": str(_val("car_brand", 5, "") or ""),
-            "car_model": str(_val("car_model", 6, "") or ""),
-            "car_year": int(_val("car_year", 7, 0) or 0),
-            "car_seats": int(_val("car_seats", 8, 4) or 4),
-            "status": str(_val("status", 9, "busy") or "busy"),
+            "user_id": int(_val("user_id", user_id)),
+            "full_name": str(_val("full_name", full_name)),
+            "telegram_username": str(_val("telegram_username", username)),
+            "phone": str(_val("phone", "") or ""),
+            "birth_year": int(_val("birth_year", 1995) or 1995),
+            "car_brand": str(_val("car_brand", "") or ""),
+            "car_model": str(_val("car_model", "") or ""),
+            "car_year": int(_val("car_year", 0) or 0),
+            "car_seats": int(_val("car_seats", 4) or 4),
+            "status": str(_val("status", "busy") or "busy"),
             "role": actual_role,
-            "station_id": int(_val("station_id", 10, 1) or 1),
-            "rating": float(_val("rating", 11, 5.0) or 5.0),
-            "total_trips": int(_val("total_trips", 12, 0) or 0),
-            "is_blocked": 0 if is_admin else int(_val("is_blocked", 13, 0) or 0),
-            "debt_balance": float(_val("debt_balance", 14, 0.0) or 0.0),
-            "subscription_plan": str(_val("subscription_plan", 15, "free") or "free"),
+            "station_id": int(_val("station_id", 1) or 1),
+            "rating": float(_val("rating", 5.0) or 5.0),
+            "total_trips": int(_val("total_trips", 0) or 0),
+            "is_blocked": 0 if is_admin else int(_val("is_blocked", 0) or 0),
+            "block_reason": str(_val("block_reason", "") or ""),
+            "debt_balance": float(_val("debt_balance", 0.0) or 0.0),
+            "subscription_plan": str(_val("subscription_plan", "free") or "free"),
         }
 
         # טעינת תחנות
@@ -2599,17 +2704,34 @@ async def handle_api_users(request):
 
 
 async def handle_api_users_update(request):
-    """עדכון הרשאות, תפקיד, שיוך לתחנה או מנוי של משתמש"""
+    """עדכון הרשאות, תפקיד, שיוך לתחנה, מנוי או חסימה/שחרור חסימה של משתמש עם סנכרון מלא"""
     try: data = await request.json()
     except Exception: data = {}
     user_id = data.get("user_id")
     if not user_id:
         return cors_json_response({"ok": False, "error": "user_id חובה"}, status=400)
-    
+    uid = int(user_id)
+
     role = data.get("role")
-    is_blocked = 1 if role == 'blocked' else data.get("is_blocked")
-    if role == 'blocked':
-        role = 'user'
+    raw_blocked = data.get("is_blocked")
+    block_reason = data.get("block_reason")
+
+    if role == 'blocked' or raw_blocked == 1 or raw_blocked is True:
+        is_blocked = 1
+        if role == 'blocked':
+            role = 'user'
+    elif raw_blocked == 0 or raw_blocked is False:
+        is_blocked = 0
+    elif role is not None and role != 'blocked':
+        # כאשר משנים תפקיד לתפקיד פעיל (שחרור חסימה או שינוי הרשאה) - מוודאים שחרור חסימה מלא!
+        is_blocked = 0
+    else:
+        is_blocked = None
+
+    if uid in ADMIN_IDS:
+        is_blocked = 0
+        role = 'admin'
+
     station_id = data.get("station_id")
     sub_plan = data.get("subscription_plan")
     
@@ -2624,6 +2746,13 @@ async def handle_api_users_update(request):
                 if is_blocked is not None:
                     updates.append("is_blocked = %s")
                     params.append(int(is_blocked))
+                    if int(is_blocked) == 1:
+                        updates.append("status = 'busy'")
+                    else:
+                        updates.append("block_reason = NULL")
+                if block_reason is not None and is_blocked == 1:
+                    updates.append("block_reason = %s")
+                    params.append(str(block_reason))
                 if station_id is not None:
                     updates.append("station_id = %s")
                     params.append(int(station_id))
@@ -2631,8 +2760,10 @@ async def handle_api_users_update(request):
                     updates.append("subscription_plan = %s")
                     params.append(sub_plan)
                 if updates:
-                    params.append(int(user_id))
+                    params.append(uid)
                     cur.execute(f"UPDATE deliveries_users SET {', '.join(updates)} WHERE user_id = %s", tuple(params))
+                if is_blocked == 0:
+                    cur.execute("UPDATE deliveries_tickets SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP WHERE user_id = %s AND ticket_type = 'unblock_appeal' AND status = 'open'", (uid,))
         await run_in_thread(_update)
     else:
         async with aiosqlite.connect(SQLITE_DB_FILE) as db:
@@ -2644,6 +2775,13 @@ async def handle_api_users_update(request):
             if is_blocked is not None:
                 updates.append("is_blocked = ?")
                 params.append(int(is_blocked))
+                if int(is_blocked) == 1:
+                    updates.append("status = 'busy'")
+                else:
+                    updates.append("block_reason = NULL")
+            if block_reason is not None and is_blocked == 1:
+                updates.append("block_reason = ?")
+                params.append(str(block_reason))
             if station_id is not None:
                 updates.append("station_id = ?")
                 params.append(int(station_id))
@@ -2651,10 +2789,47 @@ async def handle_api_users_update(request):
                 updates.append("subscription_plan = ?")
                 params.append(sub_plan)
             if updates:
-                params.append(int(user_id))
+                params.append(uid)
                 await db.execute(f"UPDATE deliveries_users SET {', '.join(updates)} WHERE user_id = ?", tuple(params))
-                await db.commit()
-    return cors_json_response({"ok": True})
+            if is_blocked == 0:
+                await db.execute("UPDATE deliveries_tickets SET status = 'resolved', resolved_at = ? WHERE user_id = ? AND ticket_type = 'unblock_appeal' AND status = 'open'", (datetime.now().isoformat(), uid))
+            await db.commit()
+
+    # סנכרון מיידי של מקלדת הטלגרם והתראה למשתמש בעת חסימה / שחרור חסימה / שינוי תפקיד
+    try:
+        updated_user = await get_user(uid)
+        u_map = dict(updated_user) if updated_user else {}
+        curr_role = u_map.get('role', role or 'user')
+        curr_status = u_map.get('status', 'busy')
+        curr_blocked = int(u_map.get('is_blocked') or 0)
+        if curr_blocked == 1:
+            await bot.send_message(
+                uid,
+                "🚫 **חשבונך נחסם על ידי הנהלת המערכת.**\n"
+                "גישתך לפעולות בבוט ובמיני-אפליקציה הושעתה, ומקלדת הפעולות הוסרה.",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            unblock_kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="📝 הגש בקשה לשחרור חסימה / פנייה להנהלה", callback_data="unblock_req_start")
+            ]])
+            await bot.send_message(
+                uid,
+                "אם ברצונך להגיש ערעור או בקשה לשחרור חסימה להנהלה, לחץ על הכפתור למטה:",
+                reply_markup=unblock_kb
+            )
+        elif is_blocked == 0:
+            role_heb = ROLE_NAMES.get(curr_role, "נהג")
+            await bot.send_message(
+                uid,
+                f"🔓 **חשבונך פעיל ופתוח במערכת!**\n"
+                f"🛡️ תפקיד נוכחי: **{role_heb}** | תחנה: **#{u_map.get('station_id', 1)}**\n"
+                f"מקלדת העבודה שלך שוחזרה ומוכנה לפעולה:",
+                reply_markup=get_main_kb(curr_role, curr_status, 'private', uid)
+            )
+    except Exception as e:
+        logging.warning(f"Could not notify user {uid} after handle_api_users_update: {e}")
+
+    return cors_json_response({"ok": True, "is_blocked": is_blocked, "role": role})
 
 async def handle_api_stations_create(request):
     """יצירת תחנה חדשה במערכת"""
@@ -3113,21 +3288,32 @@ async def handle_api_settings_post(request):
     return cors_json_response({"ok": True})
 
 async def handle_api_broadcast(request):
-    """שידור הודעת Broadcast לכל משתמשי המערכת"""
+    """שידור הודעת Broadcast למשתמשי המערכת (כולם / נהגים פנויים / לפי תחנה)"""
     try: data = await request.json()
     except Exception: data = {}
     text = (data.get("text") or "").strip()
+    target = data.get("target", "all")  # 'all', 'free', or station_id
     if not text:
         return cors_json_response({"ok": False, "error": "טקסט ריק"}, status=400)
     if USE_POSTGRES:
         def _get_u():
             with get_pg_cursor() as cur:
-                cur.execute("SELECT user_id FROM deliveries_users")
+                if target == "free":
+                    cur.execute("SELECT user_id FROM deliveries_users WHERE status = 'free' AND (is_blocked IS NULL OR is_blocked = 0)")
+                elif str(target).isdigit():
+                    cur.execute("SELECT user_id FROM deliveries_users WHERE station_id = %s AND (is_blocked IS NULL OR is_blocked = 0)", (int(target),))
+                else:
+                    cur.execute("SELECT user_id FROM deliveries_users WHERE (is_blocked IS NULL OR is_blocked = 0)")
                 return cur.fetchall()
         users = await run_in_thread(_get_u)
     else:
         async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-            users = await (await db.execute("SELECT user_id FROM deliveries_users")).fetchall()
+            if target == "free":
+                users = await (await db.execute("SELECT user_id FROM deliveries_users WHERE status = 'free' AND (is_blocked IS NULL OR is_blocked = 0)")).fetchall()
+            elif str(target).isdigit():
+                users = await (await db.execute("SELECT user_id FROM deliveries_users WHERE station_id = ? AND (is_blocked IS NULL OR is_blocked = 0)", (int(target),))).fetchall()
+            else:
+                users = await (await db.execute("SELECT user_id FROM deliveries_users WHERE (is_blocked IS NULL OR is_blocked = 0)")).fetchall()
     count = 0
     for u in users:
         uid = u['user_id'] if isinstance(u, dict) else u[0]
@@ -3136,6 +3322,238 @@ async def handle_api_broadcast(request):
             count += 1
         except Exception: pass
     return cors_json_response({"ok": True, "count": count})
+
+# ----------------- נתיבי REST API עבור מערכת פניות, משובים ובקשות שחרור חסימה -----------------
+async def handle_api_tickets_get(request):
+    """שליפת פניות, משובים ובקשות שחרור חסימה מטבלת deliveries_tickets"""
+    user_id = request.query.get("user_id")
+    status_filter = request.query.get("status")
+    try:
+        if USE_POSTGRES:
+            def _get_t():
+                with get_pg_cursor() as cur:
+                    if user_id and int(user_id) not in ADMIN_IDS:
+                        cur.execute("SELECT * FROM deliveries_tickets WHERE user_id = %s ORDER BY ticket_id DESC LIMIT 100", (int(user_id),))
+                    elif status_filter and status_filter != 'all':
+                        cur.execute("SELECT * FROM deliveries_tickets WHERE status = %s ORDER BY ticket_id DESC LIMIT 100", (status_filter,))
+                    else:
+                        cur.execute("SELECT * FROM deliveries_tickets ORDER BY ticket_id DESC LIMIT 100")
+                    return cur.fetchall()
+            rows = await run_in_thread(_get_t)
+        else:
+            async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+                db.row_factory = aiosqlite.Row
+                if user_id and int(user_id) not in ADMIN_IDS:
+                    rows = await (await db.execute("SELECT * FROM deliveries_tickets WHERE user_id = ? ORDER BY ticket_id DESC LIMIT 100", (int(user_id),))).fetchall()
+                elif status_filter and status_filter != 'all':
+                    rows = await (await db.execute("SELECT * FROM deliveries_tickets WHERE status = ? ORDER BY ticket_id DESC LIMIT 100", (status_filter,))).fetchall()
+                else:
+                    rows = await (await db.execute("SELECT * FROM deliveries_tickets ORDER BY ticket_id DESC LIMIT 100")).fetchall()
+        return cors_json_response({"ok": True, "tickets": [dict(r) for r in (rows or [])]})
+    except Exception as e:
+        logging.error(f"Error in handle_api_tickets_get: {e}")
+        return cors_json_response({"ok": True, "tickets": []})
+
+async def handle_api_tickets_create(request):
+    """פתיחת פנייה חדשה או בקשה לשחרור חסימה מתוך ה-Mini App והתראה מיידית למנהלי המערכת בטלגרם"""
+    try: data = await request.json()
+    except Exception: data = {}
+    user_id = data.get("user_id")
+    message_text = (data.get("message") or "").strip()
+    ticket_type = data.get("ticket_type") or "support"
+    subject = (data.get("subject") or ("בקשה לשחרור חסימה" if ticket_type == "unblock_appeal" else "פנייה להנהלה")).strip()
+
+    if not user_id or not message_text:
+        return cors_json_response({"ok": False, "error": "חובה להזין הודעה"}, status=400)
+    uid = int(user_id)
+    user = await get_user(uid)
+    u_map = dict(user) if user else {}
+    user_name = u_map.get("full_name") or data.get("user_name") or f"משתמש {uid}"
+    user_phone = u_map.get("phone") or data.get("user_phone") or "לא צוין"
+    now_iso = datetime.now().isoformat()
+
+    ticket_id = 0
+    if USE_POSTGRES:
+        def _ins_t():
+            with get_pg_cursor() as cur:
+                cur.execute("""INSERT INTO deliveries_tickets (user_id, user_name, user_phone, ticket_type, subject, message, status, created_at)
+                               VALUES (%s, %s, %s, %s, %s, %s, 'open', %s) RETURNING ticket_id""",
+                            (uid, user_name, user_phone, ticket_type, subject, message_text, now_iso))
+                return cur.fetchone()['ticket_id']
+        ticket_id = await run_in_thread(_ins_t)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            c = await db.execute("""INSERT INTO deliveries_tickets (user_id, user_name, user_phone, ticket_type, subject, message, status, created_at)
+                                    VALUES (?, ?, ?, ?, ?, ?, 'open', ?)""",
+                                 (uid, user_name, user_phone, ticket_type, subject, message_text, now_iso))
+            ticket_id = c.lastrowid
+            await db.commit()
+
+    # התראה מיידית למנהלי המערכת בטלגרם
+    if ticket_type == "unblock_appeal":
+        alert_txt = (
+            f"🚨 **בקשה חדשה לשחרור חסימה #{ticket_id}**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 **נהג:** {user_name} (`{uid}`)\n"
+            f"📱 **טלפון:** {user_phone}\n"
+            f"📝 **נימוק הבקשה:**\n\"{message_text}\"\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🔓 שחרר חסימה כעת", callback_data=f"adm_unblock_now_{uid}_{ticket_id}"),
+                InlineKeyboardButton(text="❌ דחה בקשה", callback_data=f"adm_reject_unblock_{uid}_{ticket_id}")
+            ],
+            [InlineKeyboardButton(text="💬 השב לנהג בפרטי", callback_data=f"adm_reply_ticket_{ticket_id}")]
+        ])
+    else:
+        alert_txt = (
+            f"📥 **פניית שירות / משוב חדשה #{ticket_id}**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 **שולח:** {user_name} (`{uid}`)\n"
+            f"📱 **טלפון:** {user_phone}\n"
+            f"📌 **נושא:** {subject}\n"
+            f"💬 **תוכן הפנייה:**\n\"{message_text}\"\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="💬 השב לפנייה", callback_data=f"adm_reply_ticket_{ticket_id}"),
+                InlineKeyboardButton(text="✅ סמן כטופל", callback_data=f"adm_close_ticket_{ticket_id}")
+            ]
+        ])
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(admin_id, alert_txt, reply_markup=kb)
+        except Exception:
+            pass
+
+    return cors_json_response({"ok": True, "ticket_id": ticket_id})
+
+async def handle_api_tickets_reply(request):
+    """מענה של מנהל לפנייה או בקשת שחרור חסימה מתוך ה-Mini App ושליחת התשובה לנהג בפרטי בטלגרם"""
+    try: data = await request.json()
+    except Exception: data = {}
+    ticket_id = data.get("ticket_id")
+    reply_text = (data.get("reply") or "").strip()
+    unblock_user = bool(data.get("unblock_user"))
+    if not ticket_id or not reply_text:
+        return cors_json_response({"ok": False, "error": "ticket_id ותשובה חובה"}, status=400)
+    tid = int(ticket_id)
+
+    ticket = None
+    if USE_POSTGRES:
+        def _upd_t():
+            with get_pg_cursor() as cur:
+                cur.execute("""UPDATE deliveries_tickets
+                               SET admin_reply = %s, status = 'resolved', resolved_at = CURRENT_TIMESTAMP
+                               WHERE ticket_id = %s RETURNING *""", (reply_text, tid))
+                t = cur.fetchone()
+                if t and unblock_user:
+                    cur.execute("UPDATE deliveries_users SET is_blocked = 0, block_reason = NULL WHERE user_id = %s", (t['user_id'],))
+                return t
+        ticket = await run_in_thread(_upd_t)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("UPDATE deliveries_tickets SET admin_reply = ?, status = 'resolved', resolved_at = ? WHERE ticket_id = ?",
+                             (reply_text, datetime.now().isoformat(), tid))
+            t_row = await (await db.execute("SELECT * FROM deliveries_tickets WHERE ticket_id = ?", (tid,))).fetchone()
+            ticket = dict(t_row) if t_row else None
+            if ticket and unblock_user:
+                await db.execute("UPDATE deliveries_users SET is_blocked = 0, block_reason = NULL WHERE user_id = ?", (ticket['user_id'],))
+            await db.commit()
+
+    if ticket:
+        target_uid = ticket['user_id']
+        try:
+            u = await get_user(target_uid)
+            u_map = dict(u) if u else {}
+            if unblock_user:
+                await bot.send_message(
+                    target_uid,
+                    f"🔓 **בקשתך לשחרור חסימה (#{tid}) אושרה!**\n\n"
+                    f"💬 **הודעת ההנהלה:**\n{reply_text}\n\n"
+                    f"חשבונך שוחרר מחסימה ומקלדת העבודה שלך זמינה כעת:",
+                    reply_markup=get_main_kb(u_map.get('role', 'user'), u_map.get('status', 'busy'), 'private', target_uid)
+                )
+            else:
+                await bot.send_message(
+                    target_uid,
+                    f"📩 **תשובת הנהלת המערכת לפנייתך #{tid} ({ticket.get('subject') or 'פנייה'}):**\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"{reply_text}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━"
+                )
+        except Exception as e:
+            logging.warning(f"Could not send ticket reply to user {target_uid}: {e}")
+
+    return cors_json_response({"ok": True})
+
+async def handle_api_tickets_resolve(request):
+    """סגירת פנייה או אישור/דחיית שחרור חסימה ב-1 קליק מה-Mini App"""
+    try: data = await request.json()
+    except Exception: data = {}
+    ticket_id = data.get("ticket_id")
+    action = data.get("action", "resolve")  # 'resolve', 'approve_unblock', 'reject_unblock'
+    if not ticket_id:
+        return cors_json_response({"ok": False, "error": "ticket_id חובה"}, status=400)
+    tid = int(ticket_id)
+
+    ticket = None
+    new_status = 'resolved' if action != 'reject_unblock' else 'rejected'
+    default_reply = (
+        "בקשתך לשחרור חסימה אושרה על ידי ההנהלה." if action == 'approve_unblock'
+        else "בקשתך לשחרור חסימה נדחתה על ידי ההנהלה." if action == 'reject_unblock'
+        else "הפנייה סומנה כטופלה על ידי ההנהלה."
+    )
+
+    if USE_POSTGRES:
+        def _res_t():
+            with get_pg_cursor() as cur:
+                cur.execute("""UPDATE deliveries_tickets
+                               SET status = %s, admin_reply = COALESCE(admin_reply, %s), resolved_at = CURRENT_TIMESTAMP
+                               WHERE ticket_id = %s RETURNING *""", (new_status, default_reply, tid))
+                t = cur.fetchone()
+                if t and action == 'approve_unblock':
+                    cur.execute("UPDATE deliveries_users SET is_blocked = 0, block_reason = NULL WHERE user_id = %s", (t['user_id'],))
+                return t
+        ticket = await run_in_thread(_res_t)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("""UPDATE deliveries_tickets
+                                SET status = ?, admin_reply = COALESCE(admin_reply, ?), resolved_at = ?
+                                WHERE ticket_id = ?""", (new_status, default_reply, datetime.now().isoformat(), tid))
+            t_row = await (await db.execute("SELECT * FROM deliveries_tickets WHERE ticket_id = ?", (tid,))).fetchone()
+            ticket = dict(t_row) if t_row else None
+            if ticket and action == 'approve_unblock':
+                await db.execute("UPDATE deliveries_users SET is_blocked = 0, block_reason = NULL WHERE user_id = ?", (ticket['user_id'],))
+            await db.commit()
+
+    if ticket:
+        target_uid = ticket['user_id']
+        try:
+            u = await get_user(target_uid)
+            u_map = dict(u) if u else {}
+            if action == 'approve_unblock':
+                await bot.send_message(
+                    target_uid,
+                    f"🔓 **חשבונך שוחרר מחסימה על ידי ההנהלה! (פנייה #{tid})**\n"
+                    f"מקלדת העבודה שלך פעילה כעת:",
+                    reply_markup=get_main_kb(u_map.get('role', 'user'), u_map.get('status', 'busy'), 'private', target_uid)
+                )
+            elif action == 'reject_unblock':
+                await bot.send_message(
+                    target_uid,
+                    f"❌ **בקשתך לשחרור חסימה (#{tid}) נדחתה על ידי ההנהלה.**\n"
+                    f"חשבונך נותר חסום במערכת."
+                )
+        except Exception:
+            pass
+
+    return cors_json_response({"ok": True})
 
 async def start_web_server():
     app = web.Application()
@@ -3173,6 +3591,10 @@ async def start_web_server():
     app.router.add_get("/api/settings", handle_api_settings_get)
     app.router.add_post("/api/settings", handle_api_settings_post)
     app.router.add_post("/api/broadcast", handle_api_broadcast)
+    app.router.add_get("/api/tickets", handle_api_tickets_get)
+    app.router.add_post("/api/tickets/create", handle_api_tickets_create)
+    app.router.add_post("/api/tickets/reply", handle_api_tickets_reply)
+    app.router.add_post("/api/tickets/resolve", handle_api_tickets_resolve)
 
     # 1. בדיקה אם קיימת תיקיית dist מקומפלת (React SPA)
     dist_dir = os.path.join(os.path.dirname(__file__), "dist")
@@ -3183,7 +3605,7 @@ async def start_web_server():
     if os.path.exists(dist_assets) and os.path.isdir(dist_assets):
         app.router.add_static("/assets", path=dist_assets, name="assets")
 
-    # פונקציית הגשת ה-Mini App: אם קיים dist/index.html מגיש אותו, ואם לא – מגיש את תבנית ה-HTML המשולבת המלאה!
+    # פונקציית הגשת ה-Mini App: אם קיים dist/index.html מגיש אותו
     async def serve_webapp(request):
         if os.path.exists(dist_index):
             return web.FileResponse(dist_index)
@@ -3213,13 +3635,26 @@ def safe_reply_markup(chat_type: str, markup):
         return markup
     return markup
 
-def get_main_kb(role='user', status='busy', chat_type='private'):
+def get_webapp_url_for_user(user_id=None, tab=None) -> str:
+    base = WEBAPP_URL
+    params = []
+    if user_id:
+        params.append(f"user_id={user_id}")
+    if tab:
+        params.append(f"tab={tab}")
+    if not params:
+        return base
+    sep = "&" if "?" in base else "?"
+    return f"{base}{sep}{'&'.join(params)}"
+
+def get_main_kb(role='user', status='busy', chat_type='private', user_id=None):
     if chat_type in ('group', 'supergroup'):
         return ReplyKeyboardRemove()
 
+    app_url = get_webapp_url_for_user(user_id=user_id)
     kb = []
-    # כפתור פתיחת מיני אפליקציה ישירות בתוך טלגרם (ללא שגיאות וללא חסימות)
-    kb.append([KeyboardButton(text="📱 פתח מיני אפליקציה (Mini App)", web_app=WebAppInfo(url=WEBAPP_URL))])
+    # כפתור פתיחת מיני אפליקציה ישירות בתוך טלגרם עם מזהה המשתמש להפרדת הרשאות קשיחה
+    kb.append([KeyboardButton(text="📱 פתח מיני אפליקציה (Mini App)", web_app=WebAppInfo(url=app_url))])
     
     if role in ['admin', 'station_manager', 'dispatcher']:
         kb.append([KeyboardButton(text="📢 פרסם קריאה"), KeyboardButton(text="📋 מצב קריאות")])
@@ -3231,7 +3666,7 @@ def get_main_kb(role='user', status='busy', chat_type='private'):
     status_btn = "🟢 פנוי לעבודה" if status == 'busy' else "🔴 תפוס (עצור קריאות)"
     kb.append([KeyboardButton(text="🚗 קריאות זמינות"), KeyboardButton(text=status_btn)])
     kb.append([KeyboardButton(text="📍 אזורי עבודה"), KeyboardButton(text="💎 הפרופיל שלי")])
-    kb.append([KeyboardButton(text="💳 חיובים וערעורים")])
+    kb.append([KeyboardButton(text="💳 חיובים וערעורים"), KeyboardButton(text="💬 שירות, מדריך ופרטיות")])
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 def cancel_kb(chat_type='private'):
@@ -3456,17 +3891,40 @@ async def cmd_start(message: Message, state: FSMContext):
             "👑 **שלום מנהל מערכת! מצב God Mode פעיל.**\n"
             "ההרשאות שלך מאושרות לצמיתות ללא צורך בשום שלב הרשמה.\n"
             "כל פאנלי הניהול, שיגור הקריאות והמיני אפליקציה זמינים עבורך:",
-            reply_markup=get_main_kb('admin', admin_status, message.chat.type)
+            reply_markup=get_main_kb('admin', admin_status, message.chat.type, user_id)
         )
 
     # בדיקת משתמש רגיל
     user = await get_user(user_id)
-    if user and user.get('is_blocked'):
-        return await message.answer("❌ **חשבונך נחסם על ידי ההנהלה.** לבירורים פנה לשירות הלקוחות.")
+    if user:
+        u_map = dict(user)
+        if int(u_map.get('is_blocked') or 0) == 1:
+            block_reason = u_map.get('block_reason') or "הפרת נהלי המערכת / החלטת הנהלה"
+            await message.answer(
+                "🚫 **חשבונך נחסם על ידי הנהלת המערכת.**\n"
+                "גישתך לפעולות בבוט ובמיני-אפליקציה הושעתה ומקלדת הכפתורים הוסרה.",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            unblock_kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="📝 הגש בקשה לשחרור חסימה / פנייה להנהלה", callback_data="unblock_req_start")
+            ]])
+            return await message.answer(
+                f"📋 **סיבת החסימה:** {block_reason}\n\n"
+                f"באפשרותך להגיש בקשה מנומקת לשחרור החסימה ישירות להנהלה בלחיצה על הכפתור למטה:",
+                reply_markup=unblock_kb
+            )
 
-    # אם המשתמש כבר השלים את תהליך הקליטה במלואו (כולל טלפון מאומת ותקנון)
-    if user and user.get('is_phone_verified') and user.get('terms_accepted_at') and user.get('car_brand'):
-        return await message.answer("🎛️ **תפריט ראשי:**", reply_markup=get_main_kb(user['role'], user['status'], message.chat.type))
+        # אם המשתמש כבר השלים את תהליך הקליטה במלואו (כולל טלפון מאומת ותקנון)
+        if u_map.get('is_phone_verified') and u_map.get('terms_accepted_at') and u_map.get('car_brand'):
+            role_heb = ROLE_NAMES.get(u_map.get('role', 'user'), 'נהג')
+            status_heb = "🟢 פנוי לעבודה" if u_map.get('status') == 'free' else "🔴 תפוס (עצור קריאות)"
+            return await message.answer(
+                f"🎛️ **תפריט ראשי — {u_map.get('full_name', 'נהג')}**\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🛡️ **תפקיד:** {role_heb} | **סטטוס:** {status_heb}\n"
+                f"בחר פעולה מהמקלדת החכמה למטה:",
+                reply_markup=get_main_kb(u_map.get('role', 'user'), u_map.get('status', 'busy'), message.chat.type, user_id)
+            )
 
 
     # התחלת תהליך קליטה מסודר ומחמיר (שלב ב' - Onboarding FSM)
@@ -3783,7 +4241,7 @@ async def finalize_onboarding(message: Message, state: FSMContext, user_id: int 
             await db.commit()
 
     await state.clear()
-    cities_txt = ", ".join(cities)
+    cities_txt = ", ".join(cities) if cities else "ירושלים, בני ברק"
     welcome_txt = (
         f"🎉 **ברכות, {full_name}! תהליך הקליטה הושלם בהצלחה!**\n\n"
         f"📱 טלפון מאומת: {phone}\n"
@@ -3792,7 +4250,7 @@ async def finalize_onboarding(message: Message, state: FSMContext, user_id: int 
         "🔴 כרגע אתה בסטטוס: **תפוס** (עצור קריאות).\n"
         "כדי להתחיל לקבל קריאות באזורים שלך, לחץ על **🟢 פנוי לעבודה** בתפריט למטה:"
     )
-    await message.answer(welcome_txt, reply_markup=get_main_kb('user', 'busy'))
+    await message.answer(welcome_txt, reply_markup=get_main_kb(assigned_role, 'busy', 'private', uid))
 
 # -- הרשמה מלאה וגמישה --
 @router.message(Reg.name)
@@ -3865,92 +4323,411 @@ async def reg_seats(message: Message, state: FSMContext):
             await db.commit()
             
     await state.clear()
-    await message.answer("✅ **ההרשמה הושלמה!**", reply_markup=get_main_kb('user', 'busy'))
+    await message.answer("✅ **ההרשמה הושלמה!**", reply_markup=get_main_kb('user', 'busy', 'private', message.from_user.id))
 
-# ----------------- פעולות נהג (פרופיל, אזורי עבודה, סטטוס) -----------------
+# ----------------- סעיף 6: פעולות נהג עשירות (פרופיל, אזורי עבודה, סטטוס, היסטוריה) -----------------
+async def render_driver_profile_card(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    user = await get_user(user_id)
+    if not user:
+        return "⚠️ לא נמצא פרופיל משתמש. שלח /start להרשמה.", InlineKeyboardMarkup(inline_keyboard=[])
+    u_map = dict(user)
+    cities = await get_driver_cities(user_id)
+    cities_str = ", ".join(cities) if cities else "כל הארץ (ללא סינון)"
+    role_heb = ROLE_NAMES.get(u_map.get('role', 'user'), "נהג")
+    status_heb = "🟢 פנוי לעבודה" if u_map.get('status') == 'free' else "🔴 תפוס (עצור קריאות)"
+    uname_str = f"@{u_map.get('telegram_username')}" if u_map.get('telegram_username') else "ללא"
+    debt_val = float(u_map.get('debt_balance') or 0.0)
+
+    # שליפת שם התחנה
+    station_name = f"תחנה #{u_map.get('station_id', 1)}"
+    try:
+        if USE_POSTGRES:
+            def _st():
+                with get_pg_cursor() as cur:
+                    cur.execute("SELECT name FROM deliveries_stations WHERE station_id = %s", (u_map.get('station_id', 1),))
+                    r = cur.fetchone()
+                    return r['name'] if r else station_name
+            station_name = await run_in_thread(_st)
+        else:
+            async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+                r = await (await db.execute("SELECT name FROM deliveries_stations WHERE station_id = ?", (u_map.get('station_id', 1),))).fetchone()
+                if r:
+                    station_name = r[0]
+    except Exception:
+        pass
+
+    txt = (
+        f"💎 **כרטיס נהג ופרופיל אישי**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 **שם מלא:** {u_map.get('full_name', 'נהג')} ({uname_str})\n"
+        f"🆔 **מזהה מערכת:** `{user_id}`\n"
+        f"📱 **טלפון מאומת:** {u_map.get('phone') or 'לא הוזן'}\n"
+        f"🛡️ **דרגת הרשאה:** {role_heb} | 🏢 **{station_name}**\n"
+        f"📡 **סטטוס נוכחי:** {status_heb}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🚗 **פרטי רכב:**\n"
+        f"• **דגם:** {u_map.get('car_brand') or 'לא צוין'} {u_map.get('car_model') or ''}\n"
+        f"• **שנת ייצור:** {u_map.get('car_year') or '—'} | 💺 **מקומות:** {u_map.get('car_seats') or 4}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 **מדדים ופיננסים:**\n"
+        f"• **דירוג משוקלל:** ⭐ {float(u_map.get('rating') or 5.0):.1f}/5.0\n"
+        f"• **נסיעות שהושלמו:** 🚕 {int(u_map.get('total_trips') or 0)} נסיעות\n"
+        f"• **מאזן חוב לתחנה:** 💰 **₪{debt_val:.2f}**\n"
+        f"• **אזורי עבודה:** 📍 {cities_str}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📱 עדכן טלפון", callback_data="prof_edit_phone"),
+            InlineKeyboardButton(text="🚗 עדכן רכב", callback_data="prof_edit_car")
+        ],
+        [
+            InlineKeyboardButton(text="📍 אזורי עבודה", callback_data="prof_goto_cities"),
+            InlineKeyboardButton(text="📜 היסטוריית נסיעות", callback_data="prof_trip_history")
+        ],
+        [
+            InlineKeyboardButton(text="💳 פירוט חיובים וערעורים", callback_data="prof_goto_debts")
+        ],
+        [
+            InlineKeyboardButton(text="📱 פתח כרטיס נהג ב-Mini App", web_app=WebAppInfo(url=get_webapp_url_for_user(user_id, 'profile')))
+        ]
+    ])
+    return txt, kb
+
 @router.message(F.text == "💎 הפרופיל שלי")
 async def show_profile(message: Message):
-    user = await get_user(message.from_user.id)
-    if not user: return
-    role_heb = ROLE_NAMES.get(user['role'], "נהג")
-    txt = f"💎 **הפרופיל שלך:**\n👤 {user['full_name']}\n📱 {user['phone']}\n🛡️ {role_heb} (תחנה: {user['station_id']})\n\n🚗 רכב: {user['car_brand']} {user['car_model']} ({user['car_year']})\n⭐ דירוג: {user['rating']}/5.0 ({user['total_trips']} נסיעות)\n💰 חוב לתחנה: **{user['debt_balance']} ש\"ח**"
-    await message.answer(txt)
+    txt, kb = await render_driver_profile_card(message.from_user.id)
+    await message.answer(txt, reply_markup=kb)
+
+@router.callback_query(F.data == "prof_view")
+async def cb_prof_view(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    txt, kb = await render_driver_profile_card(call.from_user.id)
+    try:
+        await call.message.edit_text(txt, reply_markup=kb)
+    except Exception:
+        await call.message.answer(txt, reply_markup=kb)
+    await call.answer()
+
+@router.callback_query(F.data == "prof_edit_phone")
+async def cb_prof_edit_phone(call: CallbackQuery, state: FSMContext):
+    await state.set_state(ProfileFlow.waiting_new_phone)
+    await call.message.answer(
+        "📱 **עדכון מספר טלפון אישי:**\n\n"
+        "הקלד את מספר הטלפון הנייד שלך (לדוגמה: `0501234567`):",
+        reply_markup=cancel_kb(call.message.chat.type)
+    )
+    await call.answer()
+
+@router.message(ProfileFlow.waiting_new_phone)
+async def process_prof_new_phone(message: Message, state: FSMContext):
+    if message.text == "❌ ביטול וחזרה":
+        return await cmd_start(message, state)
+    clean_p = re.sub(r'[^\d]', '', message.text or '')
+    if len(clean_p) < 9 or not clean_p.startswith('05'):
+        return await message.answer("⚠️ נא להזין מספר טלפון ישראלי תקין המתחיל ב-05:")
+    uid = message.from_user.id
+    if USE_POSTGRES:
+        def _up_p():
+            with get_pg_cursor() as cur:
+                cur.execute("UPDATE deliveries_users SET phone = %s WHERE user_id = %s", (clean_p, uid))
+        await run_in_thread(_up_p)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            await db.execute("UPDATE deliveries_users SET phone = ? WHERE user_id = ?", (clean_p, uid))
+            await db.commit()
+    await state.clear()
+    u = await get_user(uid)
+    u_map = dict(u) if u else {}
+    await message.answer(f"✅ מספר הטלפון שלך עודכן ל-**{clean_p}**!", reply_markup=get_main_kb(u_map.get('role', 'user'), u_map.get('status', 'busy'), message.chat.type, uid))
+    txt, kb = await render_driver_profile_card(uid)
+    await message.answer(txt, reply_markup=kb)
+
+@router.callback_query(F.data == "prof_edit_car")
+async def cb_prof_edit_car(call: CallbackQuery, state: FSMContext):
+    await state.set_state(ProfileFlow.waiting_new_car)
+    await call.message.answer(
+        "🚗 **עדכון פרטי רכב מהיר:**\n\n"
+        "הקלד את פרטי הרכב החדשים בפורמט:\n"
+        "`[יצרן] [דגם] [שנה] [מקומות]`\n\n"
+        "💡 **לדוגמה:** `טויוטה קורולה 2023 4` או `מרצדס ויטו 2022 7`:",
+        reply_markup=cancel_kb(call.message.chat.type)
+    )
+    await call.answer()
+
+@router.message(ProfileFlow.waiting_new_car)
+async def process_prof_new_car(message: Message, state: FSMContext):
+    if message.text == "❌ ביטול וחזרה":
+        return await cmd_start(message, state)
+    parts = (message.text or "").strip().split()
+    if len(parts) < 2:
+        return await message.answer("⚠️ נא להזין לפחות יצרן ודגם (לדוגמה: `טויוטה קורולה 2023 4`):")
+    brand = parts[0]
+    seats = 4
+    year = 2023
+    if len(parts) >= 4 and parts[-1].isdigit() and parts[-2].isdigit():
+        seats = int(parts[-1])
+        year = int(parts[-2])
+        model = " ".join(parts[1:-2])
+    elif len(parts) >= 3 and parts[-1].isdigit():
+        val = int(parts[-1])
+        if val > 1990:
+            year = val
+        else:
+            seats = val
+        model = " ".join(parts[1:-1])
+    else:
+        model = " ".join(parts[1:])
+
+    uid = message.from_user.id
+    if USE_POSTGRES:
+        def _up_c():
+            with get_pg_cursor() as cur:
+                cur.execute("UPDATE deliveries_users SET car_brand = %s, car_model = %s, car_year = %s, car_seats = %s WHERE user_id = %s",
+                            (brand, model, year, seats, uid))
+        await run_in_thread(_up_c)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            await db.execute("UPDATE deliveries_users SET car_brand = ?, car_model = ?, car_year = ?, car_seats = ? WHERE user_id = ?",
+                             (brand, model, year, seats, uid))
+            await db.commit()
+    await state.clear()
+    u = await get_user(uid)
+    u_map = dict(u) if u else {}
+    await message.answer(
+        f"✅ פרטי הרכב עודכנו בהצלחה: **{brand} {model} ({year}) • {seats} מקומות**!",
+        reply_markup=get_main_kb(u_map.get('role', 'user'), u_map.get('status', 'busy'), message.chat.type, uid)
+    )
+    txt, kb = await render_driver_profile_card(uid)
+    await message.answer(txt, reply_markup=kb)
+
+@router.callback_query(F.data == "prof_trip_history")
+async def cb_prof_trip_history(call: CallbackQuery):
+    uid = call.from_user.id
+    if USE_POSTGRES:
+        def _hist():
+            with get_pg_cursor() as cur:
+                cur.execute("""SELECT order_id, text, price, status, created_at 
+                               FROM deliveries_orders 
+                               WHERE driver_id = %s OR assigned_driver_id = %s 
+                               ORDER BY order_id DESC LIMIT 10""", (uid, uid))
+                return cur.fetchall()
+        rows = await run_in_thread(_hist)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            rows = await (await db.execute("""SELECT order_id, text, price, status, created_at 
+                                              FROM deliveries_orders 
+                                              WHERE driver_id = ? OR assigned_driver_id = ? 
+                                              ORDER BY order_id DESC LIMIT 10""", (uid, uid))).fetchall()
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 חזרה לפרופיל שלי", callback_data="prof_view")]
+    ])
+    if not rows:
+        return await call.message.edit_text(
+            "📜 **היסטוריית הנסיעות שלך**\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "טרם בוצעו נסיעות המשויכות לחשבונך.\n"
+            "לחץ על **🚗 קריאות זמינות** או עבור למצב **🟢 פנוי לעבודה** כדי לקחת נסיעות!",
+            reply_markup=kb
+        )
+
+    txt = "📜 **10 הנסיעות האחרונות שלך:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    total_earned = 0.0
+    for r in rows:
+        d = dict(r)
+        st_lbl = "✅ הושלמה" if d['status'] == 'closed' else ("🟡 משוריינת" if d['status'] == 'assigned' else d['status'])
+        price_f = float(d.get('price') or 0)
+        if d['status'] == 'closed':
+            total_earned += price_f
+        short_txt = (d.get('text') or '').splitlines()[0][:55]
+        txt += f"• **קריאה #{d['order_id']}** | ₪{price_f:.0f} | {st_lbl}\n  📝 {short_txt}\n"
+    txt += f"━━━━━━━━━━━━━━━━━━━━━━\n💰 **סה\"כ מחזור נסיעות שהושלמו ברשימה:** ₪{total_earned:.2f}"
+    await call.message.edit_text(txt, reply_markup=kb)
+    await call.answer()
+
+def build_work_zones_kb(my_cities: list) -> InlineKeyboardMarkup:
+    rows = []
+    pair = []
+    for city in POPULAR_CITIES:
+        active = city in my_cities
+        icon = "✅" if active else "➕"
+        pair.append(InlineKeyboardButton(text=f"{icon} {city}", callback_data=f"wz_toggle_{city}"))
+        if len(pair) == 2:
+            rows.append(pair)
+            pair = []
+    if pair:
+        rows.append(pair)
+    rows.append([
+        InlineKeyboardButton(text="✍️ הקלד עיר אחרת", callback_data="add_city"),
+        InlineKeyboardButton(text="🗑️ נקה הכל (כל הארץ)", callback_data="clear_cities")
+    ])
+    rows.append([InlineKeyboardButton(text="🔙 חזרה לפרופיל שלי", callback_data="prof_view")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+async def render_work_zones_message(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    my_cities = await get_driver_cities(user_id)
+    cities_str = ", ".join(my_cities) if my_cities else "כל הארץ (ללא סינון ערים)"
+    txt = (
+        f"📍 **ניהול אזורי עבודה וסינון קריאות**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 **הערים הפעילות שלך כעת ({len(my_cities)}):**\n"
+        f"**{cities_str}**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💡 *איך זה עובד?*\n"
+        f"• לחץ על עיר ברשימה למטה כדי **להפעיל (✅)** או **לכבות (➕)** אותה מיידית.\n"
+        f"• כשתהיה במצב **🟢 פנוי לעבודה**, תקבל התראות ישירות על קריאות חדשות מהערים שבחרת!"
+    )
+    return txt, build_work_zones_kb(my_cities)
 
 @router.message(F.text == "📍 אזורי עבודה")
 async def show_cities(message: Message, state: FSMContext):
+    await state.clear()
+    txt, kb = await render_work_zones_message(message.from_user.id)
+    await message.answer(txt, reply_markup=kb)
+
+@router.callback_query(F.data == "prof_goto_cities")
+async def cb_prof_goto_cities(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    txt, kb = await render_work_zones_message(call.from_user.id)
+    try:
+        await call.message.edit_text(txt, reply_markup=kb)
+    except Exception:
+        await call.message.answer(txt, reply_markup=kb)
+    await call.answer()
+
+@router.callback_query(F.data.startswith("wz_toggle_"))
+async def cb_wz_toggle_city(call: CallbackQuery):
+    city = call.data.replace("wz_toggle_", "").strip()
+    uid = call.from_user.id
+    my_cities = await get_driver_cities(uid)
+    removed = city in my_cities
+
     if USE_POSTGRES:
-        def _get_cities_sync():
+        def _tog():
             with get_pg_cursor() as cur:
-                cur.execute("SELECT city_name FROM deliveries_driver_cities WHERE user_id = %s", (message.from_user.id,))
-                return cur.fetchall()
-        cities = await run_in_thread(_get_cities_sync)
-        cities_str = ", ".join([c['city_name'] for c in cities]) if cities else "לא הוגדרו אזורים"
+                if removed:
+                    cur.execute("DELETE FROM deliveries_driver_cities WHERE user_id = %s AND city_name = %s", (uid, city))
+                else:
+                    cur.execute("INSERT INTO deliveries_driver_cities (user_id, city_name) VALUES (%s, %s) ON CONFLICT DO NOTHING", (uid, city))
+        await run_in_thread(_tog)
     else:
         async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-            cities = await (await db.execute("SELECT city_name FROM deliveries_driver_cities WHERE user_id = ?", (message.from_user.id,))).fetchall()
-        cities_str = ", ".join([c[0] for c in cities]) if cities else "לא הוגדרו אזורים"
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ הוסף עיר", callback_data="add_city")],
-        [InlineKeyboardButton(text="🗑️ נקה הכל", callback_data="clear_cities")]
-    ])
-    await message.answer(f"📍 **הערים שלך:**\n{cities_str}\n\n*רק קריאות מהערים האלו יקפצו אליך כשתהיה פנוי.*", reply_markup=kb)
+            if removed:
+                await db.execute("DELETE FROM deliveries_driver_cities WHERE user_id = ? AND city_name = ?", (uid, city))
+            else:
+                await db.execute("INSERT OR IGNORE INTO deliveries_driver_cities (user_id, city_name) VALUES (?, ?)", (uid, city))
+            await db.commit()
+
+    txt, kb = await render_work_zones_message(uid)
+    try:
+        await call.message.edit_text(txt, reply_markup=kb)
+    except Exception:
+        pass
+    await call.answer(f"{'🗑️ הוסרה' if removed else '✅ נוספה'}: {city}")
 
 @router.callback_query(F.data == "add_city")
 async def add_city_start(call: CallbackQuery, state: FSMContext):
     await state.set_state(DriverFlow.waiting_new_city)
-    await call.message.answer("✍️ הקלד עיר להוספה (למשל: מודיעין עילית):", reply_markup=cancel_kb())
+    await call.message.answer(
+        "✍️ **הוספת עיר או קיצור לאזורי העבודה:**\n"
+        "הקלד שם עיר (או קיצור כמו `ים`, `בב`, `פת`, `קס`, `תא`):",
+        reply_markup=cancel_kb(call.message.chat.type)
+    )
     await call.answer()
 
 @router.message(DriverFlow.waiting_new_city)
 async def process_add_city(message: Message, state: FSMContext):
-    city = message.text.strip()
+    if message.text == "❌ ביטול וחזרה":
+        return await cmd_start(message, state)
+    raw_city = message.text.strip()
+    city = await resolve_city_name(raw_city)
+    uid = message.from_user.id
     if USE_POSTGRES:
         def _add_city_sync():
             with get_pg_cursor() as cur:
-                cur.execute("INSERT INTO deliveries_driver_cities (user_id, city_name) VALUES (%s, %s) ON CONFLICT DO NOTHING", (message.from_user.id, city))
+                cur.execute("INSERT INTO deliveries_driver_cities (user_id, city_name) VALUES (%s, %s) ON CONFLICT DO NOTHING", (uid, city))
         await run_in_thread(_add_city_sync)
     else:
         async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-            await db.execute("INSERT OR IGNORE INTO deliveries_driver_cities (user_id, city_name) VALUES (?, ?)", (message.from_user.id, city))
+            await db.execute("INSERT OR IGNORE INTO deliveries_driver_cities (user_id, city_name) VALUES (?, ?)", (uid, city))
             await db.commit()
     await state.clear()
-    user = await get_user(message.from_user.id)
-    await message.answer(f"✅ העיר {city} נוספה בהצלחה.", reply_markup=get_main_kb(user['role'], user['status']))
+    user = await get_user(uid)
+    u_map = dict(user) if user else {}
+    await message.answer(
+        f"✅ העיר **{city}** נוספה בהצלחה לאזורי העבודה שלך!",
+        reply_markup=get_main_kb(u_map.get('role', 'user'), u_map.get('status', 'busy'), message.chat.type, uid)
+    )
+    txt, kb = await render_work_zones_message(uid)
+    await message.answer(txt, reply_markup=kb)
 
 @router.callback_query(F.data == "clear_cities")
 async def clear_cities(call: CallbackQuery):
+    uid = call.from_user.id
     if USE_POSTGRES:
         def _clear_cities_sync():
             with get_pg_cursor() as cur:
-                cur.execute("DELETE FROM deliveries_driver_cities WHERE user_id = %s", (call.from_user.id,))
+                cur.execute("DELETE FROM deliveries_driver_cities WHERE user_id = %s", (uid,))
         await run_in_thread(_clear_cities_sync)
     else:
         async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-            await db.execute("DELETE FROM deliveries_driver_cities WHERE user_id = ?", (call.from_user.id,))
+            await db.execute("DELETE FROM deliveries_driver_cities WHERE user_id = ?", (uid,))
             await db.commit()
-    await call.message.edit_text("✅ כל הערים נמחקו. לא תקבל קריאות עד שתוסיף ערים חדשות.")
-    await call.answer()
+    txt, kb = await render_work_zones_message(uid)
+    try:
+        await call.message.edit_text(txt, reply_markup=kb)
+    except Exception:
+        pass
+    await call.answer("🗑️ כל הערים נוקו — תקבל קריאות מכל הארץ!")
 
 @router.message(F.text.in_(["🟢 פנוי לעבודה", "🔴 תפוס (עצור קריאות)"]))
 async def toggle_status(message: Message):
-    user = await get_user(message.from_user.id)
-    # אכיפת חובות Auto-Freeze (סעיף 276)
-    if user['debt_balance'] > 500.0:
-        return await message.answer("🚫 **חשבונך מוקפא עקב חובות (מעל 500 ש\"ח)!** לא תוכל לקבל קריאות עד הסדרת החוב.")
+    uid = message.from_user.id
+    user = await get_user(uid)
+    if not user:
+        return await message.answer("⚠️ יש להירשם תחילה באמצעות /start")
+    u_map = dict(user)
+    debt_val = float(u_map.get('debt_balance') or 0.0)
+    # אכיפת חובות Auto-Freeze
+    if debt_val > 500.0:
+        return await message.answer(
+            f"🚫 **חשבונך מוקפא עקב חובות (₪{debt_val:.2f} — מעל תקרת 500 ש\"ח)!**\n"
+            f"לא ניתן לעבור למצב פנוי עד להסדרת החוב מול התחנה או הגשת ערעור.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="💳 צפה בחיובים והגש ערעור", callback_data="prof_goto_debts")]
+            ])
+        )
     
-    new_status = 'free' if user['status'] == 'busy' else 'busy'
+    new_status = 'free' if u_map.get('status') == 'busy' else 'busy'
     if USE_POSTGRES:
         def _update_status():
             with get_pg_cursor() as cur:
-                cur.execute('UPDATE deliveries_users SET status = %s WHERE user_id = %s', (new_status, message.from_user.id))
+                cur.execute('UPDATE deliveries_users SET status = %s WHERE user_id = %s', (new_status, uid))
         await run_in_thread(_update_status)
     else:
         async with aiosqlite.connect(SQLITE_DB_FILE) as db:
-            await db.execute('UPDATE deliveries_users SET status = ? WHERE user_id = ?', (new_status, message.from_user.id))
+            await db.execute('UPDATE deliveries_users SET status = ? WHERE user_id = ?', (new_status, uid))
             await db.commit()
-    msg = "🟢 אתה כעת פנוי (קריאות באזורים שלך יקפצו)!" if new_status == 'free' else "🔴 עצרת קריאות."
-    await message.answer(msg, reply_markup=get_main_kb(user['role'], new_status))
+
+    my_cities = await get_driver_cities(uid)
+    cities_str = ", ".join(my_cities) if my_cities else "כל הארץ"
+    if new_status == 'free':
+        msg = (
+            f"🟢 **סטטוס מעודכן: פנוי לעבודה!**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📍 **אזורי קליטת קריאות:** {cities_str}\n"
+            f"🔔 קריאות חדשות באזורים שלך יקפצו אליך לכאן בזמן אמת."
+        )
+    else:
+        msg = (
+            f"🔴 **סטטוס מעודכן: תפוס (עצירת קריאות)**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔕 לא יישלחו אליך התראות על נסיעות חדשות עד שתלחץ שוב על **🟢 פנוי לעבודה**."
+        )
+    await message.answer(msg, reply_markup=get_main_kb(u_map.get('role', 'user'), new_status, message.chat.type, uid))
 
 # ----------------- זרימת פרסום קריאה (Preview & Publish Flow) - עמודים 2 ו-3 -----------------
 def make_order_preview_kb(draft_id: str) -> InlineKeyboardMarkup:
@@ -5000,24 +5777,56 @@ async def rate_driver(call: CallbackQuery):
     await call.message.edit_text(f"⭐ **דירגת את הנהג ב-{stars} כוכבים.** תודה!")
     await call.answer("הדירוג נשמר בהצלחה.")
 
-# תפריט חיובים וערעורים לנהג
-@router.message(F.text == "💳 חיובים וערעורים")
-async def show_debts(message: Message):
+# תפריט חיובים וערעורים לנהג (Rich UI + היסטוריית תנועות + פנייה מהירה)
+async def render_driver_debts_view(user_id: int):
+    u = await get_user(user_id)
+    debt_bal = float(u.get('debt_balance') or 0.0) if u else 0.0
     if USE_POSTGRES:
         def _get_debts():
             with get_pg_cursor() as cur:
-                cur.execute("SELECT * FROM deliveries_debts WHERE driver_id = %s AND status = 'unpaid' ORDER BY debt_id DESC LIMIT 15", (message.from_user.id,))
-                return cur.fetchall()
-        debts = await run_in_thread(_get_debts)
+                cur.execute("SELECT * FROM deliveries_debts WHERE driver_id = %s AND status = 'unpaid' ORDER BY debt_id DESC LIMIT 15", (user_id,))
+                unpaid = cur.fetchall()
+                cur.execute("SELECT count(*) as total_cnt, count(*) FILTER (WHERE appeal_status = 'pending') as pend_cnt FROM deliveries_debts WHERE driver_id = %s", (user_id,))
+                summary = cur.fetchone()
+                return unpaid, summary
+        debts, summary = await run_in_thread(_get_debts)
     else:
         async with aiosqlite.connect(SQLITE_DB_FILE) as db:
             db.row_factory = aiosqlite.Row
-            debts = await (await db.execute("SELECT * FROM deliveries_debts WHERE driver_id = ? AND status = 'unpaid' ORDER BY debt_id DESC LIMIT 15", (message.from_user.id,))).fetchall()
+            debts = await (await db.execute("SELECT * FROM deliveries_debts WHERE driver_id = ? AND status = 'unpaid' ORDER BY debt_id DESC LIMIT 15", (user_id,))).fetchall()
+            summary = await (await db.execute("SELECT count(*) as total_cnt, sum(case when appeal_status='pending' then 1 else 0 end) as pend_cnt FROM deliveries_debts WHERE driver_id = ?", (user_id,))).fetchone()
 
+    pend_cnt = int((summary['pend_cnt'] if summary else 0) or 0)
+    header_txt = (
+        f"💳 **מרכז חיובים, זיכויים וערעורים**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 **יתרת חוב פתוחה כוללת:** ₪{debt_bal:.2f}\n"
+        f"🧾 **חיובים פתוחים לתשלום:** {len(debts)}\n"
+        f"⚖️ **ערעורים בבדיקת הנהלה:** {pend_cnt}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+    )
     if not debts:
-        return await message.answer("✅ **אין לך חובות פתוחים במערכת.** כל הכבוד!")
+        header_txt += "✅ **אין לך חובות פתוחים במערכת!** כל הכבוד על התנהלות מופתית."
+    else:
+        header_txt += "👇 להלן פירוט החיובים הפתוחים שלך (ניתן לאשר חיוב או להגיש ערעור בלחיצה):"
 
-    await message.answer(f"💳 **רשימת החיובים הפתוחים שלך ({len(debts)}):**")
+    summary_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📜 פירוט 10 תנועות אחרונות (🍓/🍏)", callback_data="my_debts_history"),
+            InlineKeyboardButton(text="💬 פנייה בנושא חיוב", callback_data="support_new_ticket_billing")
+        ],
+        [
+            InlineKeyboardButton(text="🔄 רענן נתוני חיובים", callback_data="refresh_my_debts"),
+            InlineKeyboardButton(text="🔙 חזרה לפרופיל שלי", callback_data="back_to_my_profile")
+        ]
+    ])
+    return header_txt, summary_kb, debts
+
+@router.message(F.text == "💳 חיובים וערעורים")
+async def show_debts(message: Message):
+    header_txt, summary_kb, debts = await render_driver_debts_view(message.from_user.id)
+    await message.answer(header_txt, reply_markup=summary_kb)
+
     for d in debts:
         d_dict = dict(d)
         is_locked = bool(d_dict.get('is_locked'))
@@ -5032,30 +5841,70 @@ async def show_debts(message: Message):
             status_lbl = " (❌ ערעור נדחה)"
 
         txt = (
-            f"🧾 **חיוב מתחנה #{d_dict['station_id']}**{status_lbl}\n"
-            f"🎫 עבור קריאה #{d_dict.get('order_id') or 'ידני'}\n"
-            f"💰 סכום: ₪{d_dict['amount']:.2f}\n"
-            f"📝 סיבה: {d_dict.get('reason', 'עמלה')}"
+            f"🧾 **חיוב #{d_dict['debt_id']} • תחנה #{d_dict['station_id']}**{status_lbl}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎫 **עבור קריאה:** #{d_dict.get('order_id') or 'חיוב ידני'}\n"
+            f"🍓 **סכום חיוב:** ₪{float(d_dict['amount']):.2f}\n"
+            f"📝 **סיבה:** {d_dict.get('reason', 'עמלת נסיעה')}"
         )
 
         buttons = []
         if not is_locked:
             buttons.append(InlineKeyboardButton(text="✅ אישור חיוב", callback_data=f"ackdebt_{d_dict['debt_id']}"))
             if appeal_status == 'none':
-                buttons.append(InlineKeyboardButton(text="⚖️ בקשה לביטול", callback_data=f"appeal_{d_dict['debt_id']}"))
+                buttons.append(InlineKeyboardButton(text="⚖️ הגש ערעור", callback_data=f"appeal_{d_dict['debt_id']}"))
 
         kb = InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
         await message.answer(txt, reply_markup=kb)
 
-# קריאות זמינות לנהג (לפי ערי העבודה שלו)
-@router.message(F.text == "🚗 קריאות זמינות")
-async def show_available_orders_for_driver(message: Message):
-    user = await get_user(message.from_user.id)
-    if not user:
-        return await message.answer("יש להירשם תחילה למערכת באמצעות /start")
+@router.callback_query(F.data == "refresh_my_debts")
+async def cb_refresh_my_debts(call: CallbackQuery):
+    header_txt, summary_kb, _ = await render_driver_debts_view(call.from_user.id)
+    try:
+        await call.message.edit_text(header_txt, reply_markup=summary_kb)
+    except Exception:
+        await call.message.answer(header_txt, reply_markup=summary_kb)
+    await call.answer("נתוני החיובים רועננו!")
 
-    my_cities = await get_driver_cities(message.from_user.id)
+@router.callback_query(F.data == "my_debts_history")
+async def cb_my_debts_history(call: CallbackQuery):
+    uid = call.from_user.id
+    if USE_POSTGRES:
+        def _get_hist():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT * FROM deliveries_debts WHERE driver_id = %s ORDER BY debt_id DESC LIMIT 10", (uid,))
+                return cur.fetchall()
+        rows = await run_in_thread(_get_hist)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            rows = await (await db.execute("SELECT * FROM deliveries_debts WHERE driver_id = ? ORDER BY debt_id DESC LIMIT 10", (uid,))).fetchall()
 
+    if not rows:
+        return await call.answer("אין תנועות כספיות בהיסטוריה שלך.", show_alert=True)
+
+    txt = "📜 **פירוט 10 תנועות כספיות אחרונות (חיובים 🍓 וזיכויים 🍏):**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    for r in rows:
+        d = dict(r)
+        amt = float(d.get('amount') or 0)
+        is_credit = amt < 0 or d.get('transaction_type') == 'credit' or d.get('status') == 'cancelled'
+        icon = "🍏 זיכוי/ביטול" if is_credit else ("✅ שולם" if d.get('status') == 'paid' else "🍓 חיוב פעיל")
+        txt += (
+            f"• **#{d['debt_id']}** | {icon} | **₪{abs(amt):.2f}**\n"
+            f"  📝 {d.get('reason', 'עמלה')} (תחנה #{d.get('station_id', 1)})\n"
+        )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 חזרה לחיובים וערעורים", callback_data="refresh_my_debts")]
+    ])
+    try:
+        await call.message.edit_text(txt, reply_markup=kb)
+    except Exception:
+        await call.message.answer(txt, reply_markup=kb)
+    await call.answer()
+
+# קריאות זמינות לנהג (לפי ערי העבודה שלו) - Rich UI
+async def fetch_matching_orders_for_driver(user_id: int):
+    my_cities = await get_driver_cities(user_id)
     if USE_POSTGRES:
         def _get_orders():
             with get_pg_cursor() as cur:
@@ -5078,35 +5927,96 @@ async def show_available_orders_for_driver(message: Message):
         else:
             if any(c in o_text or c in [orig, dest] for c in my_cities):
                 matching_orders.append(o_dict)
+    return matching_orders, my_cities
+
+@router.message(F.text == "🚗 קריאות זמינות")
+async def show_available_orders_for_driver(message: Message):
+    user = await get_user(message.from_user.id)
+    if not user:
+        return await message.answer("יש להירשם תחילה למערכת באמצעות /start")
+
+    matching_orders, my_cities = await fetch_matching_orders_for_driver(message.from_user.id)
+    cities_str = ", ".join(my_cities) if my_cities else "כל הארץ 🌍"
+    status_str = "🟢 פנוי לעבודה" if user.get('status') == 'free' else "🔴 תפוס (אינך מקבל התראות אוטומטיות)"
 
     if not matching_orders:
-        cities_str = ", ".join(my_cities) if my_cities else "כל הארץ"
+        empty_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🔄 רענן רשימת קריאות", callback_data="refresh_available_orders"),
+                InlineKeyboardButton(text="📍 עדכן אזורי עבודה", callback_data="open_work_zones_inline")
+            ]
+        ])
         return await message.answer(
-            f"ℹ️ **אין כרגע קריאות פתוחות באזורי העבודה שלך ({cities_str}).**\n"
-            f"ודא שאתה במצב '🟢 פנוי לעבודה' כדי לקבל התראות מיידיות כשיש קריאה חדשה!",
-            reply_markup=get_main_kb(user['role'], user['status'], message.chat.type)
+            f"🚗 **לוח קריאות זמינות בזמן אמת**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📡 **סטטוס נוכחי:** {status_str}\n"
+            f"📍 **אזורי סינון:** {cities_str}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"ℹ️ **אין כרגע קריאות פתוחות באזורי העבודה שלך.**\n"
+            f"💡 טיפ: הוסף ערים נוספות ב-'📍 אזורי עבודה' או ודא שאתה במצב '🟢 פנוי לעבודה' כדי לקבל קריאות חדשות ברגע פרסומן!",
+            reply_markup=empty_kb
         )
 
-    await message.answer(f"🚗 **נמצאו {len(matching_orders)} קריאות זמינות באזורי העבודה שלך:**")
+    header_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🔄 רענן קריאות", callback_data="refresh_available_orders"),
+            InlineKeyboardButton(text="📍 אזורי עבודה", callback_data="open_work_zones_inline")
+        ]
+    ])
+    await message.answer(
+        f"🚗 **נמצאו {len(matching_orders)} קריאות פתוחות באזורי העבודה שלך ({cities_str}):**\n"
+        f"📡 **סטטוס הנהג שלך:** {status_str}",
+        reply_markup=header_kb
+    )
     for o in matching_orders:
-        eta_txt = " [⏱️ נדרש ETA]" if o.get('requires_eta') else ""
+        eta_txt = " • ⏱️ נדרש זמן הגעה (ETA)" if o.get('requires_eta') else " • ⚡ שריון מיידי"
+        route_line = ""
+        if o.get('origin_city') or o.get('dest_city'):
+            route_line = f"🗺️ **מסלול:** {o.get('origin_city') or 'לא צוין'} ⬅️ {o.get('dest_city') or 'לא צוין'}\n"
         txt = (
-            f"🎫 **קריאה #{o['order_id']}**{eta_txt}\n"
-            f"💵 מחיר: ₪{o['price']}\n"
-            f"📝 {o['text']}"
+            f"🎫 **קריאה #{o['order_id']}** | 🏢 תחנה #{o.get('station_id', 1)}{eta_txt}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{route_line}"
+            f"💵 **מחיר נסיעה:** ₪{o['price']}\n"
+            f"📝 **פרטי הקריאה:** {o['text']}"
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🚗 בקשת הנסיעה", callback_data=f"bid_{o['order_id']}")]
+            [InlineKeyboardButton(text="🚗 קח נסיעה / הגש מועמדות", callback_data=f"bid_{o['order_id']}")]
         ])
         await message.answer(txt, reply_markup=kb)
 
-# מצב קריאות (לסדרן ולמנהל תחנה בלבד לפי station_id)
+@router.callback_query(F.data == "refresh_available_orders")
+async def cb_refresh_available_orders(call: CallbackQuery):
+    await call.answer("מרענן קריאות פתוחות...")
+    matching_orders, my_cities = await fetch_matching_orders_for_driver(call.from_user.id)
+    cities_str = ", ".join(my_cities) if my_cities else "כל הארץ 🌍"
+    if not matching_orders:
+        empty_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🔄 רענן שוב", callback_data="refresh_available_orders"),
+                InlineKeyboardButton(text="📍 עדכן אזורי עבודה", callback_data="open_work_zones_inline")
+            ]
+        ])
+        return await call.message.answer(f"ℹ️ **עדיין אין קריאות פתוחות באזורי העבודה שלך ({cities_str}).**", reply_markup=empty_kb)
+    await call.message.answer(f"🔄 **עדכון חי: נמצאו {len(matching_orders)} קריאות פתוחות ({cities_str}):**")
+    for o in matching_orders[:10]:
+        eta_txt = " • ⏱️ נדרש ETA" if o.get('requires_eta') else ""
+        txt = (
+            f"🎫 **קריאה #{o['order_id']}**{eta_txt}\n"
+            f"💵 **מחיר:** ₪{o['price']} | 📝 {o['text']}"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🚗 קח נסיעה / הגש מועמדות", callback_data=f"bid_{o['order_id']}")]
+        ])
+        await call.message.answer(txt, reply_markup=kb)
+
+# מצב קריאות (לסדרן ולמנהל תחנה בלבד לפי station_id) + עריכת מחיר
 @router.message(F.text.in_(["📋 מצב קריאות", "📋 קריאות התחנה שלי"]))
 async def show_open_orders(message: Message):
     user = await get_user(message.from_user.id)
-    if not user or user['role'] not in ['admin', 'station_manager', 'dispatcher']: 
+    if not user or user['role'] not in ['admin', 'station_manager', 'dispatcher']:
         return
-    
+
     if USE_POSTGRES:
         def _get_orders():
             with get_pg_cursor() as cur:
@@ -5123,54 +6033,1293 @@ async def show_open_orders(message: Message):
                 orders = await (await db.execute("SELECT * FROM deliveries_orders WHERE status IN ('open', 'assigned') ORDER BY order_id DESC LIMIT 25")).fetchall()
             else:
                 orders = await (await db.execute("SELECT * FROM deliveries_orders WHERE station_id = ? AND status IN ('open', 'assigned') ORDER BY order_id DESC LIMIT 25", (user['station_id'],))).fetchall()
-        
+
     if not orders:
-        return await message.answer("✅ אין קריאות פתוחות לתחנה שלך כרגע.")
-        
+        return await message.answer(
+            f"📋 **מצב קריאות פעילות - תחנה #{user.get('station_id', 1)}**\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"✅ אין כרגע קריאות פתוחות או משוריינות בתחנה שלך.\n"
+            f"לשיגור קריאה חדשה לחץ על **'📢 פרסום קריאה חדשה'** במקלדת."
+        )
+
+    await message.answer(
+        f"📋 **ריכוז קריאות פעילות ({len(orders)}) - תחנה #{user.get('station_id', 1)}:**\n"
+        f"ניתן לערוך מחיר, לפרסם מחדש או לבטל כל קריאה בזמן אמת:"
+    )
     for o in orders:
         o_dict = dict(o)
-        status_heb = "משוריינת לנהג" if o_dict['status'] == 'assigned' else "פתוחה"
-        eta_txt = "⏱️ נדרש ETA" if o_dict.get('requires_eta') else ""
+        status_heb = "🔒 משוריינת לנהג" if o_dict['status'] == 'assigned' else "🟢 פתוחה להצעות"
+        eta_txt = " | ⏱️ נדרש ETA" if o_dict.get('requires_eta') else ""
+        drv_line = f"\n👨‍✈️ **נהג משובץ:** `{o_dict['driver_id']}`" if o_dict.get('driver_id') else ""
         txt = (
-            f"🎫 **קריאה #{o_dict['order_id']}** ({status_heb}) {eta_txt}\n"
-            f"💵 מחיר: ₪{o_dict['price']}\n"
-            f"📝 {o_dict['text']}"
+            f"🎫 **קריאה #{o_dict['order_id']}** • {status_heb}{eta_txt}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💵 **מחיר:** ₪{o_dict['price']} | 🏢 **תחנה:** #{o_dict.get('station_id', 1)}\n"
+            f"📝 **פרטים:** {o_dict['text']}{drv_line}"
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [
+                InlineKeyboardButton(text="✏️ ערוך מחיר", callback_data=f"editordprice_{o_dict['order_id']}"),
                 InlineKeyboardButton(text="🔄 פרסם שוב", callback_data=f"repub_{o_dict['order_id']}"),
-                InlineKeyboardButton(text="🚫 ביטול נסיעה", callback_data=f"cancelord_{o_dict['order_id']}")
+                InlineKeyboardButton(text="🚫 בטל קריאה", callback_data=f"cancelord_{o_dict['order_id']}")
             ]
         ])
         await message.answer(txt, reply_markup=kb)
 
-# ----------------- God Mode וניהול תחנות -----------------
-@router.message(F.text.in_(["🛠️ פאנל מנהל מערכת", "🏢 ניהול תחנה ועובדים"]))
-async def admin_panel(message: Message):
+@router.callback_query(F.data.startswith("editordprice_"))
+async def cb_edit_order_price_start(call: CallbackQuery, state: FSMContext):
+    user = await get_user(call.from_user.id)
+    if not user or user['role'] not in ['admin', 'station_manager', 'dispatcher']:
+        return await call.answer("אין הרשאה.", show_alert=True)
+    order_id = int(call.data.split("_")[1])
+    await state.update_data(edit_price_order_id=order_id)
+    await state.set_state(OrderFlow.waiting_edit_order_price)
+    await call.message.answer(
+        f"✏️ **עריכת מחיר עבור קריאה #{order_id}:**\n"
+        f"הקלד את המחיר החדש בש\"ח (מספר בלבד, למשל: `120`):",
+        reply_markup=cancel_kb()
+    )
+    await call.answer()
+
+@router.message(OrderFlow.waiting_edit_order_price)
+async def process_edit_order_price(message: Message, state: FSMContext):
+    if message.text == "❌ ביטול וחזרה":
+        return await cmd_start(message, state)
+    try:
+        new_price = float(message.text.strip())
+        if new_price <= 0:
+            raise ValueError()
+    except Exception:
+        return await message.answer("⚠️ נא להזין מחיר תקין במספרים בלבד (למשל `120`).")
+
+    data = await state.get_data()
+    order_id = data.get("edit_price_order_id")
     user = await get_user(message.from_user.id)
-    if user['role'] not in ['admin', 'station_manager']: 
-        return
-    
-    kb_list = []
-    if user['role'] == 'admin':
-        kb_list.append([InlineKeyboardButton(text="➕ פתיחת תחנה חדשה", callback_data="god_new_station")])
-        kb_list.append([InlineKeyboardButton(text="👥 ניהול הרשאות משתמשים", callback_data="god_manage_users")])
-        kb_list.append([InlineKeyboardButton(text="📢 הודעת Broadcast גלובלית", callback_data="god_broadcast")])
-    elif user['role'] == 'station_manager':
-        kb_list.append([InlineKeyboardButton(text="📱 פתח פאנל ניהול תחנה (Mini App)", web_app=WebAppInfo(url=WEBAPP_URL))])
-        kb_list.append([InlineKeyboardButton(text="👥 סדרני התחנה שלי", callback_data="sm_list_dispatchers")])
-        kb_list.append([InlineKeyboardButton(text="➕ הוספת סדרן לתחנה", callback_data="sm_add_dispatcher")])
-        kb_list.append([InlineKeyboardButton(text="📊 סטטיסטיקות התחנה", callback_data="sm_station_stats")])
-        kb_list.append([InlineKeyboardButton(text="💳 חיוב / זיכוי נהג בתחנה", callback_data="sm_charge_driver")])
-        
-    kb = InlineKeyboardMarkup(inline_keyboard=kb_list)
-    await message.answer("👑 **פאנל ניהול מתקדם**\nבחר את הפעולה הרצויה:", reply_markup=kb)
+
+    if USE_POSTGRES:
+        def _upd():
+            with get_pg_cursor() as cur:
+                cur.execute("UPDATE deliveries_orders SET price = %s WHERE order_id = %s", (new_price, order_id))
+        await run_in_thread(_upd)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            await db.execute("UPDATE deliveries_orders SET price = ? WHERE order_id = ?", (new_price, order_id))
+            await db.commit()
+
+    await state.clear()
+    await message.answer(
+        f"✅ **המחיר של קריאה #{order_id} עודכן בהצלחה ל-₪{new_price:.0f}!**",
+        reply_markup=get_main_kb(user['role'], user['status'], message.chat.type, user['user_id'])
+    )
+
+# =================================================================================
+# 3. מערכת הגשת בקשה לשחרור חסימה (עבור משתמש חסום)
+# =================================================================================
+@router.callback_query(F.data == "unblock_req_start")
+async def cb_unblock_req_start(call: CallbackQuery, state: FSMContext):
+    await state.set_state(SupportFlow.waiting_unblock_appeal)
+    await call.message.answer(
+        "📝 **הגשת בקשה לשחרור חסימה / ערעור להנהלה**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "אנא כתוב בהודעה אחת ברורה את הסיבה לבקשת שחרור החסימה ופרטי ההתקשרות שלך.\n"
+        "הבקשה תועבר באופן מיידי למנהלי המערכת לבדיקה:",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    await call.answer()
+
+@router.message(SupportFlow.waiting_unblock_appeal)
+async def process_unblock_appeal_submission(message: Message, state: FSMContext):
+    uid = message.from_user.id
+    u = await get_user(uid)
+    full_name = u.get('full_name') if u else (message.from_user.full_name or f"משתמש #{uid}")
+    phone = u.get('phone', 'לא צוין') if u else 'לא צוין'
+    appeal_text = (message.text or "").strip()
+
+    if len(appeal_text) < 3:
+        return await message.answer("⚠️ נא לפרט את סיבת הבקשה לשחרור החסימה (לפחות מספר מילים).")
+
+    if USE_POSTGRES:
+        def _save_ticket():
+            with get_pg_cursor() as cur:
+                cur.execute("""INSERT INTO deliveries_tickets (user_id, full_name, phone, category, subject, message, status)
+                               VALUES (%s, %s, %s, 'unblock_request', %s, %s, 'open') RETURNING ticket_id""",
+                            (uid, full_name, phone, 'בקשה לשחרור חסימה', appeal_text))
+                row = cur.fetchone()
+                return row['ticket_id'] if row else 0
+        ticket_id = await run_in_thread(_save_ticket)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            c = await db.execute("""INSERT INTO deliveries_tickets (user_id, full_name, phone, category, subject, message, status)
+                                    VALUES (?, ?, ?, 'unblock_request', ?, ?, 'open')""",
+                                 (uid, full_name, phone, 'בקשה לשחרור חסימה', appeal_text))
+            ticket_id = c.lastrowid
+            await db.commit()
+
+    await state.clear()
+    await message.answer(
+        f"✅ **בקשתך לשחרור חסימה (#{ticket_id}) נקלטה ונשלחה להנהלת המערכת!**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"ברגע שהנהלת המערכת תאשר את הבקשה או תשיב לפנייתך, תקבל הודעה אוטומטית ישירות לכאן.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+    # שליחת התראה מיידית לכל מנהלי המערכת עם כפתורי שחרור/דחייה ישירים
+    admin_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🔓 שחרר חסימה כעת", callback_data=f"adm_unblock_now_{uid}_{ticket_id}"),
+            InlineKeyboardButton(text="❌ דחה בקשה", callback_data=f"adm_reject_unblock_{uid}_{ticket_id}")
+        ],
+        [
+            InlineKeyboardButton(text="💬 השב למשתמש", callback_data=f"adm_reply_ticket_{ticket_id}")
+        ]
+    ])
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                admin_id,
+                f"🚨 **בקשה חדשה לשחרור חסימה (פנייה #{ticket_id})**\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 **שם:** {full_name}\n"
+                f"🆔 **מזהה:** `{uid}` (@{message.from_user.username or 'ללא'})\n"
+                f"📞 **טלפון:** {phone}\n"
+                f"📝 **נימוק הנהג:**\n\"{appeal_text}\"",
+                reply_markup=admin_kb
+            )
+        except Exception:
+            pass
+
+@router.callback_query(F.data.startswith("adm_unblock_now_"))
+async def cb_adm_unblock_now(call: CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS:
+        u_caller = await get_user(call.from_user.id)
+        if not u_caller or u_caller.get('role') != 'admin':
+            return await call.answer("⛔ פעולה זו מורשית למנהל מערכת בלבד.", show_alert=True)
+
+    parts = call.data.split("_")
+    target_uid = int(parts[3])
+    ticket_id = int(parts[4]) if len(parts) > 4 else 0
+
+    if USE_POSTGRES:
+        def _unblock():
+            with get_pg_cursor() as cur:
+                cur.execute("UPDATE deliveries_users SET is_blocked = 0, block_reason = NULL WHERE user_id = %s", (target_uid,))
+                if ticket_id:
+                    cur.execute("UPDATE deliveries_tickets SET status = 'resolved', admin_reply = 'החסימה שוחררה על ידי ההנהלה' WHERE ticket_id = %s", (ticket_id,))
+                else:
+                    cur.execute("UPDATE deliveries_tickets SET status = 'resolved' WHERE user_id = %s AND category = 'unblock_request'", (target_uid,))
+        await run_in_thread(_unblock)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            await db.execute("UPDATE deliveries_users SET is_blocked = 0, block_reason = NULL WHERE user_id = ?", (target_uid,))
+            if ticket_id:
+                await db.execute("UPDATE deliveries_tickets SET status = 'resolved', admin_reply = 'החסימה שוחררה על ידי ההנהלה' WHERE ticket_id = ?", (ticket_id,))
+            else:
+                await db.execute("UPDATE deliveries_tickets SET status = 'resolved' WHERE user_id = ? AND category = 'unblock_request'", (target_uid,))
+            await db.commit()
+
+    target_user = await get_user(target_uid)
+    t_role = target_user.get('role', 'user') if target_user else 'user'
+    t_status = target_user.get('status', 'busy') if target_user else 'busy'
+
+    try:
+        await bot.send_message(
+            target_uid,
+            "🔓 **בשורה משמחת! בקשתך אושרה וחשבונך שוחרר מחסימה על ידי הנהלת המערכת.**\n"
+            "מקלדת העבודה שלך שוחזרה וניתן לחזור לעבודה סדירה:",
+            reply_markup=get_main_kb(t_role, t_status, "private", target_uid)
+        )
+    except Exception:
+        pass
+
+    try:
+        await call.message.edit_text(call.message.text + f"\n\n✅ **החסימה שוחררה בהצלחה על ידי {call.from_user.full_name}!**")
+    except Exception:
+        await call.message.answer(f"✅ החסימה של משתמש `{target_uid}` שוחררה בהצלחה!")
+    await call.answer("המשתמש שוחרר מחסימה!")
+
+@router.callback_query(F.data.startswith("adm_reject_unblock_"))
+async def cb_adm_reject_unblock(call: CallbackQuery):
+    if call.from_user.id not in ADMIN_IDS:
+        u_caller = await get_user(call.from_user.id)
+        if not u_caller or u_caller.get('role') != 'admin':
+            return await call.answer("⛔ אין הרשאה.", show_alert=True)
+
+    parts = call.data.split("_")
+    target_uid = int(parts[3])
+    ticket_id = int(parts[4]) if len(parts) > 4 else 0
+
+    if USE_POSTGRES:
+        def _rej():
+            with get_pg_cursor() as cur:
+                if ticket_id:
+                    cur.execute("UPDATE deliveries_tickets SET status = 'rejected', admin_reply = 'בקשת שחרור החסימה נדחתה' WHERE ticket_id = %s", (ticket_id,))
+        await run_in_thread(_rej)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            if ticket_id:
+                await db.execute("UPDATE deliveries_tickets SET status = 'rejected', admin_reply = 'בקשת שחרור החסימה נדחתה' WHERE ticket_id = ?", (ticket_id,))
+                await db.commit()
+
+    try:
+        await bot.send_message(
+            target_uid,
+            "❌ **עדכון מהנהלת המערכת:**\n"
+            "בקשתך לשחרור החסימה נבדקה ונדחתה בשלב זה."
+        )
+    except Exception:
+        pass
+
+    try:
+        await call.message.edit_text(call.message.text + "\n\n❌ **הבקשה לשחרור חסימה נדחתה.**")
+    except Exception:
+        pass
+    await call.answer("הבקשה נדחתה.")
+
+# =================================================================================
+# 5. מערכת "פניות, משוב, מדריך ותנאי פרטיות" (בבוט)
+# =================================================================================
+def get_support_main_kb(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="💬 פתיחת פנייה / משוב להנהלה", callback_data="support_new_ticket"),
+            InlineKeyboardButton(text="📂 הפניות שלי", callback_data="support_my_tickets")
+        ],
+        [
+            InlineKeyboardButton(text="📖 מדריך מלא למשתמש", callback_data="support_guide_menu"),
+            InlineKeyboardButton(text="🔒 תקנון ותנאי פרטיות", callback_data="support_privacy_terms")
+        ],
+        [
+            InlineKeyboardButton(text="📱 פתח מרכז שירות במיני-אפליקציה", web_app=WebAppInfo(url=get_webapp_url_for_user(user_id=user_id, tab="support")))
+        ]
+    ])
+
+@router.message(F.text == "💬 שירות, מדריך ופרטיות")
+async def show_support_and_guide_hub(message: Message):
+    txt = (
+        "💬 **מרכז שירות, תמיכה, מדריכים ותקנון פרטיות**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "ברוך הבא למרכז התמיכה והמידע של המערכת.\n"
+        "כאן תוכל לפתוח פנייה ישירה להנהלה, לקרוא מדריכי עבודה מפורטים ולעיין בתקנון ותנאי הפרטיות:\n\n"
+        "• **💬 פניות ומשוב להנהלה:** דיווח על תקלה, בירור חיוב, הצעת ייעול או פנייה אישית (מענה ישיר לפרטי).\n"
+        "• **📖 מדריך מלא למשתמש:** הסבר שלב-אחר-שלב על לקיחת נסיעות, הצעת ETA, אזורי עבודה וחיובים.\n"
+        "• **🔒 תקנון ותנאי פרטיות:** כללי השימוש, שמירת הנתונים ונהלי העבודה מול התחנות."
+    )
+    await message.answer(txt, reply_markup=get_support_main_kb(message.from_user.id))
+
+@router.callback_query(F.data == "support_hub_back")
+async def cb_support_hub_back(call: CallbackQuery):
+    txt = (
+        "💬 **מרכז שירות, תמיכה, מדריכים ותקנון פרטיות**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "בחר את הנושא המבוקש מתוך התפריט:"
+    )
+    try:
+        await call.message.edit_text(txt, reply_markup=get_support_main_kb(call.from_user.id))
+    except Exception:
+        await call.message.answer(txt, reply_markup=get_support_main_kb(call.from_user.id))
+    await call.answer()
+
+# --- מדריך אינטראקטיבי מחולק לקטגוריות ---
+@router.callback_query(F.data == "support_guide_menu")
+async def cb_support_guide_menu(call: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="1️⃣ איך עובדים עם הבוט והמיני-אפליקציה?", callback_data="guide_cat_1")],
+        [InlineKeyboardButton(text="2️⃣ איך לוקחים קריאה ומציעים זמן הגעה (ETA)?", callback_data="guide_cat_2")],
+        [InlineKeyboardButton(text="3️⃣ איך עובדים אזורי העבודה והסינון?", callback_data="guide_cat_3")],
+        [InlineKeyboardButton(text="4️⃣ התנהלות מול חיובים (🍓), זיכויים (🍏) וערעורים", callback_data="guide_cat_4")],
+        [InlineKeyboardButton(text="🔙 חזרה למרכז השירות", callback_data="support_hub_back")]
+    ])
+    txt = (
+        "📖 **מדריך מלא למשתמש – מערכת שיגור ומשלוחים**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "בחר את הקטגוריה שברצונך לקרוא עליה כדי לקבל הסבר מפורט וברור:"
+    )
+    try:
+        await call.message.edit_text(txt, reply_markup=kb)
+    except Exception:
+        await call.message.answer(txt, reply_markup=kb)
+    await call.answer()
+
+@router.callback_query(F.data.startswith("guide_cat_"))
+async def cb_guide_category_detail(call: CallbackQuery):
+    cat = call.data.split("_")[-1]
+    guides = {
+        "1": (
+            "1️⃣ **איך עובדים עם הבוט והמיני-אפליקציה?**\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "• **סטטוס עבודה (🟢 פנוי / 🔴 תפוס):** לחיצה על `🟢 פנוי לעבודה` מחברת אותך למערכת השיגור. כל עוד אתה פנוי, הבוט ישלח לך התראות בזמן אמת על קריאות חדשות התואמות לאזורי העבודה שלך.\n\n"
+            "• **הפרופיל שלי (💎):** מאפשר לך לצפות בדירוג שלך, ביתרת החוב, בערי העבודה, לעדכן מספר טלפון או פרטי רכב ולצפות בהיסטוריית הנסיעות.\n\n"
+            "• **המיני-אפליקציה (📱 Mini App):** ממשק ויזואלי מתקדם הנפתח מתוך הטלגרם ומותאם אוטומטית לתפקידך (נהג, סדרן, מנהל תחנה או מנהל מערכת)."
+        ),
+        "2": (
+            "2️⃣ **איך לוקחים קריאה ומציעים זמן הגעה (ETA)?**\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "• **צפייה בקריאות:** ניתן לראות את כל הקריאות הפתוחות דרך כפתור `🚗 קריאות זמינות` או לקבל אותן ישירות כהודעה מהבוט.\n\n"
+            "• **הגשת מועמדות ו-ETA:** בלחיצה על `🚗 קח נסיעה / הגש מועמדות`, אם הקריאה דורשת זמן הגעה, תתבקש להקליד תוך כמה דקות תוכל להגיע לנקודת האיסוף (למשל `7` דקות).\n\n"
+            "• **אישור הסדרן:** ההצעה שלך נשלחת לסדרן התחנה יחד עם פרטי הרכב והדירוג שלך. ברגע שהסדרן מאשר אותך, תקבל הודעת זכייה עם מספר הטלפון של הלקוח ופרטי הנסיעה המלאים!"
+        ),
+        "3": (
+            "3️⃣ **איך עובדים אזורי העבודה והסינון?**\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "• **סינון חכם לפי ערים (📍 אזורי עבודה):** כדי שלא תקבל התראות על נסיעות רחוקות ממך, תוכל לבחור בדיוק באילו ערים אתה עובד (למשל: ירושלים, בני ברק, תל אביב).\n\n"
+            "• **הוספה והסרה בלחיצה:** בתפריט `📍 אזורי עבודה` תוכל להדליק או לכבות ערים בלחיצת כפתור, או להקליד שם עיר ומערכת ה-NLP תזהה גם קיצורים (כמו `י-ם`, `ב\"ב`, `פ\"ת`).\n\n"
+            "• **מצב כל הארץ 🌍:** אם לא בחרת אף עיר (או לחצת על איפוס ערים), תקבל קריאות מכל רחבי הארץ."
+        ),
+        "4": (
+            "4️⃣ **התנהלות מול חיובים (🍓), זיכויים (🍏) וערעורים**\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "• **חיוב עמלה (🍓):** כאשר נסיעה נסגרת עליך, נרשמת עמלת תחנה (לפי אחוז העמלה של התחנה) תחת `💳 חיובים וערעורים`.\n\n"
+            "• **זיכוי נהג (🍏):** במידה ובוצע תשלום לתחנה או זיכוי בגין ביטול, מנהל התחנה מזכה את חשבונך והחוב יורד מיד.\n\n"
+            "• **הגשת ערעור (⚖️):** אם נפלה טעות בחיוב או שהלקוח ביטל את הנסיעה, לחץ על `⚖️ הגש ערעור` מתחת לחיוב וכתוב את הסיבה. הערעור מועבר ישירות למנהל התחנה ולהנהלה לאישור וביטול החיוב.\n\n"
+            "• **תקרת חוב:** שים לב כי צבירת חוב פתוח מעל ₪500 מקפיאה אוטומטית את האפשרות לעבור למצב 'פנוי' עד להסדרת החוב."
+        )
+    }
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 חזרה לתפריט המדריך", callback_data="support_guide_menu")],
+        [InlineKeyboardButton(text="💬 פתיחת פנייה להנהלה", callback_data="support_new_ticket")]
+    ])
+    txt = guides.get(cat, "מדריך למשתמש")
+    try:
+        await call.message.edit_text(txt, reply_markup=kb)
+    except Exception:
+        await call.message.answer(txt, reply_markup=kb)
+    await call.answer()
+
+# --- תקנון ותנאי פרטיות ---
+@router.callback_query(F.data == "support_privacy_terms")
+async def cb_support_privacy_terms(call: CallbackQuery):
+    txt = (
+        "🔒 **תקנון שימוש ומדיניות פרטיות – מערכת שיגור ומשלוחים**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "**1. מטרת המערכת וכללי התנהגות:**\n"
+        "• המערכת מחברת בין תחנות מוניות/משלוחים, סדרנים ונהגים מורשים בזמן אמת.\n"
+        "• נהג הלוקח קריאה מתחייב להגיע בזמן ההגעה (ETA) שהוצהר ולתת שירות אדיב, בטיחותי ומקצועי ללקוח.\n"
+        "• חל איסור מוחלט להעביר פרטי לקוחות או קריאות לגורמים שאינם מורשים במערכת.\n\n"
+        "**2. מדיניות פרטיות ושמירת מידע:**\n"
+        "• המערכת שומרת במסד נתונים מאובטח (PostgreSQL בענן) אך ורק את הפרטים הנדרשים לתפעול השוטף: מזהה טלגרם, שם מלא, מספר טלפון, פרטי רכב, ערי עבודה, היסטוריית קריאות ומאזן עמלות.\n"
+        "• פרטי הנהג מוצגים לסדרן המפרסם את הקריאה לצורך שיבוץ בלבד, ואינם נמכרים או מועברים לצד שלישי.\n\n"
+        "**3. התחשבנות, עמלות וחסימות:**\n"
+        "• כל תחנה מגדירה אחוז עמלה שקוף הידוע מראש. הנהג רשאי לערער על כל חיוב באמצעות מערכת הערעורים המובנית.\n"
+        "• הנהלת המערכת רשאית להשעות או לחסום משתמש המפר את כללי המשמעת, מוסר דיווחי סרק או צובר חובות מעבר לתקרה המותרת. למשתמש חסום שמורה הזכות להגיש בקשת שחרור מנומקת מתוך הבוט."
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 חזרה למרכז השירות", callback_data="support_hub_back")]
+    ])
+    try:
+        await call.message.edit_text(txt, reply_markup=kb)
+    except Exception:
+        await call.message.answer(txt, reply_markup=kb)
+    await call.answer()
+
+# --- פתיחת פנייה חדשה להנהלה (Ticket) ---
+@router.callback_query(F.data.in_(["support_new_ticket", "support_new_ticket_billing"]))
+async def cb_support_new_ticket(call: CallbackQuery, state: FSMContext):
+    is_billing = call.data == "support_new_ticket_billing"
+    if is_billing:
+        await state.update_data(ticket_category="billing", ticket_subject="בירור בנושא חיוב / עמלה")
+        await state.set_state(SupportFlow.waiting_ticket_message)
+        await call.message.answer(
+            "💳 **פתיחת פנייה בנושא חיוב / עמלה:**\n"
+            "אנא כתוב את פרטי הפנייה (מספר חיוב/קריאה ופירוט המקרה):",
+            reply_markup=cancel_kb()
+        )
+        return await call.answer()
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="💳 בעיה בחיוב / עמלה", callback_data="tcat_billing"),
+            InlineKeyboardButton(text="🛠️ דיווח על תקלה טכנית", callback_data="tcat_bug")
+        ],
+        [
+            InlineKeyboardButton(text="💡 הצעת ייעול ושיפור", callback_data="tcat_idea"),
+            InlineKeyboardButton(text="📩 פנייה אישית להנהלה", callback_data="tcat_general")
+        ],
+        [InlineKeyboardButton(text="🔙 ביטול וחזרה", callback_data="support_hub_back")]
+    ])
+    txt = (
+        "💬 **פתיחת פנייה חדשה להנהלת המערכת**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "בחר את נושא הפנייה שלך:"
+    )
+    try:
+        await call.message.edit_text(txt, reply_markup=kb)
+    except Exception:
+        await call.message.answer(txt, reply_markup=kb)
+    await call.answer()
+
+@router.callback_query(F.data.startswith("tcat_"))
+async def cb_select_ticket_category(call: CallbackQuery, state: FSMContext):
+    cat_key = call.data.replace("tcat_", "")
+    cat_names = {
+        "billing": "בעיה בחיוב / עמלה",
+        "bug": "דיווח על תקלה טכנית",
+        "idea": "הצעת ייעול ושיפור",
+        "general": "פנייה אישית להנהלה"
+    }
+    subject = cat_names.get(cat_key, "פנייה להנהלה")
+    await state.update_data(ticket_category=cat_key, ticket_subject=subject)
+    await state.set_state(SupportFlow.waiting_ticket_message)
+    await call.message.answer(
+        f"✍️ **נושא הפנייה:** {subject}\n\n"
+        f"אנא הקלד כעת את תוכן הפנייה המלא בהודעה אחת.\n"
+        f"הפנייה תישלח ישירות להנהלת המערכת ותקבל מענה בפרטי:",
+        reply_markup=cancel_kb()
+    )
+    await call.answer()
+
+@router.message(SupportFlow.waiting_ticket_message)
+async def process_ticket_message(message: Message, state: FSMContext):
+    if message.text == "❌ ביטול וחזרה":
+        return await cmd_start(message, state)
+
+    text_body = (message.text or "").strip()
+    if len(text_body) < 3:
+        return await message.answer("⚠️ נא להזין תוכן פנייה מפורט יותר.")
+
+    data = await state.get_data()
+    category = data.get("ticket_category", "general")
+    subject = data.get("ticket_subject", "פנייה להנהלה")
+    uid = message.from_user.id
+    user = await get_user(uid)
+    full_name = user.get('full_name') if user else (message.from_user.full_name or f"משתמש #{uid}")
+    phone = user.get('phone', '') if user else ''
+
+    if USE_POSTGRES:
+        def _ins():
+            with get_pg_cursor() as cur:
+                cur.execute("""INSERT INTO deliveries_tickets (user_id, full_name, phone, category, subject, message, status)
+                               VALUES (%s, %s, %s, %s, %s, %s, 'open') RETURNING ticket_id""",
+                            (uid, full_name, phone, category, subject, text_body))
+                r = cur.fetchone()
+                return r['ticket_id'] if r else 0
+        ticket_id = await run_in_thread(_ins)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            c = await db.execute("""INSERT INTO deliveries_tickets (user_id, full_name, phone, category, subject, message, status)
+                                    VALUES (?, ?, ?, ?, ?, ?, 'open')""",
+                                 (uid, full_name, phone, category, subject, text_body))
+            ticket_id = c.lastrowid
+            await db.commit()
+
+    await state.clear()
+    await message.answer(
+        f"✅ **פנייתך (#{ticket_id}) נשלחה בהצלחה להנהלת המערכת!**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📌 **נושא:** {subject}\n"
+        f"📝 **תוכן:** {text_body}\n\n"
+        f"אנו נבדוק את פנייתך ונשיב לך בהקדם ישירות לכאן בבוט.",
+        reply_markup=get_main_kb(user['role'] if user else 'user', user['status'] if user else 'busy', message.chat.type, uid)
+    )
+
+    admin_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="💬 השב לפנייה זו", callback_data=f"adm_reply_ticket_{ticket_id}"),
+            InlineKeyboardButton(text="✅ סמן כטופל", callback_data=f"adm_close_ticket_{ticket_id}")
+        ]
+    ])
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                admin_id,
+                f"📩 **פניית שירות חדשה #{ticket_id}**\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 **מאת:** {full_name} (`{uid}`)\n"
+                f"📞 **טלפון:** {phone}\n"
+                f"📌 **נושא:** {subject}\n"
+                f"📝 **תוכן הפנייה:**\n{text_body}",
+                reply_markup=admin_kb
+            )
+        except Exception:
+            pass
+
+@router.callback_query(F.data == "support_my_tickets")
+async def cb_support_my_tickets(call: CallbackQuery):
+    uid = call.from_user.id
+    if USE_POSTGRES:
+        def _get_my_t():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT * FROM deliveries_tickets WHERE user_id = %s ORDER BY ticket_id DESC LIMIT 10", (uid,))
+                return cur.fetchall()
+        rows = await run_in_thread(_get_my_t)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            rows = await (await db.execute("SELECT * FROM deliveries_tickets WHERE user_id = ? ORDER BY ticket_id DESC LIMIT 10", (uid,))).fetchall()
+
+    if not rows:
+        return await call.answer("אין לך פניות קודמות במערכת.", show_alert=True)
+
+    txt = "📂 **היסטוריית הפניות שלך להנהלה:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    for r in rows:
+        t = dict(r)
+        st_lbl = "🟢 נענתה / טופלה" if t.get('status') == 'resolved' else ("❌ נדחתה" if t.get('status') == 'rejected' else "⏳ ממתינה למענה")
+        txt += f"• **פנייה #{t['ticket_id']}** ({st_lbl})\n  📌 {t.get('subject')}: \"{t.get('message')}\"\n"
+        if t.get('admin_reply'):
+            txt += f"  💬 **תשובת הנהלה:** {t['admin_reply']}\n"
+        txt += "\n"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ פתיחת פנייה חדשה", callback_data="support_new_ticket")],
+        [InlineKeyboardButton(text="🔙 חזרה למרכז השירות", callback_data="support_hub_back")]
+    ])
+    try:
+        await call.message.edit_text(txt, reply_markup=kb)
+    except Exception:
+        await call.message.answer(txt, reply_markup=kb)
+    await call.answer()
+
+# =================================================================================
+# 4. בנייה מחדש של תפריטי הניהול בבוט (🛠️ פאנל מנהל מערכת ו-🏢 ניהול תחנה ועובדים)
+# =================================================================================
+def build_god_admin_menu_kb(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 דוח מצב מערכת חי (Live Status)", callback_data="god_live_report")],
+        [
+            InlineKeyboardButton(text="👥 ניהול משתמשים וחסימות", callback_data="god_users_menu"),
+            InlineKeyboardButton(text="🏢 ניהול תחנות מוניות", callback_data="god_stations_menu")
+        ],
+        [
+            InlineKeyboardButton(text="💳 חובות, חיובים וערעורים", callback_data="god_debts_menu"),
+            InlineKeyboardButton(text="📥 תיבת פניות ובקשות שחרור", callback_data="god_tickets_menu")
+        ],
+        [
+            InlineKeyboardButton(text="📢 שידור הודעה תפוצתית (Broadcast)", callback_data="god_broadcast_menu")
+        ],
+        [
+            InlineKeyboardButton(text="📱 כניסה לפאנל הניהול המלא (Mini App)", web_app=WebAppInfo(url=get_webapp_url_for_user(user_id=user_id, tab="admin")))
+        ]
+    ])
+
+def build_station_manager_menu_kb(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 קריאות התחנה הפעילות (עריכה/ביטול)", callback_data="sm_active_orders")],
+        [
+            InlineKeyboardButton(text="👨‍✈️ ניהול סדרנים ונהגי התחנה", callback_data="sm_staff_menu"),
+            InlineKeyboardButton(text="💳 חיוב וזיכוי נהג בתחנה (🍓/🍏)", callback_data="sm_charge_driver")
+        ],
+        [
+            InlineKeyboardButton(text="📈 סטטיסטיקות ומחזור תחנה", callback_data="sm_station_stats")
+        ],
+        [
+            InlineKeyboardButton(text="📱 פתיחת דשבורד תחנה (Mini App)", web_app=WebAppInfo(url=get_webapp_url_for_user(user_id=user_id, tab="station_manager")))
+        ]
+    ])
+
+@router.message(F.text == "🛠️ פאנל מנהל מערכת")
+async def show_god_admin_panel(message: Message):
+    user = await get_user(message.from_user.id)
+    if not user or (user['role'] != 'admin' and message.from_user.id not in ADMIN_IDS):
+        return await message.answer("⛔ גישה חסומה: פאנל מנהל מערכת מיועד למנהלי מערכת ראשיים בלבד.")
+
+    txt = (
+        "👑 **פאנל מנהל מערכת ראשי (God Mode Control Center)**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "ברוך הבא למרכז השליטה והבקרה העליון של המערכת.\n"
+        "כל הפעולות מסונכרנות בזמן אמת מול מסד הנתונים בענן (PostgreSQL):\n\n"
+        "• **📊 דוח מצב מערכת חי:** נהגים פנויים, קריאות פעילות, תחנות וחובות.\n"
+        "• **👥 משתמשים וחסימות:** חיפוש מהיר, חסימה/שחרור בלחיצה ושינוי תפקיד.\n"
+        "• **🏢 תחנות מוניות:** פתיחת תחנה, עדכון עמלה ושיוך מנהל תחנה.\n"
+        "• **💳 חובות וערעורים:** חיוב/זיכוי מהיר וטיפול בערעורים פתוחים.\n"
+        "• **📥 תיבת פניות:** מענה לפניות נהגים ושחרור חסימות בלחיצה."
+    )
+    await message.answer(txt, reply_markup=build_god_admin_menu_kb(message.from_user.id))
+
+@router.message(F.text == "🏢 ניהול תחנה ועובדים")
+async def show_station_manager_panel(message: Message):
+    user = await get_user(message.from_user.id)
+    if not user or user['role'] not in ['admin', 'station_manager']:
+        return await message.answer("⛔ גישה חסומה: תפריט זה מיועד למנהלי תחנות בלבד.")
+
+    station_id = user.get('station_id', 1)
+    txt = (
+        f"🏢 **מרכז ניהול תחנה ועובדים – תחנה #{station_id}**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"שליטה מלאה בקריאות התחנה, צוות הסדרנים, הנהגים והנהלת החשבונות:\n\n"
+        f"• **📋 קריאות התחנה הפעילות:** צפייה, עריכת מחיר וביטול קריאות.\n"
+        f"• **👨‍✈️ סדרנים ונהגים:** הוספה/הסרה של סדרן וצפייה בנהגי התחנה.\n"
+        f"• **💳 חיוב וזיכוי נהג:** הזנת חיוב (🍓) או זיכוי (🍏) עם התראה לנהג.\n"
+        f"• **📈 סטטיסטיקות ומחזור:** דוח הכנסות, קריאות שהושלמו ועמלות."
+    )
+    await message.answer(txt, reply_markup=build_station_manager_menu_kb(message.from_user.id))
+
+@router.callback_query(F.data == "god_back_main")
+async def cb_god_back_main(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    txt = (
+        "👑 **פאנל מנהל מערכת ראשי (God Mode Control Center)**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "בחר את הפעולה הרצויה מתוך התפריט:"
+    )
+    try:
+        await call.message.edit_text(txt, reply_markup=build_god_admin_menu_kb(call.from_user.id))
+    except Exception:
+        await call.message.answer(txt, reply_markup=build_god_admin_menu_kb(call.from_user.id))
+    await call.answer()
+
+@router.callback_query(F.data == "sm_back_main")
+async def cb_sm_back_main(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    u = await get_user(call.from_user.id)
+    st_id = u.get('station_id', 1) if u else 1
+    txt = (
+        f"🏢 **מרכז ניהול תחנה ועובדים – תחנה #{st_id}**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"בחר את הפעולה הרצויה:"
+    )
+    try:
+        await call.message.edit_text(txt, reply_markup=build_station_manager_menu_kb(call.from_user.id))
+    except Exception:
+        await call.message.answer(txt, reply_markup=build_station_manager_menu_kb(call.from_user.id))
+    await call.answer()
+
+# --- 4.1 דוח מצב מערכת חי (📊) ---
+@router.callback_query(F.data == "god_live_report")
+async def cb_god_live_report(call: CallbackQuery):
+    if USE_POSTGRES:
+        def _get_live():
+            with get_pg_cursor() as cur:
+                cur.execute("""SELECT count(*) as total_u,
+                                      count(*) FILTER (WHERE status = 'free' AND is_blocked = 0) as free_u,
+                                      count(*) FILTER (WHERE is_blocked = 1) as blocked_u,
+                                      coalesce(sum(debt_balance), 0) as total_debt
+                               FROM deliveries_users""")
+                u_stat = cur.fetchone()
+                cur.execute("""SELECT count(*) as total_o,
+                                      count(*) FILTER (WHERE status = 'open') as open_o,
+                                      count(*) FILTER (WHERE status = 'assigned') as assign_o,
+                                      count(*) FILTER (WHERE status = 'closed') as closed_o
+                               FROM deliveries_orders""")
+                o_stat = cur.fetchone()
+                cur.execute("SELECT count(*) as st_cnt FROM deliveries_stations")
+                s_stat = cur.fetchone()
+                cur.execute("SELECT count(*) as pend_app FROM deliveries_debts WHERE appeal_status = 'pending'")
+                a_stat = cur.fetchone()
+                cur.execute("SELECT count(*) as open_t FROM deliveries_tickets WHERE status = 'open'")
+                t_stat = cur.fetchone()
+                return u_stat, o_stat, s_stat, a_stat, t_stat
+        u_stat, o_stat, s_stat, a_stat, t_stat = await run_in_thread(_get_live)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            u_stat = await (await db.execute("SELECT count(*) as total_u, sum(case when status='free' and is_blocked=0 then 1 else 0 end) as free_u, sum(case when is_blocked=1 then 1 else 0 end) as blocked_u, sum(debt_balance) as total_debt FROM deliveries_users")).fetchone()
+            o_stat = await (await db.execute("SELECT count(*) as total_o, sum(case when status='open' then 1 else 0 end) as open_o, sum(case when status='assigned' then 1 else 0 end) as assign_o, sum(case when status='closed' then 1 else 0 end) as closed_o FROM deliveries_orders")).fetchone()
+            s_stat = await (await db.execute("SELECT count(*) as st_cnt FROM deliveries_stations")).fetchone()
+            a_stat = await (await db.execute("SELECT count(*) as pend_app FROM deliveries_debts WHERE appeal_status = 'pending'")).fetchone()
+            t_stat = await (await db.execute("SELECT count(*) as open_t FROM deliveries_tickets WHERE status = 'open'")).fetchone()
+
+    txt = (
+        f"📊 **דוח מצב מערכת חי (Live Telemetry)**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👥 **משתמשים ונהגים:**\n"
+        f"• סה\"כ רשומים: **{u_stat['total_u'] or 0}**\n"
+        f"• 🟢 נהגים פנויים כעת: **{u_stat['free_u'] or 0}**\n"
+        f"• 🚫 משתמשים חסומים: **{u_stat['blocked_u'] or 0}**\n\n"
+        f"🚖 **קריאות ונסיעות:**\n"
+        f"• 🟢 קריאות פתוחות כעת: **{o_stat['open_o'] or 0}**\n"
+        f"• 🔒 קריאות משוריינות בביצוע: **{o_stat['assign_o'] or 0}**\n"
+        f"• ✅ קריאות שהושלמו: **{o_stat['closed_o'] or 0}** (מתוך {o_stat['total_o'] or 0})\n\n"
+        f"🏢 **תחנות וכספים:**\n"
+        f"• תחנות פעילות: **{s_stat['st_cnt'] or 0}**\n"
+        f"• 💰 סך חובות פתוחים: **₪{float(u_stat['total_debt'] or 0):.2f}**\n"
+        f"• ⚖️ ערעורים ממתינים: **{a_stat['pend_app'] or 0}**\n"
+        f"• 📥 פניות שירות פתוחות: **{t_stat['open_t'] or 0}**"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 רענן דוח חי", callback_data="god_live_report")],
+        [InlineKeyboardButton(text="🔙 חזרה לפאנל מנהל מערכת", callback_data="god_back_main")]
+    ])
+    try:
+        await call.message.edit_text(txt, reply_markup=kb)
+    except Exception:
+        await call.message.answer(txt, reply_markup=kb)
+    await call.answer()
+
+# --- 4.2 ניהול משתמשים וחסימות (👥) ---
+@router.callback_query(F.data == "god_users_menu")
+async def cb_god_users_menu(call: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔍 חיפוש נהג / משתמש (לפי שם, טלפון או ID)", callback_data="god_search_user")],
+        [InlineKeyboardButton(text="🚫 רשימת משתמשים חסומים (שחרור מהיר)", callback_data="god_list_blocked")],
+        [InlineKeyboardButton(text="⚙️ שינוי תפקיד / תחנה בפקודה מהירה", callback_data="god_manage_users")],
+        [InlineKeyboardButton(text="🔙 חזרה לפאנל מנהל מערכת", callback_data="god_back_main")]
+    ])
+    txt = (
+        "👥 **ניהול משתמשים, הרשאות וחסימות**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "בחר פעולה לניהול משתמשי המערכת:"
+    )
+    try:
+        await call.message.edit_text(txt, reply_markup=kb)
+    except Exception:
+        await call.message.answer(txt, reply_markup=kb)
+    await call.answer()
+
+@router.callback_query(F.data == "god_search_user")
+async def cb_god_search_user(call: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminFlow.waiting_user_search)
+    await call.message.answer(
+        "🔍 **חיפוש משתמש במערכת:**\n"
+        "הקלד שם, מספר טלפון, @username או מזהה טלגרם (ID):",
+        reply_markup=cancel_kb()
+    )
+    await call.answer()
+
+async def render_admin_user_control_card(u_dict: dict):
+    uid = u_dict['user_id']
+    is_blk = int(u_dict.get('is_blocked') or 0) == 1
+    blk_badge = "🚫 **חסום כעת**" if is_blk else "✅ **פעיל**"
+    txt = (
+        f"👤 **כרטיס שליטה במשתמש: {u_dict.get('full_name')}**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🆔 **מזהה:** `{uid}` (@{u_dict.get('telegram_username') or 'ללא'})\n"
+        f"📞 **טלפון:** {u_dict.get('phone', 'לא הוזן')}\n"
+        f"🎭 **תפקיד נוכחי:** `{u_dict.get('role', 'user')}` | 🏢 **תחנה:** #{u_dict.get('station_id', 1)}\n"
+        f"🛡️ **מצב חשבון:** {blk_badge}\n"
+        f"💰 **יתרת חוב:** ₪{float(u_dict.get('debt_balance') or 0):.2f} | 🚖 **נסיעות:** {u_dict.get('total_trips', 0)}"
+    )
+    block_btn = (
+        InlineKeyboardButton(text="🔓 שחרר חסימה כעת", callback_data=f"god_u_unblock_{uid}")
+        if is_blk else
+        InlineKeyboardButton(text="🚫 חסום משתמש מיידית", callback_data=f"god_u_block_{uid}")
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [block_btn],
+        [
+            InlineKeyboardButton(text="🚗 הגדר כנהג", callback_data=f"god_u_role_{uid}_user"),
+            InlineKeyboardButton(text="📢 הגדר כסדרן", callback_data=f"god_u_role_{uid}_dispatcher"),
+            InlineKeyboardButton(text="🏢 מנהל תחנה", callback_data=f"god_u_role_{uid}_station_manager")
+        ],
+        [InlineKeyboardButton(text="🔙 חזרה לניהול משתמשים", callback_data="god_users_menu")]
+    ])
+    return txt, kb
+
+@router.message(AdminFlow.waiting_user_search)
+async def process_god_user_search(message: Message, state: FSMContext):
+    if message.text == "❌ ביטול וחזרה":
+        return await cmd_start(message, state)
+
+    q = message.text.strip().replace("@", "")
+    if USE_POSTGRES:
+        def _find():
+            with get_pg_cursor() as cur:
+                cur.execute("""SELECT * FROM deliveries_users
+                               WHERE CAST(user_id AS TEXT) = %s
+                                  OR phone LIKE %s
+                                  OR telegram_username ILIKE %s
+                                  OR full_name ILIKE %s
+                               LIMIT 5""", (q, f"%{q}%", f"%{q}%", f"%{q}%"))
+                return cur.fetchall()
+        rows = await run_in_thread(_find)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            rows = await (await db.execute("""SELECT * FROM deliveries_users
+                                              WHERE CAST(user_id AS TEXT) = ?
+                                                 OR phone LIKE ?
+                                                 OR telegram_username LIKE ?
+                                                 OR full_name LIKE ?
+                                              LIMIT 5""", (q, f"%{q}%", f"%{q}%", f"%{q}%"))).fetchall()
+
+    await state.clear()
+    if not rows:
+        return await message.answer(
+            f"❌ לא נמצאו משתמשים התואמים לחיפוש `{q}`.",
+            reply_markup=build_god_admin_menu_kb(message.from_user.id)
+        )
+
+    for r in rows:
+        txt, kb = await render_admin_user_control_card(dict(r))
+        await message.answer(txt, reply_markup=kb)
+
+@router.callback_query(F.data == "god_list_blocked")
+async def cb_god_list_blocked(call: CallbackQuery):
+    if USE_POSTGRES:
+        def _get_blk():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT * FROM deliveries_users WHERE is_blocked = 1 ORDER BY user_id DESC LIMIT 20")
+                return cur.fetchall()
+        rows = await run_in_thread(_get_blk)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            rows = await (await db.execute("SELECT * FROM deliveries_users WHERE is_blocked = 1 ORDER BY user_id DESC LIMIT 20")).fetchall()
+
+    if not rows:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 חזרה", callback_data="god_users_menu")]])
+        try:
+            await call.message.edit_text("✅ **אין כרגע משתמשים חסומים במערכת.**", reply_markup=kb)
+        except Exception:
+            await call.message.answer("✅ **אין כרגע משתמשים חסומים במערכת.**", reply_markup=kb)
+        return await call.answer()
+
+    txt = f"🚫 **רשימת משתמשים חסומים ({len(rows)}):**\nלחץ על שחרור חסימה כדי להחזיר משתמש לפעילות מיידית:"
+    kb_rows = []
+    for r in rows:
+        u = dict(r)
+        kb_rows.append([
+            InlineKeyboardButton(
+                text=f"🔓 שחרר: {u['full_name']} ({u['user_id']})",
+                callback_data=f"god_u_unblock_{u['user_id']}"
+            )
+        ])
+    kb_rows.append([InlineKeyboardButton(text="🔙 חזרה לניהול משתמשים", callback_data="god_users_menu")])
+    try:
+        await call.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+    except Exception:
+        await call.message.answer(txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+    await call.answer()
+
+@router.callback_query(F.data.startswith("god_u_block_"))
+async def cb_god_u_block(call: CallbackQuery):
+    target_uid = int(call.data.replace("god_u_block_", ""))
+    if target_uid in ADMIN_IDS:
+        return await call.answer("⛔ לא ניתן לחסום מנהל מערכת ראשי!", show_alert=True)
+
+    if USE_POSTGRES:
+        def _blk():
+            with get_pg_cursor() as cur:
+                cur.execute("UPDATE deliveries_users SET is_blocked = 1, status = 'busy' WHERE user_id = %s", (target_uid,))
+        await run_in_thread(_blk)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            await db.execute("UPDATE deliveries_users SET is_blocked = 1, status = 'busy' WHERE user_id = ?", (target_uid,))
+            await db.commit()
+
+    try:
+        await bot.send_message(target_uid, "🚫 **התראת מערכת:** חשבונך נחסם על ידי הנהלת המערכת.", reply_markup=ReplyKeyboardRemove())
+        await bot.send_message(
+            target_uid,
+            "❌ **חשבונך נחסם על ידי ההנהלה.**\nלהגשת בקשה לשחרור החסימה לחץ על הכפתור מטה:",
+            reply_markup=get_blocked_inline_kb()
+        )
+    except Exception:
+        pass
+
+    u_updated = await get_user(target_uid)
+    if u_updated:
+        txt, kb = await render_admin_user_control_card(u_updated)
+        try:
+            await call.message.edit_text(txt, reply_markup=kb)
+        except Exception:
+            pass
+    await call.answer("🚫 המשתמש נחסם ומקלדת העבודה הוסרה ממנו!", show_alert=True)
+
+@router.callback_query(F.data.startswith("god_u_unblock_"))
+async def cb_god_u_unblock(call: CallbackQuery):
+    target_uid = int(call.data.replace("god_u_unblock_", ""))
+    if USE_POSTGRES:
+        def _unblk():
+            with get_pg_cursor() as cur:
+                cur.execute("UPDATE deliveries_users SET is_blocked = 0, block_reason = NULL WHERE user_id = %s", (target_uid,))
+                cur.execute("UPDATE deliveries_tickets SET status = 'resolved' WHERE user_id = %s AND category = 'unblock_request'", (target_uid,))
+        await run_in_thread(_unblk)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            await db.execute("UPDATE deliveries_users SET is_blocked = 0, block_reason = NULL WHERE user_id = ?", (target_uid,))
+            await db.execute("UPDATE deliveries_tickets SET status = 'resolved' WHERE user_id = ? AND category = 'unblock_request'", (target_uid,))
+            await db.commit()
+
+    u_updated = await get_user(target_uid)
+    t_role = u_updated.get('role', 'user') if u_updated else 'user'
+    t_status = u_updated.get('status', 'busy') if u_updated else 'busy'
+
+    try:
+        await bot.send_message(
+            target_uid,
+            "🔓 **חשבונך שוחרר מחסימה על ידי הנהלת המערכת!**\nמקלדת העבודה שלך פעילה כעת:",
+            reply_markup=get_main_kb(t_role, t_status, "private", target_uid)
+        )
+    except Exception:
+        pass
+
+    if u_updated:
+        txt, kb = await render_admin_user_control_card(u_updated)
+        try:
+            await call.message.edit_text(txt, reply_markup=kb)
+        except Exception:
+            pass
+    await call.answer("🔓 החסימה שוחררה בהצלחה!", show_alert=True)
+
+@router.callback_query(F.data.startswith("god_u_role_"))
+async def cb_god_u_role_change(call: CallbackQuery):
+    rest = call.data.replace("god_u_role_", "")
+    parts = rest.split("_", 1)
+    target_uid = int(parts[0])
+    new_role = parts[1]
+
+    if USE_POSTGRES:
+        def _set_r():
+            with get_pg_cursor() as cur:
+                cur.execute("UPDATE deliveries_users SET role = %s, is_blocked = 0 WHERE user_id = %s", (new_role, target_uid))
+        await run_in_thread(_set_r)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            await db.execute("UPDATE deliveries_users SET role = ?, is_blocked = 0 WHERE user_id = ?", (new_role, target_uid))
+            await db.commit()
+
+    u_updated = await get_user(target_uid)
+    try:
+        await bot.send_message(
+            target_uid,
+            f"🔄 **עדכון הרשאות מערכת:**\nתפקידך במערכת עודכן ל-`{new_role}`.",
+            reply_markup=get_main_kb(new_role, u_updated.get('status', 'busy') if u_updated else 'busy', "private", target_uid)
+        )
+    except Exception:
+        pass
+
+    if u_updated:
+        txt, kb = await render_admin_user_control_card(u_updated)
+        try:
+            await call.message.edit_text(txt, reply_markup=kb)
+        except Exception:
+            pass
+    await call.answer(f"תפקיד המשתמש עודכן ל-{new_role}!", show_alert=True)
+
+# --- 4.3 ניהול תחנות מוניות (🏢) ---
+@router.callback_query(F.data == "god_stations_menu")
+async def cb_god_stations_menu(call: CallbackQuery):
+    if USE_POSTGRES:
+        def _get_st():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT * FROM deliveries_stations ORDER BY station_id ASC")
+                return cur.fetchall()
+        stations_rows = await run_in_thread(_get_st)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            stations_rows = await (await db.execute("SELECT * FROM deliveries_stations ORDER BY station_id ASC")).fetchall()
+
+    txt = "🏢 **ניהול תחנות מוניות ומשלוחים**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    if not stations_rows:
+        txt += "אין תחנות רשומות כעת.\n"
+    else:
+        for s in stations_rows:
+            st = dict(s)
+            txt += f"• **תחנה #{st['station_id']} – {st['name']}** | עמלה: `{st['commission_percent']}%`\n"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ פתיחת תחנה חדשה", callback_data="god_new_station")],
+        [InlineKeyboardButton(text="👨‍💼 שיוך מנהל לתחנה", callback_data="god_assign_station_mgr")],
+        [InlineKeyboardButton(text="🔙 חזרה לפאנל מנהל מערכת", callback_data="god_back_main")]
+    ])
+    try:
+        await call.message.edit_text(txt, reply_markup=kb)
+    except Exception:
+        await call.message.answer(txt, reply_markup=kb)
+    await call.answer()
+
+@router.callback_query(F.data == "god_assign_station_mgr")
+async def cb_god_assign_station_mgr(call: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminFlow.waiting_assign_station_mgr)
+    await call.message.answer(
+        "👨‍💼 **שיוך מנהל לתחנה:**\n"
+        "הקלד את מזהה המשתמש (או טלפון) ומספר התחנה בפורמט:\n"
+        "`[User_ID או טלפון] [מספר_תחנה]`\n\n"
+        "לדוגמה: `0501234567 2`",
+        reply_markup=cancel_kb()
+    )
+    await call.answer()
+
+@router.message(AdminFlow.waiting_assign_station_mgr)
+async def process_god_assign_station_mgr(message: Message, state: FSMContext):
+    if message.text == "❌ ביטול וחזרה":
+        return await cmd_start(message, state)
+    parts = message.text.strip().split()
+    if len(parts) < 2:
+        return await message.answer("⚠️ פורמט שגוי. הזן: `[User_ID_או_טלפון] [מספר_תחנה]`")
+    q = parts[0].replace("@", "")
+    try:
+        st_id = int(parts[1])
+    except Exception:
+        return await message.answer("⚠️ מספר תחנה חייב להיות מספר שלם.")
+
+    if USE_POSTGRES:
+        def _assign():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT * FROM deliveries_users WHERE CAST(user_id AS TEXT) = %s OR phone = %s OR telegram_username = %s LIMIT 1", (q, q, q))
+                u = cur.fetchone()
+                if not u:
+                    return None
+                cur.execute("UPDATE deliveries_users SET role = 'station_manager', station_id = %s, is_blocked = 0 WHERE user_id = %s", (st_id, u['user_id']))
+                return dict(u)
+        target = await run_in_thread(_assign)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            u_row = await (await db.execute("SELECT * FROM deliveries_users WHERE CAST(user_id AS TEXT) = ? OR phone = ? OR telegram_username = ? LIMIT 1", (q, q, q))).fetchone()
+            if not u_row:
+                target = None
+            else:
+                target = dict(u_row)
+                await db.execute("UPDATE deliveries_users SET role = 'station_manager', station_id = ?, is_blocked = 0 WHERE user_id = ?", (st_id, target['user_id']))
+                await db.commit()
+
+    await state.clear()
+    if not target:
+        return await message.answer(f"❌ לא נמצא משתמש עבור `{q}`.", reply_markup=build_god_admin_menu_kb(message.from_user.id))
+
+    try:
+        await bot.send_message(
+            target['user_id'],
+            f"👑 **ברכות! מונית למנהל תחנה #{st_id} על ידי הנהלת המערכת!**",
+            reply_markup=get_main_kb('station_manager', target.get('status', 'busy'), "private", target['user_id'])
+        )
+    except Exception:
+        pass
+
+    await message.answer(
+        f"✅ המשתמש **{target['full_name']}** (`{target['user_id']}`) מונה בהצלחה למנהל תחנה #{st_id}!",
+        reply_markup=build_god_admin_menu_kb(message.from_user.id)
+    )
+
+# --- 4.4 ניהול חובות, חיובים וזיכויים (💳) ---
+@router.callback_query(F.data == "god_debts_menu")
+async def cb_god_debts_menu(call: CallbackQuery):
+    if USE_POSTGRES:
+        def _get_app():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT * FROM deliveries_debts WHERE appeal_status = 'pending' ORDER BY debt_id DESC LIMIT 10")
+                return cur.fetchall()
+        appeals = await run_in_thread(_get_app)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            appeals = await (await db.execute("SELECT * FROM deliveries_debts WHERE appeal_status = 'pending' ORDER BY debt_id DESC LIMIT 10")).fetchall()
+
+    txt = (
+        f"💳 **ניהול חובות, חיובים (🍓), זיכויים (🍏) וערעורים**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚖️ **ערעורים פתוחים הממתינים להחלטה:** {len(appeals)}\n"
+    )
+    kb_rows = [
+        [InlineKeyboardButton(text="🍓/🍏 חיוב או זיכוי מהיר של נהג", callback_data="sm_charge_driver")],
+        [InlineKeyboardButton(text=f"⚖️ צפייה וטיפול בערעורים פתוחים ({len(appeals)})", callback_data="god_view_appeals")],
+        [InlineKeyboardButton(text="🔙 חזרה לפאנל מנהל מערכת", callback_data="god_back_main")]
+    ]
+    try:
+        await call.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+    except Exception:
+        await call.message.answer(txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+    await call.answer()
+
+@router.callback_query(F.data == "god_view_appeals")
+async def cb_god_view_appeals(call: CallbackQuery):
+    if USE_POSTGRES:
+        def _get_app():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT * FROM deliveries_debts WHERE appeal_status = 'pending' ORDER BY debt_id DESC LIMIT 10")
+                return cur.fetchall()
+        appeals = await run_in_thread(_get_app)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            appeals = await (await db.execute("SELECT * FROM deliveries_debts WHERE appeal_status = 'pending' ORDER BY debt_id DESC LIMIT 10")).fetchall()
+
+    if not appeals:
+        return await call.answer("✅ אין ערעורים פתוחים כרגע!", show_alert=True)
+
+    await call.answer()
+    for a in appeals:
+        d = dict(a)
+        drv = await get_user(d['driver_id'])
+        drv_name = drv['full_name'] if drv else f"נהג #{d['driver_id']}"
+        txt = (
+            f"⚖️ **ערעור על חיוב #{d['debt_id']}** (תחנה #{d.get('station_id', 1)})\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 **נהג:** {drv_name} (`{d['driver_id']}`)\n"
+            f"💰 **סכום:** ₪{float(d['amount']):.2f} | 📝 **סיבת חיוב:** {d.get('reason')}\n"
+            f"🗣️ **נימוק הנהג:** \"{d.get('appeal_reason') or 'ללא פירוט'}\""
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ אשר ערעור (בטל חוב)", callback_data=f"mgr_app_yes_{d['debt_id']}"),
+                InlineKeyboardButton(text="❌ דחה ערעור", callback_data=f"mgr_app_no_{d['debt_id']}")
+            ]
+        ])
+        await call.message.answer(txt, reply_markup=kb)
+
+# --- 4.5 שידור הודעה תפוצתית ממוקדת (📢 Broadcast) ---
+@router.callback_query(F.data == "god_broadcast_menu")
+async def cb_god_broadcast_menu(call: CallbackQuery):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌍 שידור לכל המשתמשים במערכת", callback_data="god_bc_target_all")],
+        [InlineKeyboardButton(text="🟢 שידור לנהגים פנויים בלבד", callback_data="god_bc_target_free")],
+        [InlineKeyboardButton(text="🏢 שידור לנהגי ועובדי תחנה ספציפית", callback_data="god_bc_target_station")],
+        [InlineKeyboardButton(text="🔙 חזרה לפאנל מנהל מערכת", callback_data="god_back_main")]
+    ])
+    txt = (
+        "📢 **מערכת שידור הודעות תפוצתיות (Targeted Broadcast)**\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "בחר את קהל היעד שאליו תישלח ההודעה:"
+    )
+    try:
+        await call.message.edit_text(txt, reply_markup=kb)
+    except Exception:
+        await call.message.answer(txt, reply_markup=kb)
+    await call.answer()
+
+@router.callback_query(F.data.startswith("god_bc_target_"))
+async def cb_god_bc_target(call: CallbackQuery, state: FSMContext):
+    target_type = call.data.replace("god_bc_target_", "")
+    await state.update_data(bc_target_type=target_type)
+    if target_type == "station":
+        await call.message.answer(
+            "🏢 **שידור לתחנה ספציפית:**\n"
+            "הקלד בשורה הראשונה את מספר התחנה ואחריו רווח ואת תוכן ההודעה.\n"
+            "לדוגמה: `1 שימו לב: עומס קריאות באזור המרכז!`",
+            reply_markup=cancel_kb()
+        )
+    else:
+        lbl = "לכל המשתמשים במערכת" if target_type == "all" else "לנהגים הפנויים בלבד (🟢)"
+        await call.message.answer(f"📢 הקלד את ההודעה שתשודר **{lbl}**:", reply_markup=cancel_kb())
+    await state.set_state(AdminFlow.waiting_broadcast)
+    await call.answer()
+
+# --- 4.6 תיבת פניות ובקשות שחרור חסימה (📥) ---
+@router.callback_query(F.data == "god_tickets_menu")
+async def cb_god_tickets_menu(call: CallbackQuery):
+    if USE_POSTGRES:
+        def _get_t():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT * FROM deliveries_tickets WHERE status = 'open' ORDER BY ticket_id DESC LIMIT 12")
+                return cur.fetchall()
+        tickets = await run_in_thread(_get_t)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            tickets = await (await db.execute("SELECT * FROM deliveries_tickets WHERE status = 'open' ORDER BY ticket_id DESC LIMIT 12")).fetchall()
+
+    if not tickets:
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 חזרה לפאנל מנהל", callback_data="god_back_main")]])
+        try:
+            await call.message.edit_text("✅ **תיבת הפניות נקייה! אין פניות או בקשות שחרור פתוחות כרגע.**", reply_markup=kb)
+        except Exception:
+            await call.message.answer("✅ **תיבת הפניות נקייה! אין פניות או בקשות שחרור פתוחות כרגע.**", reply_markup=kb)
+        return await call.answer()
+
+    await call.answer()
+    await call.message.answer(f"📥 **נמצאו {len(tickets)} פניות פתוחות בתיבת השירות:**")
+    for r in tickets:
+        t = dict(r)
+        is_unblock = t.get('category') == 'unblock_request'
+        badge = "🚨 בקשה לשחרור חסימה" if is_unblock else f"📩 {t.get('subject', 'פניית שירות')}"
+        txt = (
+            f"**פנייה #{t['ticket_id']}** • {badge}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 **מאת:** {t.get('full_name')} (`{t['user_id']}`) | 📞 {t.get('phone', '')}\n"
+            f"📝 **תוכן:** \"{t.get('message')}\""
+        )
+        btns = [
+            [
+                InlineKeyboardButton(text="💬 השב לנהג בפרטי", callback_data=f"adm_reply_ticket_{t['ticket_id']}"),
+                InlineKeyboardButton(text="✅ סמן כטופל", callback_data=f"adm_close_ticket_{t['ticket_id']}")
+            ]
+        ]
+        if is_unblock:
+            btns.insert(0, [
+                InlineKeyboardButton(text="🔓 שחרר חסימה כעת", callback_data=f"adm_unblock_now_{t['user_id']}_{t['ticket_id']}"),
+                InlineKeyboardButton(text="❌ דחה בקשה", callback_data=f"adm_reject_unblock_{t['user_id']}_{t['ticket_id']}")
+            ])
+        await call.message.answer(txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
+
+@router.callback_query(F.data.startswith("adm_reply_ticket_"))
+async def cb_adm_reply_ticket(call: CallbackQuery, state: FSMContext):
+    ticket_id = int(call.data.replace("adm_reply_ticket_", ""))
+    await state.update_data(reply_ticket_id=ticket_id)
+    await state.set_state(AdminFlow.waiting_ticket_reply)
+    await call.message.answer(
+        f"💬 **מענה לפנייה #{ticket_id}:**\n"
+        f"הקלד את התשובה שתישלח ישירות למשתמש בבוט (והפנייה תסומן כטופלה):",
+        reply_markup=cancel_kb()
+    )
+    await call.answer()
+
+@router.message(AdminFlow.waiting_ticket_reply)
+async def process_adm_ticket_reply(message: Message, state: FSMContext):
+    if message.text == "❌ ביטול וחזרה":
+        return await cmd_start(message, state)
+    reply_txt = (message.text or "").strip()
+    data = await state.get_data()
+    ticket_id = data.get("reply_ticket_id")
+
+    if USE_POSTGRES:
+        def _upd():
+            with get_pg_cursor() as cur:
+                cur.execute("UPDATE deliveries_tickets SET admin_reply = %s, status = 'resolved' WHERE ticket_id = %s RETURNING user_id, subject", (reply_txt, ticket_id))
+                return cur.fetchone()
+        t_row = await run_in_thread(_upd)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            t_row = await (await db.execute("SELECT user_id, subject FROM deliveries_tickets WHERE ticket_id = ?", (ticket_id,))).fetchone()
+            await db.execute("UPDATE deliveries_tickets SET admin_reply = ?, status = 'resolved' WHERE ticket_id = ?", (reply_txt, ticket_id))
+            await db.commit()
+
+    await state.clear()
+    if t_row:
+        try:
+            await bot.send_message(
+                int(t_row['user_id']),
+                f"📩 **התקבלה תשובה מהנהלת המערכת לפנייתך #{ticket_id}**\n"
+                f"📌 **נושא:** {t_row['subject']}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💬 **תגובת ההנהלה:**\n{reply_txt}"
+            )
+        except Exception:
+            pass
+    await message.answer(f"✅ תשובתך נשלחה למשתמש והפנייה #{ticket_id} נסגרה!", reply_markup=build_god_admin_menu_kb(message.from_user.id))
+
+@router.callback_query(F.data.startswith("adm_close_ticket_"))
+async def cb_adm_close_ticket(call: CallbackQuery):
+    ticket_id = int(call.data.replace("adm_close_ticket_", ""))
+    if USE_POSTGRES:
+        def _cls():
+            with get_pg_cursor() as cur:
+                cur.execute("UPDATE deliveries_tickets SET status = 'resolved' WHERE ticket_id = %s", (ticket_id,))
+        await run_in_thread(_cls)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            await db.execute("UPDATE deliveries_tickets SET status = 'resolved' WHERE ticket_id = ?", (ticket_id,))
+            await db.commit()
+    try:
+        await call.message.edit_text(call.message.text + "\n\n✅ **סומן כטופל.**")
+    except Exception:
+        pass
+    await call.answer("הפנייה סומנה כטופלה!")
 
 # --- פעולות מנהל תחנה (Station Manager Actions) ---
+@router.callback_query(F.data == "sm_active_orders")
+async def cb_sm_active_orders(call: CallbackQuery):
+    await call.answer()
+    await show_open_orders(call.message)
+
+@router.callback_query(F.data == "sm_staff_menu")
+async def cb_sm_staff_menu(call: CallbackQuery):
+    user = await get_user(call.from_user.id)
+    if not user or user['role'] not in ['admin', 'station_manager']:
+        return await call.answer("אין הרשאה.", show_alert=True)
+    st_id = user.get('station_id', 1)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👨‍✈️ רשימת סדרני התחנה (והסרת סדרן)", callback_data="sm_list_dispatchers")],
+        [InlineKeyboardButton(text="➕ הוספת סדרן חדש לתחנה", callback_data="sm_add_dispatcher")],
+        [InlineKeyboardButton(text="🚗 צפייה בנהגים המשויכים לתחנה", callback_data="sm_list_station_drivers")],
+        [InlineKeyboardButton(text="🔙 חזרה לניהול תחנה", callback_data="sm_back_main")]
+    ])
+    txt = (
+        f"👨‍✈️ **ניהול סדרנים ונהגים – תחנה #{st_id}**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"בחר את הפעולה הרצויה:"
+    )
+    try:
+        await call.message.edit_text(txt, reply_markup=kb)
+    except Exception:
+        await call.message.answer(txt, reply_markup=kb)
+    await call.answer()
+
 @router.callback_query(F.data == "sm_list_dispatchers")
 async def sm_list_dispatchers(call: CallbackQuery):
     user = await get_user(call.from_user.id)
-    if user['role'] not in ['admin', 'station_manager']:
+    if not user or user['role'] not in ['admin', 'station_manager']:
         return await call.answer("אין הרשאה.", show_alert=True)
     station_id = user['station_id']
 
@@ -5190,16 +7339,82 @@ async def sm_list_dispatchers(call: CallbackQuery):
                                              WHERE station_id = ? AND role IN ('dispatcher', 'station_manager')""", (station_id,))).fetchall()
     
     if not rows:
-        return await call.message.answer(f"ℹ️ אין סדרנים נוספים רשומים בתחנה #{station_id}.")
+        return await call.answer(f"אין סדרנים רשומים בתחנה #{station_id}.", show_alert=True)
     
     txt = f"👥 **צוות הסדרנים של תחנה #{station_id}:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    kb_rows = []
     for r in rows:
         r_dict = dict(r)
         u_name = f"@{r_dict['telegram_username']}" if r_dict.get('telegram_username') else "ללא יוזר"
         role_label = "מנהל תחנה" if r_dict['role'] == 'station_manager' else "סדרן"
-        txt += f"• **{r_dict['full_name']}** ({u_name})\n  טל: {r_dict.get('phone', 'אין')} | תפקיד: {role_label} | קוד: `{r_dict['user_id']}`\n"
-    
-    await call.message.answer(txt)
+        txt += f"• **{r_dict['full_name']}** ({u_name})\n  📞 {r_dict.get('phone', 'אין')} | תפקיד: {role_label} | קוד: `{r_dict['user_id']}`\n"
+        if r_dict['role'] == 'dispatcher':
+            kb_rows.append([InlineKeyboardButton(text=f"➖ הסר סדרן: {r_dict['full_name']}", callback_data=f"sm_rem_disp_{r_dict['user_id']}")])
+
+    kb_rows.append([InlineKeyboardButton(text="➕ הוסף סדרן חדש", callback_data="sm_add_dispatcher")])
+    kb_rows.append([InlineKeyboardButton(text="🔙 חזרה לניהול צוות", callback_data="sm_staff_menu")])
+    try:
+        await call.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+    except Exception:
+        await call.message.answer(txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+    await call.answer()
+
+@router.callback_query(F.data.startswith("sm_rem_disp_"))
+async def cb_sm_remove_dispatcher(call: CallbackQuery):
+    user = await get_user(call.from_user.id)
+    if not user or user['role'] not in ['admin', 'station_manager']:
+        return await call.answer("אין הרשאה.", show_alert=True)
+    target_uid = int(call.data.replace("sm_rem_disp_", ""))
+    if USE_POSTGRES:
+        def _demote():
+            with get_pg_cursor() as cur:
+                cur.execute("UPDATE deliveries_users SET role = 'user' WHERE user_id = %s", (target_uid,))
+        await run_in_thread(_demote)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            await db.execute("UPDATE deliveries_users SET role = 'user' WHERE user_id = ?", (target_uid,))
+            await db.commit()
+    try:
+        await bot.send_message(target_uid, "ℹ️ תפקיד הסדרן שלך הסתיים והועברת לתפקיד נהג במערכת.")
+    except Exception:
+        pass
+    await call.answer("הסדרן הוסר מתפקידו והוחזר להגדרת נהג.", show_alert=True)
+    await sm_list_dispatchers(call)
+
+@router.callback_query(F.data == "sm_list_station_drivers")
+async def cb_sm_list_station_drivers(call: CallbackQuery):
+    user = await get_user(call.from_user.id)
+    if not user or user['role'] not in ['admin', 'station_manager']:
+        return await call.answer("אין הרשאה.", show_alert=True)
+    st_id = user.get('station_id', 1)
+    if USE_POSTGRES:
+        def _get_drvs():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT user_id, full_name, phone, status, debt_balance, total_trips FROM deliveries_users WHERE station_id = %s AND role = 'user' ORDER BY status ASC, total_trips DESC LIMIT 25", (st_id,))
+                return cur.fetchall()
+        rows = await run_in_thread(_get_drvs)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            rows = await (await db.execute("SELECT user_id, full_name, phone, status, debt_balance, total_trips FROM deliveries_users WHERE station_id = ? AND role = 'user' ORDER BY status ASC, total_trips DESC LIMIT 25", (st_id,))).fetchall()
+
+    txt = f"🚗 **נהגים המשויכים לתחנה #{st_id} ({len(rows)}):**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    if not rows:
+        txt += "אין כרגע נהגים משויכים לתחנה זו."
+    else:
+        for r in rows:
+            d = dict(r)
+            st_dot = "🟢" if d.get('status') == 'free' else "🔴"
+            txt += f"{st_dot} **{d['full_name']}** (`{d['user_id']}`) | 📞 {d.get('phone', '')} | חוב: ₪{float(d.get('debt_balance') or 0):.0f}\n"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 חיוב / זיכוי נהג בתחנה", callback_data="sm_charge_driver")],
+        [InlineKeyboardButton(text="🔙 חזרה לניהול צוות", callback_data="sm_staff_menu")]
+    ])
+    try:
+        await call.message.edit_text(txt, reply_markup=kb)
+    except Exception:
+        await call.message.answer(txt, reply_markup=kb)
     await call.answer()
 
 @router.callback_query(F.data == "sm_add_dispatcher")
@@ -5253,14 +7468,14 @@ async def process_sm_add_disp(message: Message, state: FSMContext):
 
     await state.clear()
     if not target:
-        return await message.answer(f"❌ לא נמצא משתמש התואם ל-'{query}'. ודא שהוא נרשם במערכת תחילה.", reply_markup=get_main_kb(manager['role'], manager['status']))
+        return await message.answer(f"❌ לא נמצא משתמש התואם ל-'{query}'. ודא שהוא נרשם במערכת תחילה.", reply_markup=get_main_kb(manager['role'], manager['status'], message.chat.type, manager['user_id']))
 
     try:
-        await bot.send_message(target['user_id'], f"🎉 **ברכות! מונתה כסדרן בתחנה #{station_id}!**\nבאפשרותך לפרסם ולנהל קריאות מעתה.")
+        await bot.send_message(target['user_id'], f"🎉 **ברכות! מונית כסדרן בתחנה #{station_id}!**\nבאפשרותך לפרסם ולנהל קריאות מעתה.")
     except Exception:
         pass
 
-    await message.answer(f"✅ המשתמש **{target['full_name']}** (`{target['user_id']}`) הוגדר בהצלחה כסדרן בתחנה #{station_id}!", reply_markup=get_main_kb(manager['role'], manager['status']))
+    await message.answer(f"✅ המשתמש **{target['full_name']}** (`{target['user_id']}`) הוגדר בהצלחה כסדרן בתחנה #{station_id}!", reply_markup=get_main_kb(manager['role'], manager['status'], message.chat.type, manager['user_id']))
 
 @router.callback_query(F.data == "sm_station_stats")
 async def sm_station_stats(call: CallbackQuery):
@@ -5296,16 +7511,23 @@ async def sm_station_stats(call: CallbackQuery):
     comm = float(debt_stats['comm'] or 0) if debt_stats else 0.0
 
     stats_msg = (
-        f"📊 **סטטיסטיקות {st_name}:**\n"
+        f"📈 **דוח סטטיסטיקות ומחזור – {st_name} (#{station_id})**\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📋 **סה\"כ קריאות:** {tot_ord}\n"
-        f"🟢 קריאות פתוחות: {open_cnt}\n"
-        f"✅ קריאות שהושלמו: {closed_cnt}\n"
+        f"📋 **סה\"כ קריאות שפורסמו:** {tot_ord}\n"
+        f"🟢 **קריאות פתוחות כעת:** {open_cnt}\n"
+        f"✅ **קריאות שהושלמו בהצלחה:** {closed_cnt}\n"
         f"💰 **מחזור נסיעות שנסגרו:** ₪{rev:.2f}\n"
-        f"🍓 **עמלות שנרשמו ({comm_pct}%):** ₪{comm:.2f}\n"
+        f"🍓 **סך עמלות תחנה ({comm_pct}%):** ₪{comm:.2f}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━"
     )
-    await call.message.answer(stats_msg)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 רענן נתונים", callback_data="sm_station_stats")],
+        [InlineKeyboardButton(text="🔙 חזרה לניהול תחנה", callback_data="sm_back_main")]
+    ])
+    try:
+        await call.message.edit_text(stats_msg, reply_markup=kb)
+    except Exception:
+        await call.message.answer(stats_msg, reply_markup=kb)
     await call.answer()
 
 @router.callback_query(F.data == "sm_charge_driver")
@@ -5315,7 +7537,7 @@ async def sm_charge_driver_start(call: CallbackQuery, state: FSMContext):
         return await call.answer("אין הרשאה.", show_alert=True)
     await state.set_state(StationManagerFlow.waiting_charge_credit)
     await call.message.answer(
-        "💳 **חיוב או זיכוי נהג בתחנה:**\n\n"
+        "💳 **חיוב (🍓) או זיכוי (🍏) נהג בתחנה:**\n\n"
         "הקלד את הפרטים בפורמט:\n"
         "`[מזהה_נהג_או_טלפון] [סכום] [סיבה]`\n\n"
         "💡 **דוגמאות:**\n"
@@ -5373,7 +7595,7 @@ async def process_sm_charge_credit(message: Message, state: FSMContext):
         return await message.answer(
             f"🍏 **הנהג {driver_name} זוכה בהצלחה ב-₪{pos_amt:.2f}!**\n"
             f"הודעת זיכוי נשלחה אליו בטלגרם והחוב שלו עודכן.",
-            reply_markup=get_main_kb(manager['role'], manager['status'])
+            reply_markup=get_main_kb(manager['role'], manager['status'], message.chat.type, manager['user_id'])
         )
     else:
         if USE_POSTGRES:
@@ -5413,7 +7635,7 @@ async def process_sm_charge_credit(message: Message, state: FSMContext):
         await message.answer(
             f"🍓 **הנהג {driver_name} חויב בהצלחה ב-₪{amount:.2f}!**\n"
             f"הודעת חיוב עם אפשרות ערעור נשלחה אליו בפרטי.",
-            reply_markup=get_main_kb(manager['role'], manager['status'])
+            reply_markup=get_main_kb(manager['role'], manager['status'], message.chat.type, manager['user_id'])
         )
 
 # --- פתיחת תחנה חדשה ---
@@ -5425,12 +7647,16 @@ async def god_new_station(call: CallbackQuery, state: FSMContext):
 
 @router.message(AdminFlow.waiting_station_name)
 async def process_new_station(message: Message, state: FSMContext):
+    if message.text == "❌ ביטול וחזרה":
+        return await cmd_start(message, state)
     await state.update_data(new_station_name=message.text)
     await state.set_state(AdminFlow.waiting_station_comm)
     await message.answer("💰 מה יהיה **אחוז העמלה** של התחנה? (למשל 10.5):")
 
 @router.message(AdminFlow.waiting_station_comm)
 async def finalize_station(message: Message, state: FSMContext):
+    if message.text == "❌ ביטול וחזרה":
+        return await cmd_start(message, state)
     try: comm = float(message.text)
     except Exception: return await message.answer("⚠️ נא להזין מספר.")
     
@@ -5445,9 +7671,9 @@ async def finalize_station(message: Message, state: FSMContext):
             await db.execute('INSERT INTO deliveries_stations (name, commission_percent) VALUES (?, ?)', (data['new_station_name'], comm))
             await db.commit()
     await state.clear()
-    await message.answer(f"✅ תחנה **{data['new_station_name']}** נוצרה עם עמלה של {comm}%.", reply_markup=get_main_kb('admin', 'busy'))
+    await message.answer(f"✅ תחנה **{data['new_station_name']}** נוצרה עם עמלה של {comm}%.", reply_markup=get_main_kb('admin', 'busy', message.chat.type, message.from_user.id))
 
-# --- ניהול הרשאות (God Mode) ---
+# --- ניהול הרשאות מהיר (God Mode) ---
 @router.callback_query(F.data == "god_manage_users")
 async def god_manage_users(call: CallbackQuery, state: FSMContext):
     await state.set_state(AdminFlow.waiting_user_id_role)
@@ -5456,13 +7682,15 @@ async def god_manage_users(call: CallbackQuery, state: FSMContext):
 
 @router.message(AdminFlow.waiting_user_id_role)
 async def process_manage_users(message: Message, state: FSMContext):
+    if message.text == "❌ ביטול וחזרה":
+        return await cmd_start(message, state)
     parts = message.text.split()
     if len(parts) < 2:
         return await message.answer("⚠️ פורמט שגוי. נסה שוב (ID Role StationID).")
     
     target_id = parts[0]
     new_role = parts[1]
-    station_id = parts[2] if len(parts) > 2 else 0
+    station_id = parts[2] if len(parts) > 2 else 1
     
     is_blocked = 1 if new_role == 'blocked' else 0
     role_to_save = 'user' if new_role == 'blocked' else new_role
@@ -5480,45 +7708,81 @@ async def process_manage_users(message: Message, state: FSMContext):
             await db.commit()
         
     await state.clear()
-    await message.answer(f"✅ המשתמש {target_id} עודכן בהצלחה לתפקיד {new_role} בתחנה {station_id}.", reply_markup=get_main_kb('admin', 'busy'))
+    await message.answer(f"✅ המשתמש {target_id} עודכן בהצלחה לתפקיד {new_role} בתחנה {station_id}.", reply_markup=get_main_kb('admin', 'busy', message.chat.type, message.from_user.id))
     
     try:
-        await bot.send_message(int(target_id), f"🔄 **עדכון מערכת:**\nההרשאות שלך עודכנו על ידי ההנהלה.\nתפקיד נוכחי: {new_role}")
-    except Exception: pass
+        if is_blocked:
+            await bot.send_message(int(target_id), "🚫 **חשבונך נחסם על ידי הנהלת המערכת.**", reply_markup=ReplyKeyboardRemove())
+            await bot.send_message(int(target_id), "להגשת בקשה לשחרור חסימה לחץ כאן:", reply_markup=get_blocked_inline_kb())
+        else:
+            await bot.send_message(
+                int(target_id),
+                f"🔄 **עדכון מערכת:**\nההרשאות שלך עודכנו על ידי ההנהלה.\nתפקיד נוכחי: {role_to_save}",
+                reply_markup=get_main_kb(role_to_save, 'busy', 'private', int(target_id))
+            )
+    except Exception:
+        pass
 
-# --- שידור גלובלי (Broadcast) ---
+# --- שידור גלובלי / ממוקד (Broadcast) ---
 @router.callback_query(F.data == "god_broadcast")
 async def god_broadcast_start(call: CallbackQuery, state: FSMContext):
+    await state.update_data(bc_target_type="all")
     await state.set_state(AdminFlow.waiting_broadcast)
     await call.message.answer("📢 הקלד את ההודעה שתשודר **לכל המשתמשים במערכת** (נהגים, סדרנים ומנהלים):", reply_markup=cancel_kb())
     await call.answer()
 
 @router.message(AdminFlow.waiting_broadcast)
 async def god_broadcast_send(message: Message, state: FSMContext):
+    if message.text == "❌ ביטול וחזרה":
+        return await cmd_start(message, state)
+
+    data = await state.get_data()
+    bc_type = data.get("bc_target_type", "all")
+    text_to_send = message.text.strip()
+    target_station = None
+
+    if bc_type == "station":
+        parts = text_to_send.split(maxsplit=1)
+        if len(parts) < 2 or not parts[0].isdigit():
+            return await message.answer("⚠️ נא להזין מספר תחנה ואחריו את תוכן ההודעה (למשל: `1 הודעה חשובה`).")
+        target_station = int(parts[0])
+        text_to_send = parts[1]
+
     if USE_POSTGRES:
-        def _get_all_users():
+        def _get_target_users():
             with get_pg_cursor() as cur:
-                cur.execute("SELECT user_id FROM deliveries_users")
+                if bc_type == "free":
+                    cur.execute("SELECT user_id FROM deliveries_users WHERE status = 'free' AND is_blocked = 0")
+                elif bc_type == "station" and target_station is not None:
+                    cur.execute("SELECT user_id FROM deliveries_users WHERE station_id = %s AND is_blocked = 0", (target_station,))
+                else:
+                    cur.execute("SELECT user_id FROM deliveries_users WHERE is_blocked = 0")
                 return cur.fetchall()
-        users = await run_in_thread(_get_all_users)
+        users = await run_in_thread(_get_target_users)
     else:
         async with aiosqlite.connect(SQLITE_DB_FILE) as db:
             db.row_factory = aiosqlite.Row
-            users = await (await db.execute("SELECT user_id FROM deliveries_users")).fetchall()
-        
+            if bc_type == "free":
+                users = await (await db.execute("SELECT user_id FROM deliveries_users WHERE status = 'free' AND is_blocked = 0")).fetchall()
+            elif bc_type == "station" and target_station is not None:
+                users = await (await db.execute("SELECT user_id FROM deliveries_users WHERE station_id = ? AND is_blocked = 0", (target_station,))).fetchall()
+            else:
+                users = await (await db.execute("SELECT user_id FROM deliveries_users WHERE is_blocked = 0")).fetchall()
+
     sent = 0
     for u in users:
         uid = u['user_id'] if isinstance(u, dict) else u[0]
         try:
-            await bot.send_message(uid, f"📢 **הודעת הנהלה מיוחדת:**\n\n{message.text}")
+            await bot.send_message(uid, f"📢 **הודעת הנהלה מיוחדת:**\n━━━━━━━━━━━━━━━━━━━━━━\n{text_to_send}")
             sent += 1
-        except Exception: pass
+        except Exception:
+            pass
     await state.clear()
-    await message.answer(f"✅ ההודעה שודרה בהצלחה ל-{sent} משתמשים.", reply_markup=get_main_kb('admin', 'busy'))
+    await message.answer(f"✅ ההודעה שודרה בהצלחה ל-{sent} משתמשים.", reply_markup=get_main_kb('admin', 'busy', message.chat.type, message.from_user.id))
 
 @router.callback_query(F.data == "mgr_dummy")
 async def mgr_dummy(call: CallbackQuery):
-    await call.answer("פעולה זו מבוצעת על ידי הנהלת המערכת.", show_alert=True)
+    await call.answer("בחר פעולה מתוך תפריט הניהול.", show_alert=True)
 
 # ----------------- הרצה (Main Loop עם מניעת Conflict וטיפול במופעים כפולים) -----------------
 async def main():

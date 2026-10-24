@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { User, Station, Order, Debt, DriverCity, BotGroup, BroadcastMessage, Role, DriverBid } from '../types';
+import { User, Station, Order, Debt, DriverCity, BotGroup, BroadcastMessage, Role, DriverBid, SupportTicket } from '../types';
 import { calculateCommission } from '../utils/orderUtils';
 
 export const ADMIN_IDS = [8644923212, 552821474];
@@ -27,6 +27,7 @@ interface AppContextType {
   driverCities: DriverCity[];
   botGroups: BotGroup[];
   broadcasts: BroadcastMessage[];
+  tickets: SupportTicket[];
   switchUser: (userId: number) => void;
   registerUser: (data: {
     full_name: string;
@@ -86,6 +87,9 @@ interface AppContextType {
   updateDebt: (debtId: number, updates: { amount?: number; reason?: string; station_id?: number; status?: 'unpaid' | 'paid' | 'cancelled' }) => Promise<void>;
   deleteDebt: (debtId: number) => Promise<void>;
   sendBroadcast: (text: string) => Promise<number>;
+  createTicket: (payload: { category: SupportTicket['category']; subject: string; message: string }) => Promise<{ ok: boolean; ticket_id?: number }>;
+  replyToTicket: (ticketId: number, replyText: string, newStatus?: 'resolved' | 'rejected') => Promise<boolean>;
+  resolveTicket: (ticketId: number, action: 'unblock' | 'reject' | 'resolve') => Promise<boolean>;
   refreshAllData: () => Promise<void>;
   resetToInitialData: () => Promise<void>;
   isTelegramWebApp: boolean;
@@ -137,6 +141,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [driverCities, setDriverCities] = useState<DriverCity[]>([]);
   const [botGroups, setBotGroups] = useState<BotGroup[]>([]);
   const [broadcasts, setBroadcasts] = useState<BroadcastMessage[]>([]);
+  const [tickets, setTickets] = useState<SupportTicket[]>([]);
 
   const [isTelegramWebApp, setIsTelegramWebApp] = useState<boolean>(false);
   const [isAuthLoading, setIsAuthLoading] = useState<boolean>(true);
@@ -146,7 +151,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // מרענן את כלל נתוני המערכת מה-Backend
   const refreshAllData = useCallback(async () => {
     try {
-      const [resStations, resOrders, resDebts, resUsers, resCities] = await Promise.all([
+      const [resStations, resOrders, resDebts, resUsers, resCities, resTickets] = await Promise.all([
         fetch('/api/stations').then((r) => parseJsonSafe(r, { ok: true, stations: [] })).catch((e) => {
           console.error('🚨 [API /api/stations Fetch Error]:', e);
           return { ok: true, stations: [] };
@@ -166,6 +171,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         fetch('/api/driver/all_cities').then((r) => parseJsonSafe(r, { ok: true, cities: [] })).catch((e) => {
           console.error('🚨 [API /api/driver/all_cities Fetch Error]:', e);
           return { ok: true, cities: [] };
+        }),
+        fetch('/api/tickets').then((r) => parseJsonSafe(r, { ok: true, tickets: [] })).catch((e) => {
+          console.error('🚨 [API /api/tickets Fetch Error]:', e);
+          return { ok: true, tickets: [] };
         }),
       ]);
 
@@ -231,7 +240,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           station_id: Number(u.station_id || 1),
           rating: Number(u.rating || 5.0),
           total_trips: Number(u.total_trips || 0),
-          is_blocked: ADMIN_IDS.includes(Number(u.user_id)) ? 0 : (u.is_blocked ? 1 : 0),
+          is_blocked: ADMIN_IDS.includes(Number(u.user_id)) ? 0 : (Number(u.is_blocked) === 1 ? 1 : 0),
+          block_reason: u.block_reason || null,
           debt_balance: Number(u.debt_balance || 0),
           subscription_plan: u.subscription_plan || 'free',
         }));
@@ -244,12 +254,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           city_name: String(c.city_name),
         })));
       }
+
+      if (resTickets.ok && Array.isArray(resTickets.tickets)) {
+        setTickets(resTickets.tickets.map((t: any) => ({
+          ticket_id: Number(t.ticket_id),
+          user_id: Number(t.user_id),
+          full_name: t.full_name || `משתמש #${t.user_id}`,
+          phone: t.phone || '',
+          category: t.category || 'general',
+          subject: t.subject || 'פנייה להנהלה',
+          message: t.message || '',
+          admin_reply: t.admin_reply || null,
+          status: t.status || 'open',
+          created_at: t.created_at || new Date().toISOString(),
+        })));
+      }
     } catch (err) {
       console.error('🚨 [refreshAllData Global Error]:', err);
     }
   }, []);
 
-  // אימות מול שרת ה-API עם initData של טלגרם
+  // אימות מול שרת ה-API עם initData של טלגרם והפרדת הרשאות קשיחה (Strict RBAC)
   useEffect(() => {
     let initDataStr = '';
     let tgUser: any = null;
@@ -289,13 +314,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const data = await parseJsonSafe(res, null);
         const incomingUser = data?.user_data || data?.user;
         if (res.ok && data?.ok && incomingUser) {
-          const isServerAdmin = ADMIN_IDS.includes(Number(incomingUser.user_id)) || data.role === 'admin' || incomingUser.role === 'admin';
-          const userRole: Role = isServerAdmin
+          const verifiedUid = Number(incomingUser.user_id);
+          // אבטחת הרשאות קשיחה: הרשאת admin ניתנת אך ורק למשתמש שמופיע ב-ADMIN_IDS או שהשרת אימת כ-admin
+          const isExplicitAdmin = ADMIN_IDS.includes(verifiedUid);
+          const rawRole = incomingUser.role || data.role || 'user';
+          const userRole: Role = isExplicitAdmin
             ? 'admin'
-            : (incomingUser.role === 'admin' ? 'user' : (incomingUser.role || data.role || 'user'));
+            : rawRole === 'admin'
+            ? 'user'
+            : (['station_manager', 'dispatcher', 'user'].includes(rawRole) ? rawRole : 'user');
 
           const serverUser: User = {
-            user_id: Number(incomingUser.user_id),
+            user_id: verifiedUid,
             full_name: incomingUser.full_name || 'משתמש',
             telegram_username: incomingUser.telegram_username || tgUser?.username || '',
             phone: incomingUser.phone || '',
@@ -309,7 +339,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             station_id: Number(incomingUser.station_id || 1),
             rating: Number(incomingUser.rating || 5.0),
             total_trips: Number(incomingUser.total_trips || 0),
-            is_blocked: isServerAdmin ? 0 : (incomingUser.is_blocked ? 1 : 0),
+            is_blocked: isExplicitAdmin ? 0 : (Number(incomingUser.is_blocked) === 1 ? 1 : 0),
+            block_reason: incomingUser.block_reason || null,
             debt_balance: Number(incomingUser.debt_balance || 0.0),
             subscription_plan: incomingUser.subscription_plan || 'free',
           };
@@ -339,8 +370,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
           refreshAllData();
         } else {
-          // Fallback session for standalone / preview or offline bot server
-          const fallbackUid = payloadUserId || 552821474;
+          // Fallback session: לעולם לא נותן הרשאת מנהל כברירת מחדל למי שאינו ב-ADMIN_IDS!
+          const fallbackUid = payloadUserId || 100001;
           const isFallbackAdmin = ADMIN_IDS.includes(fallbackUid);
           const fallbackUser: User = {
             user_id: fallbackUid,
@@ -348,17 +379,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               ? `${tgUser.first_name} ${tgUser.last_name || ''}`.trim()
               : (isFallbackAdmin ? 'מנהל ראשי (God Mode)' : 'נהג מערכת'),
             telegram_username: tgUser?.username || (isFallbackAdmin ? 'admin' : 'driver'),
-            phone: '0501234567',
+            phone: '0500000000',
             birth_year: 1995,
             car_brand: 'טויוטה',
             car_model: 'קורולה',
             car_year: 2024,
-            car_seats: 5,
-            status: 'free',
+            car_seats: 4,
+            status: 'busy',
             role: isFallbackAdmin ? 'admin' : 'user',
             station_id: 1,
             rating: 5.0,
-            total_trips: 18,
+            total_trips: 0,
             is_blocked: 0,
             debt_balance: 0.0,
             subscription_plan: isFallbackAdmin ? 'vip' : 'free',
@@ -372,23 +403,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       })
       .catch((err) => {
         console.warn('⚠️ [Auth API Fallback Handled]:', err);
-        const fallbackUid = payloadUserId || 552821474;
+        // אבטחה: ברירת מחדל ב-Fallback היא נהג רגיל בלבד ('user') אלא אם ה-ID מאומת ב-ADMIN_IDS
+        const fallbackUid = payloadUserId || 100001;
         const isFallbackAdmin = ADMIN_IDS.includes(fallbackUid);
         const fallbackUser: User = {
           user_id: fallbackUid,
           full_name: isFallbackAdmin ? 'מנהל ראשי (God Mode)' : 'נהג מערכת',
           telegram_username: isFallbackAdmin ? 'admin' : 'driver',
-          phone: '0501234567',
+          phone: '0500000000',
           birth_year: 1995,
           car_brand: 'טויוטה',
           car_model: 'קורולה',
           car_year: 2024,
-          car_seats: 5,
-          status: 'free',
+          car_seats: 4,
+          status: 'busy',
           role: isFallbackAdmin ? 'admin' : 'user',
           station_id: 1,
           rating: 5.0,
-          total_trips: 18,
+          total_trips: 0,
           is_blocked: 0,
           debt_balance: 0.0,
           subscription_plan: isFallbackAdmin ? 'vip' : 'free',
@@ -1026,13 +1058,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  // User management
+  // User management (Block / Unblock / Role / Station)
   const updateUserRoleAndStation = async (
     targetId: number,
     newRole: Role | 'blocked',
     stationId: number,
     subscriptionPlan?: string
   ) => {
+    const isBlockedFlag = newRole === 'blocked' ? 1 : 0;
     try {
       await fetch('/api/users/update', {
         method: 'POST',
@@ -1040,6 +1073,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         body: JSON.stringify({
           user_id: targetId,
           role: newRole,
+          is_blocked: isBlockedFlag,
           station_id: stationId,
           subscription_plan: subscriptionPlan,
         }),
@@ -1048,11 +1082,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         prev.map((u) => {
           if (u.user_id === targetId) {
             const actualRole = newRole === 'blocked' ? u.role : newRole;
-            const isBlocked = newRole === 'blocked' ? 1 : 0;
             return {
               ...u,
               role: actualRole,
-              is_blocked: isBlocked,
+              is_blocked: isBlockedFlag,
+              status: isBlockedFlag === 1 ? 'busy' : u.status,
               station_id: stationId,
               subscription_plan: subscriptionPlan || u.subscription_plan,
             };
@@ -1064,11 +1098,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setCurrentUser((prev) => ({
           ...prev,
           role: newRole === 'blocked' ? prev.role : newRole,
-          is_blocked: newRole === 'blocked' ? 1 : 0,
+          is_blocked: isBlockedFlag,
+          status: isBlockedFlag === 1 ? 'busy' : prev.status,
           station_id: stationId,
           subscription_plan: subscriptionPlan || prev.subscription_plan,
         }));
       }
+      refreshAllData();
     } catch (err) {
       console.error('🚨 [updateUserRoleAndStation Error]:', err);
     }
@@ -1096,6 +1132,112 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  // Support & Unblock Tickets API
+  const createTicket = async (payload: {
+    category: SupportTicket['category'];
+    subject: string;
+    message: string;
+  }): Promise<{ ok: boolean; ticket_id?: number }> => {
+    try {
+      const res = await fetch('/api/tickets/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user_id: currentUser.user_id,
+          full_name: currentUser.full_name,
+          phone: currentUser.phone,
+          category: payload.category,
+          subject: payload.subject,
+          message: payload.message,
+        }),
+      });
+      const data = await parseJsonSafe(res, { ok: false });
+      const newId = data.ticket_id || Math.floor(500 + Math.random() * 500);
+      const localTicket: SupportTicket = {
+        ticket_id: newId,
+        user_id: currentUser.user_id,
+        full_name: currentUser.full_name,
+        phone: currentUser.phone,
+        category: payload.category,
+        subject: payload.subject,
+        message: payload.message,
+        admin_reply: null,
+        status: 'open',
+        created_at: new Date().toISOString(),
+      };
+      setTickets((prev) => [localTicket, ...prev]);
+      refreshAllData();
+      return { ok: true, ticket_id: newId };
+    } catch (err) {
+      console.error('🚨 [createTicket Error]:', err);
+      return { ok: false };
+    }
+  };
+
+  const replyToTicket = async (
+    ticketId: number,
+    replyText: string,
+    newStatus: 'resolved' | 'rejected' = 'resolved'
+  ): Promise<boolean> => {
+    try {
+      const res = await fetch('/api/tickets/reply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ticket_id: ticketId,
+          reply: replyText,
+          status: newStatus,
+        }),
+      });
+      const data = await parseJsonSafe(res, { ok: false });
+      setTickets((prev) =>
+        prev.map((t) =>
+          t.ticket_id === ticketId ? { ...t, admin_reply: replyText, status: newStatus } : t
+        )
+      );
+      refreshAllData();
+      return Boolean(data.ok ?? true);
+    } catch (err) {
+      console.error('🚨 [replyToTicket Error]:', err);
+      return false;
+    }
+  };
+
+  const resolveTicket = async (
+    ticketId: number,
+    action: 'unblock' | 'reject' | 'resolve'
+  ): Promise<boolean> => {
+    try {
+      const res = await fetch('/api/tickets/resolve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ticket_id: ticketId,
+          action,
+        }),
+      });
+      const data = await parseJsonSafe(res, { ok: false });
+      const targetTicket = tickets.find((t) => t.ticket_id === ticketId);
+      if (action === 'unblock' && targetTicket) {
+        setUsers((prev) =>
+          prev.map((u) => (u.user_id === targetTicket.user_id ? { ...u, is_blocked: 0 } : u))
+        );
+      }
+      setTickets((prev) =>
+        prev.map((t) =>
+          t.ticket_id === ticketId
+            ? { ...t, status: action === 'reject' ? 'rejected' : 'resolved' }
+            : t
+        )
+      );
+      refreshAllData();
+      return Boolean(data.ok ?? true);
+    } catch (err) {
+      console.error('🚨 [resolveTicket Error]:', err);
+      return false;
+    }
+  };
+
   return (
     <AppContext.Provider
       value={{
@@ -1107,6 +1249,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         driverCities,
         botGroups,
         broadcasts,
+        tickets,
         switchUser,
         registerUser,
         toggleDriverStatus,
@@ -1136,6 +1279,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateDebt,
         deleteDebt,
         sendBroadcast,
+        createTicket,
+        replyToTicket,
+        resolveTicket,
         refreshAllData,
         resetToInitialData: refreshAllData,
         isTelegramWebApp,

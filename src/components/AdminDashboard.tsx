@@ -36,6 +36,7 @@ export const AdminDashboard: React.FC = () => {
     debts,
     orders,
     broadcasts,
+    tickets,
     createStation,
     updateStation,
     updateUserRoleAndStation,
@@ -45,6 +46,8 @@ export const AdminDashboard: React.FC = () => {
     deleteDebt,
     resolveDebtAppeal,
     sendBroadcast,
+    replyToTicket,
+    resolveTicket,
     resetToInitialData,
   } = useApp();
 
@@ -58,9 +61,10 @@ export const AdminDashboard: React.FC = () => {
   }
 
 
-  const [activeTab, setActiveTab] = useState<'users' | 'system' | 'subscriptions' | 'stations' | 'appeals' | 'broadcast'>('users');
+  const [activeTab, setActiveTab] = useState<'users' | 'tickets' | 'system' | 'subscriptions' | 'stations' | 'appeals' | 'broadcast'>('users');
   const [simulationView, setSimulationView] = useState<'none' | 'dispatcher' | 'driver'>('none');
   const [searchUser, setSearchUser] = useState('');
+  const [ticketReplyInputs, setTicketReplyInputs] = useState<Record<number, string>>({});
 
   // Modals state for Stations, User Role & Station assignment, and Debts CRUD
   const [editStationModal, setEditStationModal] = useState<{
@@ -144,6 +148,7 @@ export const AdminDashboard: React.FC = () => {
   const [customAliases, setCustomAliases] = useState<Array<{ alias: string; standard: string }>>([]);
 
   const pendingAppeals = (debts || []).filter((d) => d?.appeal_status === 'pending');
+  const openTicketsCount = (tickets || []).filter((t) => t?.status === 'open').length;
   const openOrdersCount = (orders || []).filter((o) => o?.status === 'open').length;
   const activeDriversCount = (users || []).filter((u) => u?.role === 'user' && u?.status === 'free' && !u?.is_blocked).length;
   const totalDebtsSum = (users || []).reduce((sum, u) => sum + Number(u?.debt_balance || 0), 0);
@@ -361,7 +366,7 @@ export const AdminDashboard: React.FC = () => {
             <div className="bg-slate-900 border border-slate-800 rounded-2xl p-2 flex flex-wrap gap-2 shadow-sm">
               <button
                 onClick={() => setActiveTab('users')}
-                className={`flex-1 sm:flex-none py-2.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 ${
+                className={`flex-1 sm:flex-none py-2.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer ${
                   activeTab === 'users'
                     ? 'bg-amber-500 text-slate-950 shadow-md font-extrabold'
                     : 'bg-slate-950 text-slate-300 hover:text-white hover:bg-slate-800'
@@ -372,8 +377,24 @@ export const AdminDashboard: React.FC = () => {
               </button>
 
               <button
+                onClick={() => setActiveTab('tickets')}
+                className={`flex-1 sm:flex-none py-2.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 relative cursor-pointer ${
+                  activeTab === 'tickets'
+                    ? 'bg-amber-500 text-slate-950 shadow-md font-extrabold'
+                    : 'bg-slate-950 text-slate-300 hover:text-white hover:bg-slate-800'
+                }`}
+              >
+                <span>📥 פניות ובקשות שחרור</span>
+                {openTicketsCount > 0 && (
+                  <span className="bg-red-500 text-white text-[10px] px-1.5 py-0.2 rounded-full font-bold">
+                    {openTicketsCount}
+                  </span>
+                )}
+              </button>
+
+              <button
                 onClick={() => setActiveTab('system')}
-                className={`flex-1 sm:flex-none py-2.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 ${
+                className={`flex-1 sm:flex-none py-2.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer ${
                   activeTab === 'system'
                     ? 'bg-amber-500 text-slate-950 shadow-md font-extrabold'
                     : 'bg-slate-950 text-slate-300 hover:text-white hover:bg-slate-800'
@@ -385,7 +406,7 @@ export const AdminDashboard: React.FC = () => {
 
               <button
                 onClick={() => setActiveTab('subscriptions')}
-                className={`flex-1 sm:flex-none py-2.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 ${
+                className={`flex-1 sm:flex-none py-2.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer ${
                   activeTab === 'subscriptions'
                     ? 'bg-amber-500 text-slate-950 shadow-md font-extrabold'
                     : 'bg-slate-950 text-slate-300 hover:text-white hover:bg-slate-800'
@@ -397,7 +418,7 @@ export const AdminDashboard: React.FC = () => {
 
               <button
                 onClick={() => setActiveTab('stations')}
-                className={`flex-1 sm:flex-none py-2.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 ${
+                className={`flex-1 sm:flex-none py-2.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer ${
                   activeTab === 'stations'
                     ? 'bg-amber-500 text-slate-950 shadow-md font-extrabold'
                     : 'bg-slate-950 text-slate-300 hover:text-white hover:bg-slate-800'
@@ -409,7 +430,7 @@ export const AdminDashboard: React.FC = () => {
 
               <button
                 onClick={() => setActiveTab('appeals')}
-                className={`flex-1 sm:flex-none py-2.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 relative ${
+                className={`flex-1 sm:flex-none py-2.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 relative cursor-pointer ${
                   activeTab === 'appeals'
                     ? 'bg-amber-500 text-slate-950 shadow-md font-extrabold'
                     : 'bg-slate-950 text-slate-300 hover:text-white hover:bg-slate-800'
@@ -426,7 +447,7 @@ export const AdminDashboard: React.FC = () => {
 
               <button
                 onClick={() => setActiveTab('broadcast')}
-                className={`flex-1 sm:flex-none py-2.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 ${
+                className={`flex-1 sm:flex-none py-2.5 px-4 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer ${
                   activeTab === 'broadcast'
                     ? 'bg-amber-500 text-slate-950 shadow-md font-extrabold'
                     : 'bg-slate-950 text-slate-300 hover:text-white hover:bg-slate-800'
@@ -447,7 +468,7 @@ export const AdminDashboard: React.FC = () => {
                       <span>ניהול משתמשים, נהגים והרשאות God Mode</span>
                     </h3>
                     <p className="text-xs text-slate-400">
-                      שנה תפקידים, שייך עובדים לתחנות, חסום נהגים או אפס הרשאות בלחיצה
+                      שנה תפקידים, שייך עובדים לתחנות, חסום נהגים או שחרר חסימה בלחיצה (מתעדכן מיידית בבוט ובמסד הנתונים)
                     </p>
                   </div>
                   <div className="w-full sm:w-72 relative">
@@ -473,7 +494,7 @@ export const AdminDashboard: React.FC = () => {
                         <th className="py-2.5 px-3">תפקיד</th>
                         <th className="py-2.5 px-3">תחנה</th>
                         <th className="py-2.5 px-3">חוב</th>
-                        <th className="py-2.5 px-3 text-center">פעולות הרשאה</th>
+                        <th className="py-2.5 px-3 text-center">פעולות הרשאה וחסימה</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800/60">
@@ -487,9 +508,9 @@ export const AdminDashboard: React.FC = () => {
                                   ADMIN
                                 </span>
                               )}
-                              {u.is_blocked === 1 && (
+                              {Number(u.is_blocked) === 1 && (
                                 <span className="bg-red-500/20 text-red-300 border border-red-500/30 text-[10px] px-1.5 py-0.2 rounded font-bold">
-                                  חסום
+                                  🚫 חסום
                                 </span>
                               )}
                             </div>
@@ -516,12 +537,12 @@ export const AdminDashboard: React.FC = () => {
                                   setEditUserModal({
                                     isOpen: true,
                                     user: u,
-                                    role: u.role,
+                                    role: u.is_blocked ? 'blocked' : u.role,
                                     station_id: u.station_id || 1,
                                     subscription_plan: (u as any).subscription_plan || 'free',
                                   })
                                 }
-                                className="bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold text-[11px] px-2.5 py-1 rounded-md shadow transition"
+                                className="bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold text-[11px] px-2.5 py-1 rounded-md shadow transition cursor-pointer"
                               >
                                 ✏️ ערוך שיוך
                               </button>
@@ -536,7 +557,7 @@ export const AdminDashboard: React.FC = () => {
                                     subscription_plan: (u as any).subscription_plan || 'free',
                                   })
                                 }
-                                className="bg-blue-900/40 hover:bg-blue-800 text-blue-200 text-[10px] px-2 py-1 rounded-md border border-blue-700/50"
+                                className="bg-blue-900/40 hover:bg-blue-800 text-blue-200 text-[10px] px-2 py-1 rounded-md border border-blue-700/50 cursor-pointer"
                               >
                                 סדרן
                               </button>
@@ -551,25 +572,25 @@ export const AdminDashboard: React.FC = () => {
                                     subscription_plan: (u as any).subscription_plan || 'free',
                                   })
                                 }
-                                className="bg-purple-900/40 hover:bg-purple-800 text-purple-200 text-[10px] px-2 py-1 rounded-md border border-purple-700/50"
+                                className="bg-purple-900/40 hover:bg-purple-800 text-purple-200 text-[10px] px-2 py-1 rounded-md border border-purple-700/50 cursor-pointer"
                               >
                                 מנהל תחנה
                               </button>
-                              {u.is_blocked ? (
+                              {Number(u.is_blocked) === 1 ? (
                                 <button
-                                  title="שחרר חסימה"
-                                  onClick={() => updateUserRoleAndStation(u.user_id, 'user', u.station_id)}
-                                  className="bg-emerald-900/40 hover:bg-emerald-800 text-emerald-200 text-[10px] px-2 py-1 rounded-md border border-emerald-700/50"
+                                  title="שחרר חסימה והחזר מקלדת בבוט"
+                                  onClick={() => updateUserRoleAndStation(u.user_id, u.role === 'admin' ? 'admin' : 'user', u.station_id)}
+                                  className="bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-[10px] px-2.5 py-1 rounded-md shadow transition cursor-pointer"
                                 >
-                                  שחרר
+                                  🔓 שחרר חסימה
                                 </button>
                               ) : (
                                 <button
-                                  title="חסום משתמש"
+                                  title="חסום משתמש והסר מקלדת בבוט"
                                   onClick={() => updateUserRoleAndStation(u.user_id, 'blocked', u.station_id)}
-                                  className="bg-red-900/40 hover:bg-red-800 text-red-200 text-[10px] px-2 py-1 rounded-md border border-red-700/50"
+                                  className="bg-red-900/50 hover:bg-red-800 text-red-200 font-bold text-[10px] px-2.5 py-1 rounded-md border border-red-700/60 cursor-pointer"
                                 >
-                                  חסימה
+                                  🚫 חסום
                                 </button>
                               )}
                             </div>
@@ -579,6 +600,139 @@ export const AdminDashboard: React.FC = () => {
                     </tbody>
                   </table>
                 </div>
+              </div>
+            )}
+
+            {/* TAB 1.5: תיבת פניות ובקשות שחרור חסימה (Tickets & Unblock Appeals) */}
+            {activeTab === 'tickets' && (
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-sm space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-4">
+                  <div>
+                    <h3 className="font-extrabold text-base text-white flex items-center gap-2">
+                      <span>📥</span>
+                      <span>תיבת פניות נהגים ובקשות לשחרור חסימה ({tickets.length})</span>
+                    </h3>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      כל תשובה או שחרור חסימה כאן נשלחים מיידית לנהג בהודעה פרטית מהבוט בטלגרם
+                    </p>
+                  </div>
+                </div>
+
+                {tickets.length === 0 ? (
+                  <div className="text-center py-10 text-slate-500 text-xs">
+                    אין כרגע פניות או בקשות שחרור חסימה במערכת.
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {tickets.map((t) => {
+                      const isUnblock = t.category === 'unblock_request';
+                      const replyVal = ticketReplyInputs[t.ticket_id] ?? '';
+                      return (
+                        <div
+                          key={t.ticket_id}
+                          className={`p-4 rounded-2xl border space-y-3 text-xs ${
+                            isUnblock && t.status === 'open'
+                              ? 'bg-red-950/20 border-red-500/40'
+                              : 'bg-slate-950 border-slate-800'
+                          }`}
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-extrabold text-white text-sm">
+                                פנייה #{t.ticket_id}
+                              </span>
+                              <span
+                                className={`px-2.5 py-0.5 rounded-full font-bold text-[11px] ${
+                                  isUnblock
+                                    ? 'bg-red-500/20 text-red-300 border border-red-500/40'
+                                    : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                                }`}
+                              >
+                                {isUnblock ? '🚨 בקשה לשחרור חסימה' : `📩 ${t.subject}`}
+                              </span>
+                              <span className="text-slate-300 font-bold">
+                                מאת: {t.full_name} (ID: <span className="font-mono">{t.user_id}</span>)
+                              </span>
+                              {t.phone && (
+                                <span className="text-slate-400 font-mono">📞 {t.phone}</span>
+                              )}
+                            </div>
+
+                            <span
+                              className={`px-2.5 py-0.5 rounded-full font-bold text-[11px] ${
+                                t.status === 'resolved'
+                                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                  : t.status === 'rejected'
+                                  ? 'bg-red-500/20 text-red-300 border border-red-500/30'
+                                  : 'bg-sky-500/20 text-sky-300 border border-sky-500/30'
+                              }`}
+                            >
+                              {t.status === 'resolved'
+                                ? '✅ טופלה / נענתה'
+                                : t.status === 'rejected'
+                                ? '❌ נדחתה'
+                                : '⏳ ממתינה לטיפול'}
+                            </span>
+                          </div>
+
+                          <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 text-slate-200 leading-relaxed">
+                            {t.message}
+                          </div>
+
+                          {t.admin_reply && (
+                            <div className="p-3 rounded-xl bg-emerald-950/30 border border-emerald-700/40 text-emerald-200">
+                              <strong>💬 מענה שנשלח לנהג:</strong> {t.admin_reply}
+                            </div>
+                          )}
+
+                          {t.status === 'open' && (
+                            <div className="pt-2 flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                              <input
+                                type="text"
+                                placeholder="הקלד תשובה שתשלח לנהג בפרטי מהבוט..."
+                                value={replyVal}
+                                onChange={(e) =>
+                                  setTicketReplyInputs((prev) => ({
+                                    ...prev,
+                                    [t.ticket_id]: e.target.value,
+                                  }))
+                                }
+                                className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-amber-500"
+                              />
+                              <button
+                                onClick={async () => {
+                                  if (!replyVal.trim()) return;
+                                  await replyToTicket(t.ticket_id, replyVal.trim(), 'resolved');
+                                  setTicketReplyInputs((prev) => ({ ...prev, [t.ticket_id]: '' }));
+                                }}
+                                className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold transition cursor-pointer"
+                              >
+                                💬 שלח תשובה לנהג
+                              </button>
+
+                              {isUnblock && (
+                                <>
+                                  <button
+                                    onClick={() => resolveTicket(t.ticket_id, 'unblock')}
+                                    className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold transition cursor-pointer"
+                                  >
+                                    🔓 שחרר חסימה כעת
+                                  </button>
+                                  <button
+                                    onClick={() => resolveTicket(t.ticket_id, 'reject')}
+                                    className="px-3 py-2 rounded-xl bg-red-900/50 hover:bg-red-800 text-red-200 font-bold border border-red-700/60 transition cursor-pointer"
+                                  >
+                                    ❌ דחה בקשה
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             )}
 

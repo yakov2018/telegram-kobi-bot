@@ -34,6 +34,7 @@ export interface User {
   rating: number; // default 5.0
   total_trips: number;
   is_blocked: number; // 0 or 1
+  block_reason?: string | null;
   debt_balance: number; // e.g. 0.0
   sub_expiry?: string | null;
   subscription_plan?: string;
@@ -119,6 +120,19 @@ export interface BroadcastMessage {
   id: string;
   text: string;
   sender_name: string;
+  created_at: string;
+}
+
+export interface SupportTicket {
+  ticket_id: number;
+  user_id: number;
+  full_name: string;
+  phone?: string;
+  category: 'general' | 'billing' | 'bug' | 'idea' | 'unblock_request';
+  subject: string;
+  message: string;
+  admin_reply?: string | null;
+  status: 'open' | 'resolved' | 'rejected';
   created_at: string;
 }
 

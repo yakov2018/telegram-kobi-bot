@@ -7,11 +7,11 @@ import {
   Radio,
   Building,
   RotateCcw,
-  Smartphone,
-  UserPlus,
+  MessageSquare,
+  Ban,
 } from 'lucide-react';
 
-export type MainTab = 'driver' | 'dispatcher' | 'station_manager' | 'admin';
+export type MainTab = 'driver' | 'dispatcher' | 'station_manager' | 'admin' | 'support';
 
 interface HeaderProps {
   activeTab: MainTab;
@@ -23,14 +23,14 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = ({
   activeTab,
   setActiveTab,
-  onOpenRegister,
-  onOpenGuide,
 }) => {
   const { currentUser, users, stations, switchUser, refreshAllData, isTelegramWebApp } = useApp();
 
   const currentStation = (stations || []).find((s) => s.station_id === currentUser?.station_id);
+  const isBlocked = Number(currentUser?.is_blocked) === 1;
 
   const getRoleIcon = (role?: Role) => {
+    if (isBlocked) return <Ban className="w-3.5 h-3.5 text-red-400" />;
     switch (role) {
       case 'admin':
         return <Shield className="w-3.5 h-3.5 text-amber-400" />;
@@ -45,6 +45,7 @@ export const Header: React.FC<HeaderProps> = ({
   };
 
   const getRoleBadgeColor = (role?: Role) => {
+    if (isBlocked) return 'bg-red-500/15 text-red-300 border-red-500/40';
     switch (role) {
       case 'admin':
         return 'bg-amber-500/10 text-amber-300 border-amber-500/30';
@@ -58,9 +59,9 @@ export const Header: React.FC<HeaderProps> = ({
     }
   };
 
-  const isDispatcherAllowed = currentUser?.role === 'dispatcher' || currentUser?.role === 'station_manager' || currentUser?.role === 'admin';
-  const isStationManagerAllowed = currentUser?.role === 'station_manager' || currentUser?.role === 'admin';
-  const isAdminAllowed = currentUser?.role === 'admin';
+  const isDispatcherAllowed = !isBlocked && (currentUser?.role === 'dispatcher' || currentUser?.role === 'station_manager' || currentUser?.role === 'admin');
+  const isStationManagerAllowed = !isBlocked && (currentUser?.role === 'station_manager' || currentUser?.role === 'admin');
+  const isAdminAllowed = !isBlocked && currentUser?.role === 'admin';
 
   return (
     <header className="bg-slate-900 border-b border-slate-800">
@@ -97,7 +98,7 @@ export const Header: React.FC<HeaderProps> = ({
                 >
                   {(users || []).map((u) => (
                     <option key={u.user_id} value={u.user_id}>
-                      {u.full_name || `משתמש #${u.user_id}`} ({ROLE_NAMES[u.role] || u.role})
+                      {u.full_name || `משתמש #${u.user_id}`} ({u.is_blocked ? '🚫 חסום' : ROLE_NAMES[u.role] || u.role})
                     </option>
                   ))}
                 </select>
@@ -107,7 +108,9 @@ export const Header: React.FC<HeaderProps> = ({
             {/* User status badge */}
             <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-semibold ${getRoleBadgeColor(currentUser?.role)}`}>
               {getRoleIcon(currentUser?.role)}
-              <span className="truncate max-w-[110px]">{currentUser?.full_name || 'משתמש'}</span>
+              <span className="truncate max-w-[110px]">
+                {currentUser?.full_name || 'משתמש'} {isBlocked ? '(חסום)' : ''}
+              </span>
             </div>
 
             {/* Refresh button */}
@@ -128,66 +131,81 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         </div>
 
-        {/* Navigation Tabs - שורת טאבים ממוקדת לפי Role ללא חסימות z-index */}
-        <div className="mt-2.5 pt-2 border-t border-slate-800/80 flex items-center gap-1.5 overflow-x-auto scrollbar-none">
-          {/* 1. כרטיסיית הנהג - פתוחה לכל המשתמשים */}
-          <button
-            onClick={() => setActiveTab('driver')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition whitespace-nowrap cursor-pointer ${
-              activeTab === 'driver'
-                ? 'bg-amber-500 text-slate-950 shadow-sm'
-                : 'bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-800'
-            }`}
-          >
-            <Car className="w-3.5 h-3.5" />
-            <span>🚗 עמדת נהג</span>
-          </button>
-
-          {/* 2. כרטיסיית סדרן - רק לסדרן, מנהל תחנה ומנהל מערכת! */}
-          {isDispatcherAllowed && (
+        {/* Navigation Tabs - רק למשתמשים שאינם חסומים */}
+        {!isBlocked && (
+          <div className="mt-2.5 pt-2 border-t border-slate-800/80 flex items-center gap-1.5 overflow-x-auto scrollbar-none">
+            {/* 1. כרטיסיית הנהג - פתוחה לכל המשתמשים הפעילים */}
             <button
-              onClick={() => setActiveTab('dispatcher')}
+              onClick={() => setActiveTab('driver')}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition whitespace-nowrap cursor-pointer ${
-                activeTab === 'dispatcher'
-                  ? 'bg-blue-600 text-white shadow-sm'
+                activeTab === 'driver'
+                  ? 'bg-amber-500 text-slate-950 shadow-sm'
                   : 'bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-800'
               }`}
             >
-              <Radio className="w-3.5 h-3.5" />
-              <span>📢 עמדת סדרן</span>
+              <Car className="w-3.5 h-3.5" />
+              <span>🚗 עמדת נהג</span>
             </button>
-          )}
 
-          {/* 3. כרטיסיית מנהל תחנה - אך ורק למנהל תחנה ומנהל מערכת! */}
-          {isStationManagerAllowed && (
+            {/* 2. כרטיסיית סדרן - רק לסדרן, מנהל תחנה ומנהל מערכת! */}
+            {isDispatcherAllowed && (
+              <button
+                onClick={() => setActiveTab('dispatcher')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition whitespace-nowrap cursor-pointer ${
+                  activeTab === 'dispatcher'
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-800'
+                }`}
+              >
+                <Radio className="w-3.5 h-3.5" />
+                <span>📢 עמדת סדרן</span>
+              </button>
+            )}
+
+            {/* 3. כרטיסיית מנהל תחנה - אך ורק למנהל תחנה ומנהל מערכת! */}
+            {isStationManagerAllowed && (
+              <button
+                onClick={() => setActiveTab('station_manager')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition whitespace-nowrap cursor-pointer ${
+                  activeTab === 'station_manager'
+                    ? 'bg-purple-600 text-white shadow-sm'
+                    : 'bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-800'
+                }`}
+              >
+                <Building className="w-3.5 h-3.5" />
+                <span>🏢 ניהול תחנה</span>
+              </button>
+            )}
+
+            {/* 4. כרטיסיית ניהול מערכת גלובלי - אך ורק מנהל מערכת (Super Admin)! */}
+            {isAdminAllowed && (
+              <button
+                onClick={() => setActiveTab('admin')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-black transition whitespace-nowrap cursor-pointer ${
+                  activeTab === 'admin'
+                    ? 'bg-gradient-to-r from-amber-500 to-amber-600 text-slate-950 shadow-sm'
+                    : 'bg-slate-800/80 text-amber-400 hover:text-amber-300 hover:bg-slate-800'
+                }`}
+              >
+                <Shield className="w-3.5 h-3.5" />
+                <span>👑 ניהול מערכת (God Mode)</span>
+              </button>
+            )}
+
+            {/* 5. כרטיסיית שירות, מדריך למשתמש ותקנון פרטיות */}
             <button
-              onClick={() => setActiveTab('station_manager')}
+              onClick={() => setActiveTab('support')}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition whitespace-nowrap cursor-pointer ${
-                activeTab === 'station_manager'
-                  ? 'bg-purple-600 text-white shadow-sm'
+                activeTab === 'support'
+                  ? 'bg-emerald-500 text-slate-950 shadow-sm'
                   : 'bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-800'
               }`}
             >
-              <Building className="w-3.5 h-3.5" />
-              <span>🏢 ניהול תחנה</span>
+              <MessageSquare className="w-3.5 h-3.5" />
+              <span>💬 שירות, מדריך ופרטיות</span>
             </button>
-          )}
-
-          {/* 4. כרטיסיית ניהול מערכת גלובלי - אך ורק מנהל מערכת (Super Admin)! */}
-          {isAdminAllowed && (
-            <button
-              onClick={() => setActiveTab('admin')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-black transition whitespace-nowrap cursor-pointer ${
-                activeTab === 'admin'
-                  ? 'bg-gradient-to-r from-amber-500 to-amber-600 text-slate-950 shadow-sm'
-                  : 'bg-slate-800/80 text-amber-400 hover:text-amber-300 hover:bg-slate-800'
-              }`}
-            >
-              <Shield className="w-3.5 h-3.5" />
-              <span>👑 ניהול מערכת (God Mode)</span>
-            </button>
-          )}
-        </div>
+          </div>
+        )}
       </div>
     </header>
   );
