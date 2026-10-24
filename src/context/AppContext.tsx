@@ -4,6 +4,20 @@ import { calculateCommission } from '../utils/orderUtils';
 
 export const ADMIN_IDS = [8644923212, 552821474];
 
+export interface DriverStatusResult {
+  success: boolean;
+  message: string;
+  newStatus?: 'free' | 'busy';
+}
+
+export interface PublishOrderResult {
+  success: boolean;
+  orderId?: number;
+  order: Order;
+  eligibleDriversCount: number;
+  error?: string;
+}
+
 interface AppContextType {
   currentUser: User;
   users: User[];
@@ -23,22 +37,30 @@ interface AppContextType {
     car_year: number;
     car_seats: number;
   }) => User;
-  toggleDriverStatus: (userId?: number) => Promise<{ success: boolean; message: string; newStatus?: 'free' | 'busy' }>;
+  toggleDriverStatus: (userId?: number) => DriverStatusResult;
   addDriverCity: (userId: number, cityName: string) => Promise<void>;
   removeDriverCity: (userId: number, cityName: string) => Promise<void>;
   clearDriverCities: (userId: number) => Promise<void>;
   getDriverCities: (userId: number) => string[];
-  publishOrder: (payload: {
-    rawText: string;
-    price: number;
-    destinationType?: 'private' | 'groups' | 'all' | 'zone_and_groups' | 'groups_only' | 'zone_only' | 'manual';
-    requiresEta?: boolean;
-    originCity?: string;
-    destCity?: string;
-    clientPhone?: string;
-  }) => Promise<{ success: boolean; orderId?: number; eligibleDriversCount?: number; error?: string }>;
+  publishOrder: (
+    payloadOrText:
+      | string
+      | {
+          rawText?: string;
+          text?: string;
+          price?: number;
+          destinationType?: 'private' | 'groups' | 'all' | 'zone_and_groups' | 'groups_only' | 'zone_only' | 'manual';
+          requiresEta?: boolean;
+          originCity?: string;
+          destCity?: string;
+          clientPhone?: string;
+        },
+    legacyDestType?: any,
+    legacyPrice?: number
+  ) => Promise<PublishOrderResult>;
   submitOrderBid: (orderId: number, driverId: number, etaMinutes: number) => { success: boolean; message: string };
   approveDriverOrder: (orderId: number, driverId: number) => { success: boolean; debtAmount: number; clientPhone?: string; message: string };
+  denyDriverOrder: (orderId: number, driverId: number) => void;
   closeAndChargeOrder: (orderId: number, driverId: number, customCommission?: number) => { success: boolean; debtAmount: number };
   republishOrder: (orderId: number) => void;
   cancelOrder: (orderId: number) => void;
@@ -55,7 +77,7 @@ interface AppContextType {
   acknowledgeDebt: (debtId: number) => void;
   submitDebtAppeal: (debtId: number, reason: string) => boolean;
   resolveDebtAppeal: (debtId: number, approve: boolean) => Promise<boolean>;
-  createStation: (name: string, commissionPercent: number) => Promise<Station | null>;
+  createStation: (name: string, commissionPercent: number) => Station;
   updateStation: (stationId: number, name: string, commissionPercent: number) => Promise<boolean>;
   updateUserRoleAndStation: (targetId: number, newRole: Role | 'blocked', stationId: number, subscriptionPlan?: string) => Promise<void>;
   chargeDriverDebt: (driverId: number, amount: number, reason: string, stationId: number, orderId?: number) => Promise<void>;
@@ -94,7 +116,9 @@ const GUEST_USER: User = {
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [currentUser, setCurrentUser] = useState<User>(GUEST_USER);
   const [users, setUsers] = useState<User[]>([]);
-  const [stations, setStations] = useState<Station[]>([]);
+  const [stations, setStations] = useState<Station[]>([
+    { station_id: 1, name: 'תחנה ראשית', commission_percent: 10.0, is_active: true }
+  ]);
   const [orders, setOrders] = useState<Order[]>([]);
   const [debts, setDebts] = useState<Debt[]>([]);
   const [driverCities, setDriverCities] = useState<DriverCity[]>([]);
@@ -132,7 +156,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }),
       ]);
 
-      if (resStations.ok && Array.isArray(resStations.stations)) {
+      if (resStations.ok && Array.isArray(resStations.stations) && resStations.stations.length > 0) {
         setStations(resStations.stations.map((s: any) => ({
           station_id: Number(s.station_id),
           name: s.name,
@@ -281,7 +305,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setIsAuthenticated(true);
           setAuthError(null);
 
-          if (data.stations && Array.isArray(data.stations)) {
+          if (data.stations && Array.isArray(data.stations) && data.stations.length > 0) {
             setStations(data.stations.map((s: any) => ({
               station_id: Number(s.station_id),
               name: s.name,
@@ -300,7 +324,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             ]);
           }
 
-          // מרעננים את שאר הנתונים
           refreshAllData();
         } else {
           setIsAuthenticated(false);
@@ -314,7 +337,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       })
       .finally(() => {
         setIsAuthLoading(false);
-        // שחרור האפליקציה בטלגרם רק לאחר סיום כל הטעינות והרינדור!
         try {
           const tgObj = (window as any).Telegram?.WebApp;
           if (tgObj) {
@@ -380,38 +402,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  // Toggle driver status
-  const toggleDriverStatus = async (userId?: number) => {
+  // Toggle driver status (synchronous UI response + background server sync)
+  const toggleDriverStatus = (userId?: number): DriverStatusResult => {
     const targetId = userId ?? currentUser.user_id;
     const targetUser = users.find((u) => u.user_id === targetId) || currentUser;
-    const newStatus = targetUser.status === 'free' ? 'busy' : 'free';
+    const newStatus: 'free' | 'busy' = targetUser.status === 'free' ? 'busy' : 'free';
 
     if (newStatus === 'free' && Number(targetUser.debt_balance || 0) > 500) {
       return { success: false, message: '🚫 חשבונך מוקפא עקב חוב מעל 500 ש"ח! הסדר חוב מול התחנה.' };
     }
 
-    try {
-      const res = await fetch('/api/driver/status', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_id: targetId, status: newStatus }),
-      });
-      const data = await res.json();
-      if (data.ok) {
-        setCurrentUser((prev) => (prev.user_id === targetId ? { ...prev, status: newStatus } : prev));
-        setUsers((prev) => prev.map((u) => (u.user_id === targetId ? { ...u, status: newStatus } : u)));
-        return {
-          success: true,
-          newStatus,
-          message: newStatus === 'free' ? '🟢 סטטוס עודכן ל-פנוי לקריאות' : '🔴 סטטוס עודכן ל-תפוס (עצור קריאות)',
-        };
-      } else {
-        return { success: false, message: data.error || 'שגיאה בעדכון סטטוס' };
-      }
-    } catch (err) {
-      console.error('🚨 [toggleDriverStatus Error]:', err);
-      return { success: false, message: 'שגיאת תקשורת עם השרת' };
-    }
+    // Update state immediately
+    setCurrentUser((prev) => (prev.user_id === targetId ? { ...prev, status: newStatus } : prev));
+    setUsers((prev) => prev.map((u) => (u.user_id === targetId ? { ...u, status: newStatus } : u)));
+
+    // Sync in background
+    fetch('/api/driver/status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: targetId, status: newStatus }),
+    }).catch((err) => console.error('🚨 [toggleDriverStatus Sync Error]:', err));
+
+    return {
+      success: true,
+      newStatus,
+      message: newStatus === 'free' ? '🟢 סטטוס עודכן ל-פנוי לקריאות' : '🔴 סטטוס עודכן ל-תפוס (עצור קריאות)',
+    };
   };
 
   // Switch user (available only to admin)
@@ -456,45 +472,107 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return newUser;
   };
 
-  // Publish order with routing options
-  const publishOrder = async (payload: {
-    rawText: string;
-    price: number;
-    destinationType?: 'private' | 'groups' | 'all' | 'zone_and_groups' | 'groups_only' | 'zone_only' | 'manual';
-    requiresEta?: boolean;
-    originCity?: string;
-    destCity?: string;
-    clientPhone?: string;
-  }) => {
+  // Publish order supporting both object and positional calling signatures
+  const publishOrder = async (
+    payloadOrText:
+      | string
+      | {
+          rawText?: string;
+          text?: string;
+          price?: number;
+          destinationType?: 'private' | 'groups' | 'all' | 'zone_and_groups' | 'groups_only' | 'zone_only' | 'manual';
+          requiresEta?: boolean;
+          originCity?: string;
+          destCity?: string;
+          clientPhone?: string;
+        },
+    legacyDestType?: any,
+    legacyPrice?: number
+  ): Promise<PublishOrderResult> => {
+    let rawText = '';
+    let price = 0;
+    let destinationType = 'all';
+    let requiresEta = false;
+    let originCity = '';
+    let destCity = '';
+    let clientPhone = '';
+
+    if (typeof payloadOrText === 'string') {
+      rawText = payloadOrText;
+      destinationType = legacyDestType || 'all';
+      price = Number(legacyPrice || 0);
+    } else {
+      rawText = payloadOrText.rawText || payloadOrText.text || '';
+      price = Number(payloadOrText.price || 0);
+      destinationType = payloadOrText.destinationType || 'all';
+      requiresEta = Boolean(payloadOrText.requiresEta);
+      originCity = payloadOrText.originCity || '';
+      destCity = payloadOrText.destCity || '';
+      clientPhone = payloadOrText.clientPhone || '';
+    }
+
+    const fallbackOrder: Order = {
+      order_id: Math.floor(1000 + Math.random() * 9000),
+      text: rawText,
+      price,
+      publisher_id: currentUser.user_id,
+      station_id: currentUser.station_id || 1,
+      driver_id: null,
+      status: 'open',
+      created_at: new Date().toISOString(),
+      destination_type: destinationType as any,
+      requires_eta: requiresEta,
+      origin_city: originCity,
+      dest_city: destCity,
+      client_phone: clientPhone,
+      bids: [],
+    };
+
     try {
       const res = await fetch('/api/orders/publish', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          raw_text: payload.rawText,
-          price: payload.price,
+          raw_text: rawText,
+          price,
           publisher_id: currentUser.user_id,
           station_id: currentUser.station_id || 1,
-          destination_type: payload.destinationType || 'all',
-          requires_eta: payload.requiresEta ? 1 : 0,
-          origin_city: payload.originCity || '',
-          dest_city: payload.destCity || '',
-          client_phone: payload.clientPhone || '',
+          destination_type: destinationType,
+          requires_eta: requiresEta ? 1 : 0,
+          origin_city: originCity,
+          dest_city: destCity,
+          client_phone: clientPhone,
         }),
       });
       const data = await res.json();
       if (data.ok) {
+        const createdOrder: Order = {
+          ...fallbackOrder,
+          order_id: data.order_id || fallbackOrder.order_id,
+        };
+        setOrders((prev) => [createdOrder, ...prev]);
         refreshAllData();
         return {
           success: true,
-          orderId: data.order_id,
+          orderId: createdOrder.order_id,
+          order: createdOrder,
           eligibleDriversCount: data.eligible_drivers || 0,
         };
       }
-      return { success: false, error: data.error || 'שגיאה בפרסום' };
+      return {
+        success: false,
+        order: fallbackOrder,
+        eligibleDriversCount: 0,
+        error: data.error || 'שגיאה בפרסום',
+      };
     } catch (err: any) {
       console.error('🚨 [publishOrder Error]:', err);
-      return { success: false, error: 'שגיאת תקשורת עם השרת' };
+      return {
+        success: false,
+        order: fallbackOrder,
+        eligibleDriversCount: 0,
+        error: 'שגיאת תקשורת עם השרת',
+      };
     }
   };
 
@@ -567,6 +645,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   };
 
+  const denyDriverOrder = (orderId: number, driverId: number) => {
+    setOrders((prev) =>
+      prev.map((o) => {
+        if (o.order_id === orderId) {
+          return {
+            ...o,
+            bids: (o.bids || []).map((b) => (b.driver_id === driverId ? { ...b, status: 'rejected' } : b)),
+          };
+        }
+        return o;
+      })
+    );
+  };
+
   const closeAndChargeOrder = (orderId: number, driverId: number, customCommission?: number) => {
     const order = orders.find((o) => o.order_id === orderId);
     const station = stations.find((s) => s.station_id === (order?.station_id || currentUser.station_id)) || {
@@ -576,7 +668,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
     const debtAmount = customCommission !== undefined ? customCommission : calculateCommission(order?.price || 0, station.commission_percent);
 
-    // Charge debt on backend
     chargeDriverDebt(driverId, debtAmount, `עמלת נסיעה #${orderId} (${station.name})`, station.station_id, orderId);
 
     setOrders((prev) =>
@@ -611,7 +702,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const commRate = payload.commissionPercent || 10.0;
       const debtAmount = calculateCommission(payload.price, commRate);
 
-      // Create closed order on server
       const res = await fetch('/api/orders/publish', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -627,7 +717,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const data = await res.json();
       const orderId = data.order_id || Math.floor(2000 + Math.random() * 5000);
 
-      // Charge driver
       await chargeDriverDebt(payload.driverId, debtAmount, `סגירה ידנית קריאה #${orderId}`, payload.stationId, orderId);
 
       refreshAllData();
@@ -762,30 +851,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  // Station CRUD
-  const createStation = async (name: string, commissionPercent: number): Promise<Station | null> => {
-    try {
-      const res = await fetch('/api/stations/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, commission_percent: commissionPercent }),
-      });
-      const data = await res.json();
-      if (data.ok && data.station_id) {
-        const newStation: Station = {
-          station_id: data.station_id,
-          name,
-          commission_percent: commissionPercent,
-          is_active: true,
-        };
-        setStations((prev) => [...prev, newStation]);
-        return newStation;
-      }
-      return null;
-    } catch (err) {
-      console.error('🚨 [createStation Error]:', err);
-      return null;
-    }
+  // Station CRUD (returns Station synchronously for instant UI responsiveness)
+  const createStation = (name: string, commissionPercent: number): Station => {
+    const tempId = Math.floor(100 + Math.random() * 900);
+    const newStation: Station = {
+      station_id: tempId,
+      name,
+      commission_percent: commissionPercent,
+      is_active: true,
+    };
+    setStations((prev) => [...prev, newStation]);
+
+    // Send to backend in background
+    fetch('/api/stations/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, commission_percent: commissionPercent }),
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.ok && data.station_id) {
+          setStations((prev) =>
+            prev.map((s) => (s.station_id === tempId ? { ...s, station_id: data.station_id } : s))
+          );
+        }
+      })
+      .catch((err) => console.error('🚨 [createStation Server Error]:', err));
+
+    return newStation;
   };
 
   const updateStation = async (stationId: number, name: string, commissionPercent: number): Promise<boolean> => {
@@ -902,6 +995,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         publishOrder,
         submitOrderBid,
         approveDriverOrder,
+        denyDriverOrder,
         closeAndChargeOrder,
         republishOrder,
         cancelOrder,

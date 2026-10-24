@@ -2,11 +2,13 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Search, X, Check } from 'lucide-react';
 
 interface AutocompleteInputProps {
-  options: string[];
+  options?: string[];
+  suggestions?: string[];
   value: string;
   onChange: (val: string) => void;
   onSelect?: (val: string) => void;
   placeholder?: string;
+  className?: string;
   label?: string;
   icon?: React.ReactNode;
   disabled?: boolean;
@@ -14,10 +16,12 @@ interface AutocompleteInputProps {
 
 export const AutocompleteInput: React.FC<AutocompleteInputProps> = ({
   options,
+  suggestions,
   value,
   onChange,
   onSelect,
   placeholder = 'הקלד לחיפוש...',
+  className,
   label,
   icon,
   disabled = false,
@@ -25,6 +29,8 @@ export const AutocompleteInput: React.FC<AutocompleteInputProps> = ({
   const [isOpen, setIsOpen] = useState(false);
   const [query, setQuery] = useState(value);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  const items = options || suggestions || [];
 
   useEffect(() => {
     setQuery(value);
@@ -40,7 +46,7 @@ export const AutocompleteInput: React.FC<AutocompleteInputProps> = ({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  const filteredOptions = options
+  const filteredOptions = items
     .filter((opt) => opt.toLowerCase().includes((query || '').toLowerCase().trim()))
     .slice(0, 15);
 
@@ -67,9 +73,12 @@ export const AutocompleteInput: React.FC<AutocompleteInputProps> = ({
             setIsOpen(true);
           }}
           placeholder={placeholder}
-          className={`w-full bg-slate-900 border border-slate-700 text-white rounded-xl py-2.5 text-xs focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 transition ${
-            icon ? 'pr-9 pl-8' : 'px-3 pl-8'
-          }`}
+          className={
+            className ||
+            `w-full bg-slate-900 border border-slate-700 text-white rounded-xl py-2.5 text-xs focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 transition ${
+              icon ? 'pr-9 pl-8' : 'px-3 pl-8'
+            }`
+          }
         />
         {query && (
           <button
@@ -92,7 +101,7 @@ export const AutocompleteInput: React.FC<AutocompleteInputProps> = ({
               key={opt}
               type="button"
               onClick={() => handleSelect(opt)}
-              className="w-full text-right px-3.5 py-2 text-xs text-slate-200 hover:bg-slate-800 hover:text-white transition flex items-center justify-between"
+              className="w-full text-right px-3.5 py-2 text-xs text-slate-200 hover:bg-slate-800 hover:text-white transition flex items-center justify-between cursor-pointer"
             >
               <span>{opt}</span>
               {opt === query && <Check className="w-3.5 h-3.5 text-amber-400" />}
