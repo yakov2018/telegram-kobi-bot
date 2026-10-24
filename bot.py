@@ -200,6 +200,10 @@ class AdminFlow(StatesGroup):
 class DriverFlow(StatesGroup):
     waiting_new_city = State()
 
+class StationManagerFlow(StatesGroup):
+    waiting_add_disp = State()
+    waiting_charge_credit = State()
+
 # ----------------- מתאמי מסד נתונים מהירים (Connection Pooling + Non-blocking Thread) -----------------
 @contextmanager
 def get_pg_cursor():
@@ -2124,29 +2128,114 @@ async def handle_api_auth(request):
         }, status=500)
 
 async def handle_api_orders(request):
-    """החזרת רשימת קריאות פתוחות עבור ה-Mini App"""
+    """החזרת רשימת קריאות עבור ה-Mini App (כולל תמיכה בסינון לפי סטטוס ותחנה)"""
     try:
+        status_param = request.query.get("status")
+        station_param = request.query.get("station_id")
+
+        where_parts = []
+        params = []
+        if status_param and status_param != 'all':
+            where_parts.append("status = %s" if USE_POSTGRES else "status = ?")
+            params.append(status_param)
+        if station_param:
+            where_parts.append("station_id = %s" if USE_POSTGRES else "station_id = ?")
+            params.append(int(station_param))
+
+        where_clause = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+
         if USE_POSTGRES:
             def _get_orders():
                 with get_pg_cursor() as cur:
-                    cur.execute('''SELECT order_id, text, price, publisher_id, station_id, driver_id, status, created_at, origin_city, dest_city
-                                   FROM deliveries_orders
-                                   WHERE status = 'open'
-                                   ORDER BY order_id DESC LIMIT 50''')
+                    sql = f'''SELECT order_id, text, price, publisher_id, station_id, driver_id, status, created_at, origin_city, dest_city
+                              FROM deliveries_orders
+                              {where_clause}
+                              ORDER BY order_id DESC LIMIT 100'''
+                    cur.execute(sql, tuple(params))
                     return cur.fetchall()
             orders_raw = await run_in_thread(_get_orders)
         else:
             async with aiosqlite.connect(SQLITE_DB_FILE) as db:
                 db.row_factory = aiosqlite.Row
-                orders_raw = await (await db.execute('''SELECT order_id, text, price, publisher_id, station_id, driver_id, status, created_at, origin_city, dest_city
-                                                       FROM deliveries_orders
-                                                       WHERE status = 'open'
-                                                       ORDER BY order_id DESC LIMIT 50''')).fetchall()
+                sql = f'''SELECT order_id, text, price, publisher_id, station_id, driver_id, status, created_at, origin_city, dest_city
+                          FROM deliveries_orders
+                          {where_clause}
+                          ORDER BY order_id DESC LIMIT 100'''
+                orders_raw = await (await db.execute(sql, tuple(params))).fetchall()
         orders = [dict(o) for o in (orders_raw or [])]
         return cors_json_response({"ok": True, "orders": orders})
     except Exception as e:
         logging.error(f"❌ שגיאה ב-handle_api_orders: {e}")
         return cors_json_response({"ok": True, "orders": []})
+
+async def handle_api_orders_update(request):
+    """עריכת קריאה (מחיר, טקסט, סטטוס) על ידי סדרן או מנהל תחנה"""
+    try: data = await request.json()
+    except Exception: data = {}
+    order_id = data.get("order_id")
+    if not order_id:
+        return cors_json_response({"ok": False, "error": "order_id חובה"}, status=400)
+    order_id = int(order_id)
+    price = data.get("price")
+    text = data.get("text")
+    status = data.get("status")
+
+    if USE_POSTGRES:
+        def _up_ord():
+            with get_pg_cursor() as cur:
+                updates = []
+                params = []
+                if price is not None:
+                    updates.append("price = %s")
+                    params.append(float(price))
+                if text is not None:
+                    updates.append("text = %s")
+                    params.append(str(text))
+                if status is not None:
+                    updates.append("status = %s")
+                    params.append(str(status))
+                if updates:
+                    params.append(order_id)
+                    cur.execute(f"UPDATE deliveries_orders SET {', '.join(updates)} WHERE order_id = %s", tuple(params))
+        await run_in_thread(_up_ord)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            updates = []
+            params = []
+            if price is not None:
+                updates.append("price = ?")
+                params.append(float(price))
+            if text is not None:
+                updates.append("text = ?")
+                params.append(str(text))
+            if status is not None:
+                updates.append("status = ?")
+                params.append(str(status))
+            if updates:
+                params.append(order_id)
+                await db.execute(f"UPDATE deliveries_orders SET {', '.join(updates)} WHERE order_id = ?", tuple(params))
+                await db.commit()
+    return cors_json_response({"ok": True})
+
+async def handle_api_orders_delete(request):
+    """ביטול / מחיקת קריאה"""
+    try: data = await request.json()
+    except Exception: data = {}
+    order_id = data.get("order_id")
+    if not order_id:
+        return cors_json_response({"ok": False, "error": "order_id חובה"}, status=400)
+    order_id = int(order_id)
+
+    if USE_POSTGRES:
+        def _del_ord():
+            with get_pg_cursor() as cur:
+                cur.execute("UPDATE deliveries_orders SET status = 'cancelled' WHERE order_id = %s", (order_id,))
+        await run_in_thread(_del_ord)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            await db.execute("UPDATE deliveries_orders SET status = 'cancelled' WHERE order_id = ?", (order_id,))
+            await db.commit()
+    return cors_json_response({"ok": True})
 
 
 async def find_matching_drivers(cleaned_text: str, raw_text: str, origin_city: str, dest_city: str) -> list:
@@ -2642,15 +2731,23 @@ async def handle_api_debts_charge(request):
     try: data = await request.json()
     except Exception: data = {}
     driver_id = int(data.get("driver_id") or 0)
-    amount = float(data.get("amount") or 0)
+    raw_amount = float(data.get("amount") or 0)
     reason = data.get("reason") or "חיוב ידני מנהל/סדרן"
     station_id = int(data.get("station_id") or 0)
     order_id = data.get("order_id")
     order_id = int(order_id) if order_id else None
 
-    if not driver_id or amount <= 0:
+    if not driver_id or raw_amount == 0:
         return cors_json_response({"ok": False, "error": "פרמטרים לא תקינים"}, status=400)
 
+    # אם הוזן מספר שלילי - מעבירים אוטומטית לטיפול כזיכוי (🍏)
+    if raw_amount < 0:
+        credit_data = dict(data)
+        credit_data["amount"] = abs(raw_amount)
+        credit_data["reason"] = reason if reason != "חיוב ידני מנהל/סדרן" else "זיכוי נהג (🍏)"
+        return await execute_credit_flow(driver_id, abs(raw_amount), station_id, credit_data["reason"])
+
+    amount = raw_amount
     station_name = "הנהלת המערכת"
     new_debt_id = None
     if USE_POSTGRES:
@@ -2687,7 +2784,7 @@ async def handle_api_debts_charge(request):
             await db.execute("UPDATE deliveries_users SET debt_balance = debt_balance + ? WHERE user_id = ?", (amount, driver_id))
             await db.commit()
 
-    # סעיף 4ג': שליחת הודעה מיידית לפרטי של הנהג עם תות 🍓 וכפתור "ערער / בטל חיוב"
+    # שליחת הודעה מיידית לפרטי של הנהג עם תות 🍓 וכפתור "ערער / בטל חיוב"
     try:
         order_info = f"קריאה #{order_id}\n" if order_id else ""
         driver_msg = (
@@ -2705,24 +2802,16 @@ async def handle_api_debts_charge(request):
 
     return cors_json_response({"ok": True, "debt_id": new_debt_id})
 
-async def handle_api_debts_credit(request):
-    """זיכוי נהג, מחיקת חוב או אישור/דחיית ערעור"""
-    try: data = await request.json()
-    except Exception: data = {}
-    driver_id = int(data.get("driver_id") or 0)
-    amount = float(data.get("amount") or 0)
-    debt_id = data.get("debt_id")
-    station_id = int(data.get("station_id") or 1)
-    approve = data.get("approve", True)
-    reason = data.get("reason", "זיכוי מנהל")
-    if not driver_id:
-        return cors_json_response({"ok": False, "error": "driver_id חובה"}, status=400)
-    
+async def execute_credit_flow(driver_id: int, amount: float, station_id: int = 1, reason: str = "זיכוי נהג (🍏)", debt_id: int = None, approve: bool = True):
     station_name = "הנהלת המערכת"
     if USE_POSTGRES:
         def _cr():
-            nonlocal station_name
+            nonlocal station_name, station_id
             with get_pg_cursor() as cur:
+                if not station_id:
+                    cur.execute("SELECT station_id FROM deliveries_users WHERE user_id = %s", (driver_id,))
+                    u_row = cur.fetchone()
+                    station_id = u_row['station_id'] if u_row and u_row['station_id'] else 1
                 cur.execute("SELECT name FROM deliveries_stations WHERE station_id = %s", (station_id,))
                 st_row = cur.fetchone()
                 if st_row:
@@ -2740,6 +2829,9 @@ async def handle_api_debts_credit(request):
         await run_in_thread(_cr)
     else:
         async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            if not station_id:
+                u_row = await (await db.execute("SELECT station_id FROM deliveries_users WHERE user_id = ?", (driver_id,))).fetchone()
+                station_id = u_row[0] if u_row and u_row[0] else 1
             st_row = await (await db.execute("SELECT name FROM deliveries_stations WHERE station_id = ?", (station_id,))).fetchone()
             if st_row:
                 station_name = st_row[0]
@@ -2759,7 +2851,7 @@ async def handle_api_debts_credit(request):
     try:
         if debt_id:
             if approve:
-                await bot.send_message(driver_id, f"✅ **הערעור התקבל!** חוב של {amount} ש\"ח (עבור חיוב #{debt_id}) בוטל בהצלחה.")
+                await bot.send_message(driver_id, f"✅ **הערעור התקבל!** חוב של {amount} ש\"ח (עבור חיוב #{debt_id}) בוטל בהצלחה (🍏).")
             else:
                 await bot.send_message(driver_id, f"❌ **הערעור נדחה!** חיוב #{debt_id} נשאר בעינו ויש להסדירו מול התחנה.")
         else:
@@ -2768,6 +2860,22 @@ async def handle_api_debts_credit(request):
         pass
 
     return cors_json_response({"ok": True})
+
+async def handle_api_debts_credit(request):
+    """זיכוי נהג, מחיקת חוב או אישור/דחיית ערעור"""
+    try: data = await request.json()
+    except Exception: data = {}
+    driver_id = int(data.get("driver_id") or 0)
+    raw_amount = float(data.get("amount") or 0)
+    amount = abs(raw_amount)
+    debt_id = data.get("debt_id")
+    station_id = int(data.get("station_id") or 0)
+    approve = data.get("approve", True)
+    reason = data.get("reason", "זיכוי נהג (🍏)")
+    if not driver_id or (amount == 0 and not debt_id):
+        return cors_json_response({"ok": False, "error": "פרמטרים לא תקינים"}, status=400)
+
+    return await execute_credit_flow(driver_id, amount, station_id, reason, debt_id, approve)
 
 async def handle_api_debts_resolve_appeal(request):
     """טיפול בערעור מתוך פאנל ניהול תחנה ב-Mini App: אישור (זיכוי 🍏) או דחייה ❌"""
@@ -3041,6 +3149,8 @@ async def start_web_server():
     app.router.add_post("/api/auth", handle_api_auth)
     app.router.add_get("/api/orders", handle_api_orders)
     app.router.add_post("/api/orders/publish", handle_api_orders_publish)
+    app.router.add_post("/api/orders/update", handle_api_orders_update)
+    app.router.add_post("/api/orders/delete", handle_api_orders_delete)
     app.router.add_post("/api/driver/status", handle_api_driver_status)
     app.router.add_post("/api/driver/profile", handle_api_driver_profile)
     app.router.add_get("/api/driver/cities", handle_api_driver_cities_get)
@@ -4259,9 +4369,10 @@ async def handle_publish_channels(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 # ----------------- צד הנהג: הגשת בקשה והצעות (Bidding) - עמוד 4 -----------------
-@router.callback_query(F.data.startswith("bid_"))
+@router.callback_query(F.data.startswith("bid_") | F.data.startswith("take_"))
 async def handle_driver_bid_click(call: CallbackQuery, state: FSMContext):
-    order_id = int(call.data.replace("bid_", ""))
+    raw_id = call.data.replace("bid_", "").replace("take_", "")
+    order_id = int(raw_id)
 
     # בדיקת סטטוס קריאה
     order = await get_db_order(order_id)
@@ -5046,10 +5157,264 @@ async def admin_panel(message: Message):
         kb_list.append([InlineKeyboardButton(text="👥 ניהול הרשאות משתמשים", callback_data="god_manage_users")])
         kb_list.append([InlineKeyboardButton(text="📢 הודעת Broadcast גלובלית", callback_data="god_broadcast")])
     elif user['role'] == 'station_manager':
-        kb_list.append([InlineKeyboardButton(text="👥 פנה להנהלה להוספת עובדים", callback_data="mgr_dummy")])
+        kb_list.append([InlineKeyboardButton(text="📱 פתח פאנל ניהול תחנה (Mini App)", web_app=WebAppInfo(url=WEBAPP_URL))])
+        kb_list.append([InlineKeyboardButton(text="👥 סדרני התחנה שלי", callback_data="sm_list_dispatchers")])
+        kb_list.append([InlineKeyboardButton(text="➕ הוספת סדרן לתחנה", callback_data="sm_add_dispatcher")])
+        kb_list.append([InlineKeyboardButton(text="📊 סטטיסטיקות התחנה", callback_data="sm_station_stats")])
+        kb_list.append([InlineKeyboardButton(text="💳 חיוב / זיכוי נהג בתחנה", callback_data="sm_charge_driver")])
         
     kb = InlineKeyboardMarkup(inline_keyboard=kb_list)
     await message.answer("👑 **פאנל ניהול מתקדם**\nבחר את הפעולה הרצויה:", reply_markup=kb)
+
+# --- פעולות מנהל תחנה (Station Manager Actions) ---
+@router.callback_query(F.data == "sm_list_dispatchers")
+async def sm_list_dispatchers(call: CallbackQuery):
+    user = await get_user(call.from_user.id)
+    if user['role'] not in ['admin', 'station_manager']:
+        return await call.answer("אין הרשאה.", show_alert=True)
+    station_id = user['station_id']
+
+    if USE_POSTGRES:
+        def _get_disp():
+            with get_pg_cursor() as cur:
+                cur.execute("""SELECT user_id, full_name, telegram_username, phone, role, total_trips 
+                               FROM deliveries_users 
+                               WHERE station_id = %s AND role IN ('dispatcher', 'station_manager')""", (station_id,))
+                return cur.fetchall()
+        rows = await run_in_thread(_get_disp)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            rows = await (await db.execute("""SELECT user_id, full_name, telegram_username, phone, role, total_trips 
+                                             FROM deliveries_users 
+                                             WHERE station_id = ? AND role IN ('dispatcher', 'station_manager')""", (station_id,))).fetchall()
+    
+    if not rows:
+        return await call.message.answer(f"ℹ️ אין סדרנים נוספים רשומים בתחנה #{station_id}.")
+    
+    txt = f"👥 **צוות הסדרנים של תחנה #{station_id}:**\n━━━━━━━━━━━━━━━━━━━━━━\n"
+    for r in rows:
+        r_dict = dict(r)
+        u_name = f"@{r_dict['telegram_username']}" if r_dict.get('telegram_username') else "ללא יוזר"
+        role_label = "מנהל תחנה" if r_dict['role'] == 'station_manager' else "סדרן"
+        txt += f"• **{r_dict['full_name']}** ({u_name})\n  טל: {r_dict.get('phone', 'אין')} | תפקיד: {role_label} | קוד: `{r_dict['user_id']}`\n"
+    
+    await call.message.answer(txt)
+    await call.answer()
+
+@router.callback_query(F.data == "sm_add_dispatcher")
+async def sm_add_dispatcher_start(call: CallbackQuery, state: FSMContext):
+    user = await get_user(call.from_user.id)
+    if user['role'] not in ['admin', 'station_manager']:
+        return await call.answer("אין הרשאה.", show_alert=True)
+    await state.set_state(StationManagerFlow.waiting_add_disp)
+    await call.message.answer(
+        "➕ **הוספת סדרן לתחנה שלך:**\n\n"
+        "הקלד את מזהה המשתמש (User ID), טלפון או @username של המשתמש שברצונך למנות כסדרן בתחנה:",
+        reply_markup=cancel_kb()
+    )
+    await call.answer()
+
+@router.message(StationManagerFlow.waiting_add_disp)
+async def process_sm_add_disp(message: Message, state: FSMContext):
+    if message.text == "❌ ביטול וחזרה":
+        return await cmd_start(message, state)
+
+    manager = await get_user(message.from_user.id)
+    station_id = manager.get('station_id', 1)
+    query = message.text.strip().replace("@", "")
+
+    if USE_POSTGRES:
+        def _find_and_promote():
+            with get_pg_cursor() as cur:
+                cur.execute("""SELECT user_id, full_name FROM deliveries_users 
+                               WHERE telegram_username = %s OR phone = %s OR CAST(user_id AS TEXT) = %s LIMIT 1""",
+                            (query, query, query))
+                u = cur.fetchone()
+                if not u:
+                    return None
+                cur.execute("UPDATE deliveries_users SET role = 'dispatcher', station_id = %s WHERE user_id = %s",
+                            (station_id, u['user_id']))
+                return u
+        target = await run_in_thread(_find_and_promote)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            target_row = await (await db.execute("""SELECT user_id, full_name FROM deliveries_users 
+                                                   WHERE telegram_username = ? OR phone = ? OR CAST(user_id AS TEXT) = ? LIMIT 1""",
+                                                (query, query, query))).fetchone()
+            if target_row:
+                target = dict(target_row)
+                await db.execute("UPDATE deliveries_users SET role = 'dispatcher', station_id = ? WHERE user_id = ?",
+                                 (station_id, target['user_id']))
+                await db.commit()
+            else:
+                target = None
+
+    await state.clear()
+    if not target:
+        return await message.answer(f"❌ לא נמצא משתמש התואם ל-'{query}'. ודא שהוא נרשם במערכת תחילה.", reply_markup=get_main_kb(manager['role'], manager['status']))
+
+    try:
+        await bot.send_message(target['user_id'], f"🎉 **ברכות! מונתה כסדרן בתחנה #{station_id}!**\nבאפשרותך לפרסם ולנהל קריאות מעתה.")
+    except Exception:
+        pass
+
+    await message.answer(f"✅ המשתמש **{target['full_name']}** (`{target['user_id']}`) הוגדר בהצלחה כסדרן בתחנה #{station_id}!", reply_markup=get_main_kb(manager['role'], manager['status']))
+
+@router.callback_query(F.data == "sm_station_stats")
+async def sm_station_stats(call: CallbackQuery):
+    user = await get_user(call.from_user.id)
+    if user['role'] not in ['admin', 'station_manager']:
+        return await call.answer("אין הרשאה.", show_alert=True)
+    station_id = user['station_id']
+
+    if USE_POSTGRES:
+        def _get_stats():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT name, commission_percent FROM deliveries_stations WHERE station_id = %s", (station_id,))
+                st = cur.fetchone()
+                cur.execute("SELECT count(*) as total, count(*) FILTER (WHERE status = 'open') as open_cnt, count(*) FILTER (WHERE status = 'closed') as closed_cnt, coalesce(sum(price) FILTER (WHERE status = 'closed'), 0) as rev FROM deliveries_orders WHERE station_id = %s", (station_id,))
+                ord_stats = cur.fetchone()
+                cur.execute("SELECT coalesce(sum(amount) FILTER (WHERE status != 'cancelled'), 0) as comm FROM deliveries_debts WHERE station_id = %s", (station_id,))
+                debt_stats = cur.fetchone()
+                return st, ord_stats, debt_stats
+        st, ord_stats, debt_stats = await run_in_thread(_get_stats)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            st = await (await db.execute("SELECT name, commission_percent FROM deliveries_stations WHERE station_id = ?", (station_id,))).fetchone()
+            ord_stats = await (await db.execute("SELECT count(*) as total, sum(case when status='open' then 1 else 0 end) as open_cnt, sum(case when status='closed' then 1 else 0 end) as closed_cnt, sum(case when status='closed' then price else 0 end) as rev FROM deliveries_orders WHERE station_id = ?", (station_id,))).fetchone()
+            debt_stats = await (await db.execute("SELECT sum(case when status!='cancelled' then amount else 0 end) as comm FROM deliveries_debts WHERE station_id = ?", (station_id,))).fetchone()
+
+    st_name = st['name'] if st else f"תחנה #{station_id}"
+    comm_pct = st['commission_percent'] if st else 10.0
+    tot_ord = ord_stats['total'] if ord_stats else 0
+    open_cnt = ord_stats['open_cnt'] if ord_stats else 0
+    closed_cnt = ord_stats['closed_cnt'] if ord_stats else 0
+    rev = float(ord_stats['rev'] or 0) if ord_stats else 0.0
+    comm = float(debt_stats['comm'] or 0) if debt_stats else 0.0
+
+    stats_msg = (
+        f"📊 **סטטיסטיקות {st_name}:**\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📋 **סה\"כ קריאות:** {tot_ord}\n"
+        f"🟢 קריאות פתוחות: {open_cnt}\n"
+        f"✅ קריאות שהושלמו: {closed_cnt}\n"
+        f"💰 **מחזור נסיעות שנסגרו:** ₪{rev:.2f}\n"
+        f"🍓 **עמלות שנרשמו ({comm_pct}%):** ₪{comm:.2f}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━"
+    )
+    await call.message.answer(stats_msg)
+    await call.answer()
+
+@router.callback_query(F.data == "sm_charge_driver")
+async def sm_charge_driver_start(call: CallbackQuery, state: FSMContext):
+    user = await get_user(call.from_user.id)
+    if user['role'] not in ['admin', 'station_manager']:
+        return await call.answer("אין הרשאה.", show_alert=True)
+    await state.set_state(StationManagerFlow.waiting_charge_credit)
+    await call.message.answer(
+        "💳 **חיוב או זיכוי נהג בתחנה:**\n\n"
+        "הקלד את הפרטים בפורמט:\n"
+        "`[מזהה_נהג_או_טלפון] [סכום] [סיבה]`\n\n"
+        "💡 **דוגמאות:**\n"
+        "• לחיוב (🍓): `0501234567 50 עמלת נסיעה`\n"
+        "• לזיכוי (🍏): `0501234567 -50 זיכוי עקב ביטול נסיעה`\n\n"
+        "(סכום חיובי = חיוב 🍓, סכום שלילי = זיכוי 🍏)",
+        reply_markup=cancel_kb()
+    )
+    await call.answer()
+
+@router.message(StationManagerFlow.waiting_charge_credit)
+async def process_sm_charge_credit(message: Message, state: FSMContext):
+    if message.text == "❌ ביטול וחזרה":
+        return await cmd_start(message, state)
+
+    manager = await get_user(message.from_user.id)
+    station_id = manager.get('station_id', 1)
+    parts = message.text.strip().split(maxsplit=2)
+    if len(parts) < 2:
+        return await message.answer("⚠️ פורמט שגוי. הזן: `[מזהה_נהג_או_טלפון] [סכום] [סיבה]`")
+
+    target_query = parts[0].replace("@", "")
+    try:
+        amount = float(parts[1])
+    except Exception:
+        return await message.answer("⚠️ סכום חייב להיות מספר.")
+
+    reason = parts[2] if len(parts) > 2 else ("חיוב תחנה" if amount > 0 else "זיכוי תחנה (🍏)")
+
+    driver = None
+    if USE_POSTGRES:
+        def _find_d():
+            with get_pg_cursor() as cur:
+                cur.execute("SELECT * FROM deliveries_users WHERE telegram_username = %s OR phone = %s OR CAST(user_id AS TEXT) = %s LIMIT 1",
+                            (target_query, target_query, target_query))
+                return cur.fetchone()
+        driver = await run_in_thread(_find_d)
+    else:
+        async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+            db.row_factory = aiosqlite.Row
+            d_row = await (await db.execute("SELECT * FROM deliveries_users WHERE telegram_username = ? OR phone = ? OR CAST(user_id AS TEXT) = ? LIMIT 1",
+                                            (target_query, target_query, target_query))).fetchone()
+            driver = dict(d_row) if d_row else None
+
+    if not driver:
+        return await message.answer(f"❌ לא נמצא נהג התואם ל-'{target_query}'. נסה שוב או לחץ ביטול.")
+
+    driver_id = driver['user_id']
+    driver_name = driver['full_name']
+
+    if amount < 0:
+        pos_amt = abs(amount)
+        await execute_credit_flow(driver_id, pos_amt, station_id, reason)
+        await state.clear()
+        return await message.answer(
+            f"🍏 **הנהג {driver_name} זוכה בהצלחה ב-₪{pos_amt:.2f}!**\n"
+            f"הודעת זיכוי נשלחה אליו בטלגרם והחוב שלו עודכן.",
+            reply_markup=get_main_kb(manager['role'], manager['status'])
+        )
+    else:
+        if USE_POSTGRES:
+            def _ch_sync():
+                with get_pg_cursor() as cur:
+                    cur.execute("""INSERT INTO deliveries_debts (driver_id, station_id, amount, reason, status, transaction_type)
+                                   VALUES (%s, %s, %s, %s, 'unpaid', 'manual_charge') RETURNING debt_id""",
+                                (driver_id, station_id, amount, reason))
+                    d_row = cur.fetchone()
+                    cur.execute("UPDATE deliveries_users SET debt_balance = debt_balance + %s WHERE user_id = %s", (amount, driver_id))
+                    return d_row['debt_id'] if d_row else 0
+            new_debt_id = await run_in_thread(_ch_sync)
+        else:
+            async with aiosqlite.connect(SQLITE_DB_FILE) as db:
+                c = await db.execute("""INSERT INTO deliveries_debts (driver_id, station_id, amount, reason, status, transaction_type)
+                                        VALUES (?, ?, ?, ?, 'unpaid', 'manual_charge')""",
+                                     (driver_id, station_id, amount, reason))
+                new_debt_id = c.lastrowid
+                await db.execute("UPDATE deliveries_users SET debt_balance = debt_balance + ? WHERE user_id = ?", (amount, driver_id))
+                await db.commit()
+
+        try:
+            appeal_kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="⚖️ ערער / בטל חיוב", callback_data=f"appeal_{new_debt_id}")
+            ]])
+            await bot.send_message(
+                driver_id,
+                f"🍓 **חויבת בעמלה על סך ₪{amount:.2f} (🍓) בתחנה #{station_id}!**\n"
+                f"סיבה: {reason}\n\n"
+                f"באפשרותך לערער:",
+                reply_markup=appeal_kb
+            )
+        except Exception:
+            pass
+
+        await state.clear()
+        await message.answer(
+            f"🍓 **הנהג {driver_name} חויב בהצלחה ב-₪{amount:.2f}!**\n"
+            f"הודעת חיוב עם אפשרות ערעור נשלחה אליו בפרטי.",
+            reply_markup=get_main_kb(manager['role'], manager['status'])
+        )
 
 # --- פתיחת תחנה חדשה ---
 @router.callback_query(F.data == "god_new_station")

@@ -19,6 +19,7 @@ import {
   Plus,
   Trash2,
   Scale,
+  Edit3,
 } from 'lucide-react';
 
 export const StationManagerDashboard: React.FC = () => {
@@ -29,6 +30,12 @@ export const StationManagerDashboard: React.FC = () => {
     debts,
     users,
     updateUserRoleAndStation,
+    chargeDriverDebt,
+    creditDriverDebt,
+    updateDebt,
+    deleteDebt,
+    updateOrder,
+    deleteOrder,
     resolveDebtAppeal,
     refreshAllData,
   } = useApp();
@@ -42,13 +49,59 @@ export const StationManagerDashboard: React.FC = () => {
     );
   }
 
-  const [activeTab, setActiveTab] = useState<'overview' | 'dispatchers' | 'orders' | 'appeals'>('overview');
-  const [searchTerm, setSearchTerm] = useState('');
+  const [activeTab, setActiveTab] = useState<'overview' | 'dispatchers' | 'orders' | 'debts' | 'appeals'>('overview');
   const [feedback, setFeedback] = useState<string | null>(null);
 
   // New dispatcher modal state
   const [isAddDispatcherModalOpen, setIsAddDispatcherModalOpen] = useState(false);
   const [selectedUserToAdd, setSelectedUserToAdd] = useState<number | null>(null);
+
+  // Charge / Credit modal state
+  const [chargeCreditModal, setChargeCreditModal] = useState<{
+    isOpen: boolean;
+    type: 'charge' | 'credit';
+    driver_id: number;
+    amount: string;
+    reason: string;
+    order_id: string;
+  }>({
+    isOpen: false,
+    type: 'charge',
+    driver_id: 0,
+    amount: '20',
+    reason: 'עמלת נסיעה (🍓)',
+    order_id: '',
+  });
+
+  // Edit Debt modal state
+  const [editDebtModal, setEditDebtModal] = useState<{
+    isOpen: boolean;
+    debt_id: number;
+    amount: string;
+    reason: string;
+    status: 'unpaid' | 'paid' | 'cancelled';
+  }>({
+    isOpen: false,
+    debt_id: 0,
+    amount: '0',
+    reason: '',
+    status: 'unpaid',
+  });
+
+  // Edit Order modal state
+  const [editOrderModal, setEditOrderModal] = useState<{
+    isOpen: boolean;
+    order_id: number;
+    price: string;
+    text: string;
+    status: 'open' | 'assigned' | 'closed' | 'cancelled';
+  }>({
+    isOpen: false,
+    order_id: 0,
+    price: '',
+    text: '',
+    status: 'open',
+  });
 
   const myStationId = currentUser.station_id || 1;
   const currentStation = (stations || []).find((s) => s.station_id === myStationId) || {
@@ -128,7 +181,7 @@ export const StationManagerDashboard: React.FC = () => {
               </span>
             </h2>
             <p className="text-xs text-slate-400">
-              ניהול צוות סדרנים, צפייה בסטטיסטיקות התחנה וטיפול בערעורי חיובים
+              ניהול קריאות, חיובים וזיכויים 🍏, צוות סדרנים וערעורים
             </p>
           </div>
         </div>
@@ -136,7 +189,7 @@ export const StationManagerDashboard: React.FC = () => {
         <div className="flex items-center gap-2">
           <button
             onClick={() => refreshAllData()}
-            className="p-2 rounded-xl bg-slate-800 text-slate-300 hover:text-white transition flex items-center gap-1.5 text-xs font-bold"
+            className="p-2 rounded-xl bg-slate-800 text-slate-300 hover:text-white transition flex items-center gap-1.5 text-xs font-bold cursor-pointer"
           >
             <RotateCcw className="w-3.5 h-3.5" />
             <span>רענן</span>
@@ -147,7 +200,7 @@ export const StationManagerDashboard: React.FC = () => {
       {feedback && (
         <div className="bg-purple-500/15 border border-purple-500/40 text-purple-200 px-4 py-3 rounded-xl flex items-center justify-between text-xs font-semibold">
           <span>{feedback}</span>
-          <button onClick={() => setFeedback(null)} className="text-purple-400 hover:text-white">✕</button>
+          <button onClick={() => setFeedback(null)} className="text-purple-400 hover:text-white cursor-pointer">✕</button>
         </div>
       )}
 
@@ -176,6 +229,14 @@ export const StationManagerDashboard: React.FC = () => {
           }`}
         >
           📋 קריאות התחנה ({stationOrders.length})
+        </button>
+        <button
+          onClick={() => setActiveTab('debts')}
+          className={`px-3.5 py-2 rounded-xl transition cursor-pointer whitespace-nowrap flex items-center gap-1.5 ${
+            activeTab === 'debts' ? 'bg-purple-600 text-white shadow' : 'bg-slate-900 text-slate-300 hover:text-white'
+          }`}
+        >
+          <span>💳 חיובים וזיכויים ({stationDebts.length})</span>
         </button>
         <button
           onClick={() => setActiveTab('appeals')}
@@ -289,35 +350,182 @@ export const StationManagerDashboard: React.FC = () => {
         </div>
       )}
 
-      {/* Orders Tab */}
+      {/* Orders Tab: צפייה ועריכה חופשית של כל קריאות התחנה */}
       {activeTab === 'orders' && (
         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-sm space-y-4">
-          <h3 className="font-extrabold text-sm text-white">יומן קריאות של {currentStation.name}</h3>
+          <div className="flex items-center justify-between">
+            <h3 className="font-extrabold text-sm text-white">יומן קריאות של {currentStation.name} ({stationOrders.length})</h3>
+            <span className="text-xs text-slate-400">באפשרותך לערוך או לבטל כל קריאה</span>
+          </div>
+
           {stationOrders.length === 0 ? (
             <p className="text-xs text-slate-500 italic text-center py-4">אין קריאות רשומות בתחנה זו.</p>
           ) : (
-            <div className="space-y-2 max-h-96 overflow-y-auto">
-              {stationOrders.map((o) => (
-                <div key={o.order_id} className="bg-slate-950 border border-slate-800 p-3 rounded-xl text-xs space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <span className="font-bold text-amber-400">#{o.order_id}</span>
-                      <span className="font-bold text-white">₪{o.price}</span>
-                      <span className="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-300">
-                        {o.status}
-                      </span>
+            <div className="space-y-2.5 max-h-[500px] overflow-y-auto">
+              {stationOrders.map((o) => {
+                const statusColors = {
+                  open: 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30',
+                  assigned: 'bg-amber-500/10 text-amber-400 border border-amber-500/30',
+                  closed: 'bg-purple-500/10 text-purple-400 border border-purple-500/30',
+                  cancelled: 'bg-red-500/10 text-red-400 border border-red-500/30',
+                  deleted: 'bg-red-500/10 text-red-400 border border-red-500/30',
+                };
+                const statusLabels = {
+                  open: 'פתוחה לנהגים',
+                  assigned: 'משוריינת לנהג',
+                  closed: 'הושלמה ונסגרה',
+                  cancelled: 'בוטלה',
+                  deleted: 'נמחקה',
+                };
+
+                return (
+                  <div key={o.order_id} className="bg-slate-950 border border-slate-800 p-3.5 rounded-xl text-xs space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="font-black text-amber-400">#{o.order_id}</span>
+                        <span className="font-bold text-white text-sm">₪{o.price}</span>
+                        <span className={`text-[10px] px-2 py-0.5 rounded font-bold ${statusColors[o.status] || 'bg-slate-800 text-slate-300'}`}>
+                          {statusLabels[o.status] || o.status}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-slate-500">{o.created_at?.slice(0, 16)}</span>
+                        <button
+                          onClick={() => setEditOrderModal({
+                            isOpen: true,
+                            order_id: o.order_id,
+                            price: String(o.price),
+                            text: o.text,
+                            status: o.status as any,
+                          })}
+                          className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 transition cursor-pointer"
+                          title="ערוך קריאה"
+                        >
+                          <Edit3 className="w-3.5 h-3.5" />
+                        </button>
+                        {o.status !== 'cancelled' && (
+                          <button
+                            onClick={async () => {
+                              await deleteOrder(o.order_id);
+                              setFeedback(`🚫 קריאה #${o.order_id} בוטלה בהצלחה.`);
+                              setTimeout(() => setFeedback(null), 3000);
+                            }}
+                            className="p-1 rounded bg-slate-800 hover:bg-red-500/20 text-slate-400 hover:text-red-400 transition cursor-pointer"
+                            title="בטל קריאה"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
                     </div>
-                    <span className="text-[10px] text-slate-500">{o.created_at?.slice(0, 10)}</span>
+                    <p className="text-slate-300 text-[11px] whitespace-pre-wrap">{o.text}</p>
                   </div>
-                  <p className="text-slate-300 text-[11px] whitespace-pre-wrap">{o.text}</p>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
       )}
 
-      {/* Appeals Tab (סעיף 5: [בטל חיוב] / [סרב לביטול]) */}
+      {/* Debts Tab: חיובים וזיכויים של התחנה */}
+      {activeTab === 'debts' && (
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-sm space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="font-extrabold text-sm text-white flex items-center gap-2">
+                <span>💳 יומן חיובים וזיכויים 🍏 ({stationDebts.length})</span>
+              </h3>
+              <p className="text-xs text-slate-400">ניהול, עריכה, הוספת חיוב/זיכוי וביטול חובות של נהגים בתחנה</p>
+            </div>
+            <button
+              onClick={() => setChargeCreditModal({
+                isOpen: true,
+                type: 'charge',
+                driver_id: users.find((u) => u.role === 'user')?.user_id || 0,
+                amount: '20',
+                reason: 'עמלת נסיעה (🍓)',
+                order_id: '',
+              })}
+              className="px-3.5 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs transition flex items-center gap-1.5 shadow cursor-pointer"
+            >
+              <Plus className="w-4 h-4" />
+              <span>➕ חיוב / זיכוי נהג</span>
+            </button>
+          </div>
+
+          {stationDebts.length === 0 ? (
+            <p className="text-xs text-slate-500 italic text-center py-6">אין חיובים או זיכויים רשומים בתחנה זו.</p>
+          ) : (
+            <div className="space-y-2.5 max-h-[500px] overflow-y-auto">
+              {stationDebts.map((d) => {
+                const driver = users.find((u) => u.user_id === d.driver_id);
+                const isCredit = (d.amount < 0) || (d as any).transaction_type === 'manual_credit' || d.reason?.includes('זיכוי');
+
+                return (
+                  <div key={d.debt_id} className="bg-slate-950 border border-slate-800 p-3.5 rounded-xl text-xs space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-slate-400">#{d.debt_id}</span>
+                        <span className={`font-mono font-extrabold text-sm ${isCredit ? 'text-emerald-400' : 'text-amber-400'}`}>
+                          {isCredit ? '🍏 זיכוי' : '🍓 חיוב'}: ₪{Math.abs(d.amount).toFixed(2)}
+                        </span>
+                        <span className={`text-[10px] px-2 py-0.5 rounded font-bold ${
+                          d.status === 'paid' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30' :
+                          d.status === 'cancelled' ? 'bg-red-500/10 text-red-400 border border-red-500/30' :
+                          'bg-amber-500/10 text-amber-400 border border-amber-500/30'
+                        }`}>
+                          {d.status === 'paid' ? 'שולם / זוכה' : d.status === 'cancelled' ? 'בוטל' : 'לא שולם'}
+                        </span>
+                        {d.appeal_status === 'pending' && (
+                          <span className="text-[10px] px-2 py-0.5 rounded bg-red-500/20 text-red-300 font-bold">
+                            ⏳ ערעור ממתין
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => setEditDebtModal({
+                            isOpen: true,
+                            debt_id: d.debt_id,
+                            amount: String(d.amount),
+                            reason: d.reason || '',
+                            status: d.status,
+                          })}
+                          className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 transition cursor-pointer"
+                          title="ערוך פרטי חיוב/זיכוי"
+                        >
+                          <Edit3 className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          onClick={async () => {
+                            await deleteDebt(d.debt_id);
+                            setFeedback(`🗑️ חיוב #${d.debt_id} בוטל ונמחק בהצלחה.`);
+                            setTimeout(() => setFeedback(null), 3000);
+                          }}
+                          className="p-1 rounded bg-slate-800 hover:bg-red-500/20 text-slate-400 hover:text-red-400 transition cursor-pointer"
+                          title="מחק / בטל חיוב"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between text-slate-400 text-[11px]">
+                      <span>
+                        נהג: <strong className="text-white">{driver?.full_name || `ID ${d.driver_id}`}</strong> {driver?.phone ? `(${driver.phone})` : ''}
+                      </span>
+                      <span>{d.reason}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Appeals Tab */}
       {activeTab === 'appeals' && (
         <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-5 shadow-sm space-y-4">
           <h3 className="font-extrabold text-sm text-white flex items-center gap-2">
@@ -361,7 +569,7 @@ export const StationManagerDashboard: React.FC = () => {
                         className="flex-1 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold transition flex items-center justify-center gap-1 shadow cursor-pointer"
                       >
                         <CheckCircle className="w-3.5 h-3.5" />
-                        <span>בטל חיוב (זכה נהג)</span>
+                        <span>בטל חיוב (זכה נהג 🍏)</span>
                       </button>
                       <button
                         onClick={() => handleResolveAppeal(debt.debt_id, false)}
@@ -376,6 +584,326 @@ export const StationManagerDashboard: React.FC = () => {
               })}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Charge / Credit Modal */}
+      {chargeCreditModal.isOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-md w-full p-5 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h4 className="font-extrabold text-base text-white">
+                {chargeCreditModal.type === 'credit' ? '🍏 זיכוי נהג בתחנה' : '🍓 חיוב נהג בעמלה'}
+              </h4>
+              <button
+                onClick={() => setChargeCreditModal((prev) => ({ ...prev, isOpen: false }))}
+                className="text-slate-400 hover:text-white cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                let amt = parseFloat(chargeCreditModal.amount);
+                if (!chargeCreditModal.driver_id || isNaN(amt) || amt === 0) return;
+
+                const isCredit = chargeCreditModal.type === 'credit' || amt < 0;
+                const finalAmt = Math.abs(amt);
+
+                if (isCredit) {
+                  await creditDriverDebt(
+                    chargeCreditModal.driver_id,
+                    finalAmt,
+                    chargeCreditModal.reason.trim() || 'זיכוי נהג (🍏)',
+                    myStationId
+                  );
+                  setFeedback(`🍏 הנהג זוכה ב-₪${finalAmt.toFixed(2)} בהצלחה!`);
+                } else {
+                  await chargeDriverDebt(
+                    chargeCreditModal.driver_id,
+                    finalAmt,
+                    chargeCreditModal.reason.trim() || 'עמלת נסיעה (🍓)',
+                    myStationId,
+                    chargeCreditModal.order_id ? parseInt(chargeCreditModal.order_id, 10) : undefined
+                  );
+                  setFeedback(`🍓 הנהג חויב ב-₪${finalAmt.toFixed(2)} בהצלחה.`);
+                }
+
+                setChargeCreditModal((prev) => ({ ...prev, isOpen: false }));
+                setTimeout(() => setFeedback(null), 4000);
+              }}
+              className="space-y-3.5 text-xs"
+            >
+              {/* Type Switcher */}
+              <div className="flex gap-2 p-1 bg-slate-950 border border-slate-800 rounded-xl">
+                <button
+                  type="button"
+                  onClick={() => setChargeCreditModal((prev) => ({ ...prev, type: 'charge', reason: 'עמלת נסיעה (🍓)' }))}
+                  className={`flex-1 py-2 rounded-lg font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                    chargeCreditModal.type === 'charge' ? 'bg-amber-500 text-slate-950 shadow' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <span>🍓</span>
+                  <span>חיוב עמלה</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setChargeCreditModal((prev) => ({ ...prev, type: 'credit', reason: 'זיכוי נהג (🍏)' }))}
+                  className={`flex-1 py-2 rounded-lg font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                    chargeCreditModal.type === 'credit' ? 'bg-emerald-500 text-slate-950 shadow' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <span>🍏</span>
+                  <span>זיכוי נהג</span>
+                </button>
+              </div>
+
+              <div>
+                <label className="text-slate-300 block mb-1 font-bold">בחר נהג</label>
+                <select
+                  value={chargeCreditModal.driver_id}
+                  onChange={(e) => setChargeCreditModal((prev) => ({ ...prev, driver_id: Number(e.target.value) }))}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white font-bold"
+                  required
+                >
+                  <option value="">-- בחר נהג --</option>
+                  {users.map((u) => (
+                    <option key={u.user_id} value={u.user_id}>
+                      {u.full_name} ({u.phone || 'ללא טלפון'}) | חוב: ₪{u.debt_balance.toFixed(2)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-slate-300 block mb-1 font-bold">סכום (₪)</label>
+                  <input
+                    type="number"
+                    step="0.5"
+                    placeholder="סכום (גם עם - לזיכוי)"
+                    value={chargeCreditModal.amount}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val.startsWith('-')) {
+                        setChargeCreditModal((prev) => ({
+                          ...prev,
+                          type: 'credit',
+                          amount: val.replace('-', ''),
+                          reason: prev.reason === 'עמלת נסיעה (🍓)' ? 'זיכוי נהג (🍏)' : prev.reason
+                        }));
+                      } else {
+                        setChargeCreditModal((prev) => ({ ...prev, amount: val }));
+                      }
+                    }}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white font-bold font-mono"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="text-slate-300 block mb-1 font-bold">מספר קריאה (אופציונלי)</label>
+                  <input
+                    type="number"
+                    placeholder="למשל 1005"
+                    value={chargeCreditModal.order_id}
+                    onChange={(e) => setChargeCreditModal((prev) => ({ ...prev, order_id: e.target.value }))}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white font-mono"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-slate-300 block mb-1 font-bold">סיבת הפעולה</label>
+                <input
+                  type="text"
+                  placeholder={chargeCreditModal.type === 'credit' ? 'למשל: זיכוי בגין ביטול נסיעה' : 'למשל: עמלת נסיעה 10%'}
+                  value={chargeCreditModal.reason}
+                  onChange={(e) => setChargeCreditModal((prev) => ({ ...prev, reason: e.target.value }))}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white"
+                  required
+                />
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setChargeCreditModal((prev) => ({ ...prev, isOpen: false }))}
+                  className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold cursor-pointer"
+                >
+                  ביטול
+                </button>
+                <button
+                  type="submit"
+                  className={`flex-1 py-2.5 rounded-xl font-extrabold text-slate-950 shadow flex items-center justify-center gap-1.5 cursor-pointer ${
+                    chargeCreditModal.type === 'credit' ? 'bg-emerald-500 hover:bg-emerald-400' : 'bg-amber-500 hover:bg-amber-400'
+                  }`}
+                >
+                  <span>{chargeCreditModal.type === 'credit' ? '🍏' : '🍓'}</span>
+                  <span>{chargeCreditModal.type === 'credit' ? 'אשר זיכוי 🍏' : 'אשר חיוב 🍓'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Debt Modal */}
+      {editDebtModal.isOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-md w-full p-5 space-y-4 shadow-2xl text-xs">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h4 className="font-extrabold text-base text-white">עריכת חיוב/זיכוי #{editDebtModal.debt_id}</h4>
+              <button onClick={() => setEditDebtModal((prev) => ({ ...prev, isOpen: false }))} className="text-slate-400 hover:text-white cursor-pointer">✕</button>
+            </div>
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                await updateDebt(editDebtModal.debt_id, {
+                  amount: parseFloat(editDebtModal.amount),
+                  reason: editDebtModal.reason,
+                  status: editDebtModal.status,
+                });
+                setEditDebtModal((prev) => ({ ...prev, isOpen: false }));
+                setFeedback(`✅ פרטי החיוב עודכנו בהצלחה.`);
+                setTimeout(() => setFeedback(null), 3000);
+              }}
+              className="space-y-3"
+            >
+              <div>
+                <label className="text-slate-300 block mb-1 font-bold">סכום (₪)</label>
+                <input
+                  type="number"
+                  step="0.5"
+                  value={editDebtModal.amount}
+                  onChange={(e) => setEditDebtModal((prev) => ({ ...prev, amount: e.target.value }))}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white font-mono font-bold"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="text-slate-300 block mb-1 font-bold">סיבה</label>
+                <input
+                  type="text"
+                  value={editDebtModal.reason}
+                  onChange={(e) => setEditDebtModal((prev) => ({ ...prev, reason: e.target.value }))}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="text-slate-300 block mb-1 font-bold">סטטוס חיוב</label>
+                <select
+                  value={editDebtModal.status}
+                  onChange={(e) => setEditDebtModal((prev) => ({ ...prev, status: e.target.value as any }))}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white"
+                >
+                  <option value="unpaid">לא שולם (unpaid)</option>
+                  <option value="paid">שולם / זוכה (paid)</option>
+                  <option value="cancelled">בוטל (cancelled)</option>
+                </select>
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setEditDebtModal((prev) => ({ ...prev, isOpen: false }))}
+                  className="flex-1 py-2.5 rounded-xl bg-slate-800 text-slate-300 font-bold cursor-pointer"
+                >
+                  ביטול
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold cursor-pointer"
+                >
+                  שמור שינויים
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Order Modal */}
+      {editOrderModal.isOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-md w-full p-5 space-y-4 shadow-2xl text-xs">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <h4 className="font-extrabold text-base text-white">עריכת קריאה #{editOrderModal.order_id}</h4>
+              <button onClick={() => setEditOrderModal((prev) => ({ ...prev, isOpen: false }))} className="text-slate-400 hover:text-white cursor-pointer">✕</button>
+            </div>
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                await updateOrder(editOrderModal.order_id, {
+                  price: parseFloat(editOrderModal.price),
+                  text: editOrderModal.text,
+                  status: editOrderModal.status,
+                });
+                setEditOrderModal((prev) => ({ ...prev, isOpen: false }));
+                setFeedback(`✅ קריאה #${editOrderModal.order_id} עודכנה בהצלחה.`);
+                setTimeout(() => setFeedback(null), 3000);
+              }}
+              className="space-y-3"
+            >
+              <div>
+                <label className="text-slate-300 block mb-1 font-bold">מחיר קריאה (₪)</label>
+                <input
+                  type="number"
+                  step="1"
+                  value={editOrderModal.price}
+                  onChange={(e) => setEditOrderModal((prev) => ({ ...prev, price: e.target.value }))}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white font-mono font-bold"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="text-slate-300 block mb-1 font-bold">תוכן הקריאה</label>
+                <textarea
+                  rows={4}
+                  value={editOrderModal.text}
+                  onChange={(e) => setEditOrderModal((prev) => ({ ...prev, text: e.target.value }))}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white whitespace-pre-wrap"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="text-slate-300 block mb-1 font-bold">סטטוס קריאה</label>
+                <select
+                  value={editOrderModal.status}
+                  onChange={(e) => setEditOrderModal((prev) => ({ ...prev, status: e.target.value as any }))}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl p-2.5 text-white"
+                >
+                  <option value="open">פתוחה לנהגים (open)</option>
+                  <option value="assigned">משוריינת לנהג (assigned)</option>
+                  <option value="closed">הושלמה ונסגרה (closed)</option>
+                  <option value="cancelled">בוטלה (cancelled)</option>
+                </select>
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setEditOrderModal((prev) => ({ ...prev, isOpen: false }))}
+                  className="flex-1 py-2.5 rounded-xl bg-slate-800 text-slate-300 font-bold cursor-pointer"
+                >
+                  ביטול
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold cursor-pointer"
+                >
+                  שמור שינויים
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
 

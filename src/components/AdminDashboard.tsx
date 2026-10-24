@@ -40,6 +40,7 @@ export const AdminDashboard: React.FC = () => {
     updateStation,
     updateUserRoleAndStation,
     chargeDriverDebt,
+    creditDriverDebt,
     updateDebt,
     deleteDebt,
     resolveDebtAppeal,
@@ -90,6 +91,7 @@ export const AdminDashboard: React.FC = () => {
 
   const [chargeDebtModal, setChargeDebtModal] = useState<{
     isOpen: boolean;
+    type: 'charge' | 'credit';
     driver_id: number;
     amount: string;
     reason: string;
@@ -97,6 +99,7 @@ export const AdminDashboard: React.FC = () => {
     order_id: string;
   }>({
     isOpen: false,
+    type: 'charge',
     driver_id: 0,
     amount: '20',
     reason: 'עמלת נסיעה (🍓)',
@@ -886,6 +889,7 @@ export const AdminDashboard: React.FC = () => {
                     onClick={() =>
                       setChargeDebtModal({
                         isOpen: true,
+                        type: 'charge',
                         driver_id: users.find((u) => u.role === 'user')?.user_id || users[0]?.user_id || 0,
                         amount: '20',
                         reason: 'עמלת נסיעה (🍓)',
@@ -1214,10 +1218,10 @@ export const AdminDashboard: React.FC = () => {
               <div>
                 <h3 className="font-extrabold text-base text-white flex items-center gap-2">
                   <span>🍓</span>
-                  <span>הוספת חיוב / עמלה לנהג</span>
+                  <span>הוספת חיוב (🍓) או זיכוי (🍏) לנהג</span>
                 </h3>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  החיוב יירשם ביומן והנהג יקבל מיד התראה לפרטי בטלגרם עם כפתור ערעור
+                  הפעולה תירשם ביומן והנהג יקבל מיד הודעה ישירה לטלגרם
                 </p>
               </div>
               <button
@@ -1231,21 +1235,64 @@ export const AdminDashboard: React.FC = () => {
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                const amt = parseFloat(chargeDebtModal.amount);
-                if (!chargeDebtModal.driver_id || isNaN(amt) || amt <= 0) return;
-                chargeDriverDebt(
-                  chargeDebtModal.driver_id,
-                  amt,
-                  chargeDebtModal.reason.trim() || 'עמלת נסיעה (🍓)',
-                  chargeDebtModal.station_id,
-                  chargeDebtModal.order_id ? parseInt(chargeDebtModal.order_id, 10) : undefined
-                );
+                let amt = parseFloat(chargeDebtModal.amount);
+                if (!chargeDebtModal.driver_id || isNaN(amt) || amt === 0) return;
+                
+                const isCredit = chargeDebtModal.type === 'credit' || amt < 0;
+                const finalAmt = Math.abs(amt);
+
+                if (isCredit) {
+                  creditDriverDebt(
+                    chargeDebtModal.driver_id,
+                    finalAmt,
+                    chargeDebtModal.reason.trim() || 'זיכוי נהג (🍏)',
+                    chargeDebtModal.station_id
+                  );
+                } else {
+                  chargeDriverDebt(
+                    chargeDebtModal.driver_id,
+                    finalAmt,
+                    chargeDebtModal.reason.trim() || 'עמלת נסיעה (🍓)',
+                    chargeDebtModal.station_id,
+                    chargeDebtModal.order_id ? parseInt(chargeDebtModal.order_id, 10) : undefined
+                  );
+                }
                 setChargeDebtModal((prev) => ({ ...prev, isOpen: false }));
               }}
               className="space-y-4 text-xs"
             >
+              {/* סוג פעולה: חיוב או זיכוי */}
+              <div className="flex gap-2 p-1 bg-slate-950 border border-slate-800 rounded-xl">
+                <button
+                  type="button"
+                  onClick={() => setChargeDebtModal((prev) => ({ ...prev, type: 'charge', reason: 'עמלת נסיעה (🍓)' }))}
+                  className={`flex-1 py-2 rounded-lg font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                    chargeDebtModal.type === 'charge'
+                      ? 'bg-amber-500 text-slate-950 shadow'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <span>🍓</span>
+                  <span>חיוב עמלה / קנס</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setChargeDebtModal((prev) => ({ ...prev, type: 'credit', reason: 'זיכוי נהג (🍏)' }))}
+                  className={`flex-1 py-2 rounded-lg font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                    chargeDebtModal.type === 'credit'
+                      ? 'bg-emerald-500 text-slate-950 shadow'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <span>🍏</span>
+                  <span>זיכוי נהג (הפחתת חוב)</span>
+                </button>
+              </div>
+
               <div>
-                <label className="text-slate-300 block mb-1 font-bold">בחר נהג לחיוב</label>
+                <label className="text-slate-300 block mb-1 font-bold">
+                  {chargeDebtModal.type === 'credit' ? 'בחר נהג לזיכוי 🍏' : 'בחר נהג לחיוב 🍓'}
+                </label>
                 <select
                   value={chargeDebtModal.driver_id}
                   onChange={(e) =>
@@ -1257,8 +1304,7 @@ export const AdminDashboard: React.FC = () => {
                   <option value="">-- בחר נהג --</option>
                   {users.map((u) => (
                     <option key={u.user_id} value={u.user_id}>
-                      {u.full_name} (מזהה {u.user_id}) - {ROLE_NAMES[u.role] || u.role} | חוב: ₪
-                      {u.debt_balance.toFixed(2)}
+                      {u.full_name} (מזהה {u.user_id}) - {ROLE_NAMES[u.role] || u.role} | חוב נוכחי: ₪{u.debt_balance.toFixed(2)}
                     </option>
                   ))}
                 </select>
@@ -1266,7 +1312,7 @@ export const AdminDashboard: React.FC = () => {
 
               <div>
                 <label className="text-slate-300 block mb-1 font-bold">
-                  🏢 שיוך לתחנה (סעיף 4א - בחירת תחנה מפורשת ולא תחנה 1)
+                  🏢 שיוך לתחנה
                 </label>
                 <select
                   value={chargeDebtModal.station_id}
@@ -1286,14 +1332,28 @@ export const AdminDashboard: React.FC = () => {
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="text-slate-300 block mb-1 font-bold">סכום לחיוב (₪)</label>
+                  <label className="text-slate-300 block mb-1 font-bold">
+                    {chargeDebtModal.type === 'credit' ? 'סכום לזיכוי (₪)' : 'סכום לחיוב (₪)'}
+                  </label>
                   <input
                     type="number"
                     step="0.5"
-                    min="1"
+                    placeholder="הזן סכום (ניתן גם עם מינוס לזיכוי)"
                     value={chargeDebtModal.amount}
-                    onChange={(e) => setChargeDebtModal((prev) => ({ ...prev, amount: e.target.value }))}
-                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-amber-500 font-bold"
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val.startsWith('-')) {
+                        setChargeDebtModal((prev) => ({
+                          ...prev,
+                          type: 'credit',
+                          amount: val.replace('-', ''),
+                          reason: prev.reason === 'עמלת נסיעה (🍓)' ? 'זיכוי נהג (🍏)' : prev.reason
+                        }));
+                      } else {
+                        setChargeDebtModal((prev) => ({ ...prev, amount: val }));
+                      }
+                    }}
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-amber-500 font-bold font-mono"
                     required
                   />
                 </div>
@@ -1311,10 +1371,12 @@ export const AdminDashboard: React.FC = () => {
               </div>
 
               <div>
-                <label className="text-slate-300 block mb-1 font-bold">סיבת החיוב / פירוט הנסיעה</label>
+                <label className="text-slate-300 block mb-1 font-bold">
+                  {chargeDebtModal.type === 'credit' ? 'סיבת הזיכוי (🍏)' : 'סיבת החיוב / פירוט הנסיעה'}
+                </label>
                 <input
                   type="text"
-                  placeholder="למשל: עמלת נסיעה 10% ירושלים-בני ברק"
+                  placeholder={chargeDebtModal.type === 'credit' ? 'למשל: זיכוי עקב ביטול נסיעה' : 'למשל: עמלת נסיעה 10% ירושלים-בני ברק'}
                   value={chargeDebtModal.reason}
                   onChange={(e) => setChargeDebtModal((prev) => ({ ...prev, reason: e.target.value }))}
                   className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-amber-500"
@@ -1326,16 +1388,20 @@ export const AdminDashboard: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setChargeDebtModal((prev) => ({ ...prev, isOpen: false }))}
-                  className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold"
+                  className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold cursor-pointer"
                 >
                   ביטול
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold shadow flex items-center justify-center gap-1.5"
+                  className={`flex-1 py-2.5 rounded-xl font-extrabold shadow flex items-center justify-center gap-1.5 cursor-pointer ${
+                    chargeDebtModal.type === 'credit'
+                      ? 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
+                      : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
+                  }`}
                 >
-                  <span>🍓</span>
-                  <span>חייב ושלח התראה</span>
+                  <span>{chargeDebtModal.type === 'credit' ? '🍏' : '🍓'}</span>
+                  <span>{chargeDebtModal.type === 'credit' ? 'זכה נהג ושלח התראה' : 'חייב ושלח התראה'}</span>
                 </button>
               </div>
             </form>
