@@ -478,17 +478,20 @@ def _init_db_sync():
         cur.execute("SELECT setting_value FROM deliveries_system_settings WHERE setting_key = 'wipe_rbac_reset_v4'")
         wipe_rbac = cur.fetchone()
         if not wipe_rbac:
-            try:
-                admin_tuple = tuple(ADMIN_IDS)
-                cur.execute(f"DELETE FROM deliveries_users WHERE user_id NOT IN {admin_tuple}")
-                cur.execute(f"DELETE FROM deliveries_driver_cities WHERE user_id NOT IN {admin_tuple}")
-                cur.execute("DELETE FROM deliveries_order_bids")
-                cur.execute("""INSERT INTO deliveries_system_settings (setting_key, setting_value) 
-                               VALUES ('wipe_rbac_reset_v4', 'completed') 
-                               ON CONFLICT (setting_key) DO UPDATE SET setting_value = 'completed'""")
-                logging.info("🧹 טבלת המשתמשים אופסה בהצלחה עבור כל המשתמשים הרגילים (מנהלי המערכת נשמרו)!")
-            except Exception as e:
-                logging.warning(f"Note on wipe_rbac_reset_v4: {e}")
+          try:
+            admin_tuple = tuple(ADMIN_IDS)
+            cur.execute("DELETE FROM deliveries_order_bids")
+            cur.execute("DELETE FROM deliveries_debts")
+            cur.execute("DELETE FROM deliveries_orders")
+            cur.execute(f"DELETE FROM deliveries_driver_cities WHERE user_id NOT IN {admin_tuple}")
+            cur.execute(f"DELETE FROM deliveries_users WHERE user_id NOT IN {admin_tuple}")
+            cur.execute("""INSERT INTO deliveries_system_settings (setting_key, setting_value)
+                           VALUES ('wipe_rbac_reset_v4', 'completed')
+                           ON CONFLICT (setting_key) DO UPDATE SET setting_value = 'completed'""")
+            logging.info("איפוס משתמשים לבדיקת RBAC בוצע בהצלחה")
+          except Exception as e:
+            conn.rollback()
+            logging.warning(f"Note on wipe_rbac_reset_v4: {e}")
 
         # תחנת ברירת מחדל
         cur.execute('''INSERT INTO deliveries_stations (station_id, name, commission_percent) 
